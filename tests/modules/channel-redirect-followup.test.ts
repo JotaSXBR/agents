@@ -1,12 +1,21 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { FakeListChatModel } from "@langchain/core/utils/testing";
+import { MemorySaver } from "@langchain/langgraph";
+import { PrismaPg } from "@prisma/adapter-pg";
+import { PrismaClient } from "@/../generated/prisma/client";
+import { encryptJson } from "@/api/lib/crypto";
 import {
   armRedirectChatFollowUp,
   chatFollowupNudge,
   minutesFromNow,
   parseRedirectFollowUpPayload,
+  redirectFollowUpHandler,
+  retireRedirectFollowUp,
 } from "@/modules/channel-redirect/followup";
 import { CHANNEL_REDIRECT_DEFAULTS } from "@/modules/channel-redirect/service";
-import type { enqueueJob } from "@/modules/scheduler/service";
+import type { ChatwootClient } from "@/modules/chatwoot/client";
+import type { ClaimedJob, enqueueJob } from "@/modules/scheduler/service";
+import { seedChatwootInstance } from "../utils/chatwoot";
 
 describe("parseRedirectFollowUpPayload", () => {
   test("valid chat-stage payload", () => {
@@ -228,5 +237,217 @@ describe("armRedirectChatFollowUp", () => {
     expect(wrongTenant).toBe(false);
     expect(wrongInstance).toBe(false);
     expect(calls).toHaveLength(0);
+  });
+});
+
+// ── The claimed-ladder fence, DB-backed. ──────────────────────────────────────────────────────────
+//
+// Cancelling reaches PENDING rows only, so a ladder the worker had already claimed runs to
+// completion — and this ladder's terminal stage posts a closing on BOTH conversations and resolves
+// them. `retireRedirectFollowUp` stamps every row of the key, claimed ones included; the handler is
+// what reads the stamp.
+
+const appUrl = process.env.TEST_APP_DATABASE_URL;
+const suUrl = process.env.MIGRATION_DATABASE_URL;
+let dbUp = false;
+let su: PrismaClient | undefined;
+let app: PrismaClient | undefined;
+if (appUrl && suUrl) {
+  try {
+    su = new PrismaClient({
+      adapter: new PrismaPg({ connectionString: suUrl }),
+    });
+    await su.$queryRaw`SELECT 1`;
+    app = new PrismaClient({
+      adapter: new PrismaPg({ connectionString: appUrl }),
+    });
+    await app.$queryRaw`SELECT 1`;
+    dbUp = true;
+  } catch {
+    dbUp = false;
+  }
+}
+const appDb = app as PrismaClient;
+const suDb = su as PrismaClient;
+
+describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
+  let tenantId = 0n;
+  let instanceId = 0n;
+  let agentId = 0n;
+  const WIDGET_CONV = 7171;
+  let widgetThread = "";
+
+  const stubClient = () => {
+    const sent: Array<[number, string]> = [];
+    const resolved: number[] = [];
+    const client = {
+      getConversation: async (c: number) => ({
+        id: c,
+        status: "pending",
+        meta: {},
+      }),
+      sendMessage: async (c: number, t: string) => {
+        sent.push([c, t]);
+        return {};
+      },
+      sendPrivateNote: async () => ({}),
+      getConversationLabels: async () => [],
+      setConversationLabels: async () => ({}),
+      toggleStatus: async (c: number) => {
+        resolved.push(c);
+        return {};
+      },
+    } as unknown as ChatwootClient;
+    return { sent, resolved, makeClient: async () => client };
+  };
+
+  beforeAll(async () => {
+    const t = await suDb.tenant.create({
+      data: { name: "LAD", slug: `lad-${process.pid}` },
+    });
+    tenantId = t.id;
+    const inst = await seedChatwootInstance(suDb, {
+      tenantId,
+      accountId: 11,
+      baseUrl: "https://chat.example.com",
+      adminToken: encryptJson("ADMIN"),
+    });
+    instanceId = inst.id;
+    widgetThread = `${tenantId}:${instanceId}:${WIDGET_CONV}`;
+    const llmKey = await suDb.vaultEntry.create({
+      data: { tenantId, name: "llm-key", secret: encryptJson("sk-test") },
+      select: { id: true },
+    });
+    const agent = await suDb.agent.create({
+      data: {
+        tenantId,
+        name: "Atendente",
+        systemPrompt: "Você é prestativa.",
+        modelConfig: {
+          provider: "openai",
+          model: "gpt-4o-mini",
+          credentialRef: `vault:${llmKey.id}`,
+        },
+        settings: {
+          channelRedirect: {
+            enabled: true,
+            entryInboxId: 110,
+            widgetInboxId: 111,
+            chatFollowupEnabled: true,
+          },
+        },
+      },
+    });
+    agentId = agent.id;
+    await suDb.chatwootAgentBot.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        agentId: agent.id,
+        chatwootAgentBotId: 11,
+        accessToken: encryptJson("BOT"),
+        webhookSecret: encryptJson("S"),
+        webhookRouteTokenHash: `lad-route-${process.pid}`,
+        name: "Atendente",
+      },
+    });
+    const inbox = await suDb.inbox.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        chatwootInboxId: 111,
+        name: "Site",
+        agentId: agent.id,
+      },
+    });
+    await suDb.conversation.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        inboxId: inbox.id,
+        chatwootConversationId: WIDGET_CONV,
+        status: "pending",
+        threadId: widgetThread,
+        lastEventAt: new Date(),
+        lastInboundAt: new Date(),
+      },
+    });
+  });
+
+  afterAll(async () => {
+    if (!dbUp) return;
+    await suDb.tenant.delete({ where: { id: tenantId } }).catch(() => {});
+  });
+
+  const claimed = async (): Promise<ClaimedJob> => {
+    const payload = {
+      stage: "chat",
+      widgetThreadId: widgetThread,
+      agentId: agentId.toString(),
+      entryInboxId: 110,
+    };
+    const row = await suDb.schedulerJob.upsert({
+      where: {
+        tenantId_kind_dedupeKey: {
+          tenantId,
+          kind: "REDIRECT_FOLLOWUP",
+          dedupeKey: `redirect-followup:${widgetThread}`,
+        },
+      },
+      create: {
+        tenantId,
+        kind: "REDIRECT_FOLLOWUP",
+        dedupeKey: `redirect-followup:${widgetThread}`,
+        status: "CLAIMED",
+        runAt: new Date(),
+        payload,
+      },
+      update: { status: "CLAIMED", payload },
+    });
+    // The snapshot the worker holds: captured at claim time, before any stamp.
+    return {
+      id: row.id,
+      tenantId,
+      kind: "REDIRECT_FOLLOWUP",
+      payload,
+      attempts: 0,
+      claimSeq: 0,
+    };
+  };
+
+  const deps = () => ({
+    makeModel: () => new FakeListChatModel({ responses: ["Ainda por aí?"] }),
+    checkpointer: new MemorySaver(),
+    persistUsage: async () => {},
+  });
+
+  test("stands down instead of chasing the lead", async () => {
+    const job = await claimed();
+    await retireRedirectFollowUp(tenantId, widgetThread, appDb);
+    const s = stubClient();
+
+    const result = await redirectFollowUpHandler(job, appDb, {
+      ...deps(),
+      makeClient: s.makeClient,
+    });
+
+    // Not just "no message": a retired ladder must not advance either, or the next stage — the one
+    // that resolves BOTH conversations — is simply postponed.
+    expect(result).toEqual({ outcome: "done" });
+    expect(s.sent).toEqual([]);
+    expect(s.resolved).toEqual([]);
+  });
+
+  test("an un-retired ladder still runs", async () => {
+    const job = await claimed();
+    const s = stubClient();
+
+    await redirectFollowUpHandler(job, appDb, {
+      ...deps(),
+      makeClient: s.makeClient,
+    });
+
+    // The control the negative above needs: a fence that stood every ladder down would pass it.
+    expect(s.sent.map(([c]) => c)).toEqual([WIDGET_CONV]);
   });
 });

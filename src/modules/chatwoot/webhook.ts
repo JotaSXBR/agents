@@ -38,6 +38,7 @@ import {
   deliverRedirectClosing,
   followUpDedupeKey,
   resolveRedirectEpisode,
+  retireRedirectFollowUp,
 } from "@/modules/channel-redirect/followup";
 import { runRedirectGate } from "@/modules/channel-redirect/gate";
 import {
@@ -1353,12 +1354,9 @@ async function maybeConsumeCommandOrGate(params: {
       "cancel redirect follow-up",
       "follow-up de redirecionamento",
       () =>
-        cancelPendingJob(
+        retireRedirectFollowUp(
           tenantId,
-          "REDIRECT_FOLLOWUP",
-          followUpDedupeKey(
-            chatwootThreadId(tenantId, instanceId, ladderConversationId),
-          ),
+          chatwootThreadId(tenantId, instanceId, ladderConversationId),
           base,
         ),
     );

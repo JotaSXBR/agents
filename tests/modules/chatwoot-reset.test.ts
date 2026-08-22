@@ -922,6 +922,37 @@ describe.skipIf(!dbUp)(
       });
     });
 
+    // A ladder the worker had ALREADY picked up. Cancelling reaches PENDING rows only, so the row
+    // survives — and this ladder's terminal stage posts a closing on both conversations and resolves
+    // them, after the operator was told the episode was cleared. The stamp is what an in-flight
+    // handler can see; the status is deliberately left alone, because the worker still owns the row.
+    test("a ladder already claimed is tombstoned, not just skipped", async () => {
+      await withRedirectPair(async (_convId, widgetThread) => {
+        await suDb.schedulerJob.create({
+          data: {
+            tenantId,
+            kind: "REDIRECT_FOLLOWUP",
+            dedupeKey: `redirect-followup:${widgetThread}`,
+            status: "CLAIMED",
+            runAt: new Date(),
+            payload: { stage: "closing", widgetThreadId: widgetThread },
+          },
+        });
+        const cw = fakeChatwoot();
+        globalThis.fetch = cw.impl;
+        await sendReset();
+
+        const job = await suDb.schedulerJob.findFirstOrThrow({
+          where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
+          select: { status: true, payload: true },
+        });
+        expect(job.status).toBe("CLAIMED");
+        expect(
+          (job.payload as { cancelledAt?: string })?.cancelledAt,
+        ).toBeString();
+      });
+    });
+
     // The same pair, the other half of its state. `redirectClosedAt` is the CAS that makes the
     // closing deliver at most once, and it lives on the WIDGET row — so clearing only the row the
     // command was typed in left the funnel able to start again and unable to ever finish again:

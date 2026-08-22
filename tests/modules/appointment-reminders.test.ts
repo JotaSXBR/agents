@@ -418,6 +418,41 @@ describe.skipIf(!dbUp)("a reminder retired while claimed", () => {
     expect(s.sent).toEqual([]);
   });
 
+  // The window between the two checks. The first one exists to skip the Google round trip, which
+  // holds this handler for up to ten seconds — long enough for a /reset to land inside it. The
+  // rendezvous is the read itself: the cancellation runs right after the first check answers, which
+  // is exactly the position the network call occupies in production.
+  test("a cancellation that lands after the first check still stops it", async () => {
+    const job = await armed("reminder:evt-3:60");
+    let reads = 0;
+    const racing = appDb.$extends({
+      query: {
+        schedulerJob: {
+          async findUnique({ args, query }) {
+            const res = await query(args);
+            reads += 1;
+            if (reads === 1) {
+              await cancelThreadAppointmentReminders(tenantId, threadId, appDb);
+            }
+            return res;
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+    const s = stubClient();
+
+    await appointmentReminderHandler(job, racing, {
+      makeModel: () => new FakeListChatModel({ responses: ["Lembrete!"] }),
+      makeClient: s.makeClient,
+      checkpointer: new MemorySaver(),
+      persistUsage: async () => {},
+    });
+
+    // Asked twice, and the second is the one that saw it.
+    expect(reads).toBe(2);
+    expect(s.sent).toEqual([]);
+  });
+
   test("an un-cancelled one still reaches the customer", async () => {
     const job = await armed("reminder:evt-2:60");
     const s = stubClient();

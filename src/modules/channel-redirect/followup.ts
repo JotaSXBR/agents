@@ -122,6 +122,38 @@ export async function resolveRedirectEpisode(
   });
 }
 
+// Retire the ladder armed for a widget thread: the pending row cancelled, and EVERY row of the key
+// stamped so an in-flight handler can see it.
+//
+// `cancelPendingJob` alone is not enough here and the gap is the worst one in the feature: it reaches
+// PENDING rows only, so a ladder the worker had already claimed runs to completion — and this
+// ladder's terminal stage posts a closing message on BOTH conversations and resolves them. A /reset
+// would report the episode cleared and the customer would then be said goodbye to and closed.
+//
+// The tombstone is the same mechanism appointment reminders use, kept local to this kind rather than
+// pushed into cancelPendingJob: that primitive has eight callers across four modules, and each of
+// them would need its own handler-side fence to make the change mean anything.
+//
+// A re-arm replaces the payload wholesale (enqueueJob's upsert is authoritative), so a lead who
+// replies in the chat clears the stamp along with the rest of the old payload.
+export async function retireRedirectFollowUp(
+  tenantId: bigint,
+  widgetThreadId: string,
+  base: PrismaClient = basePrisma,
+): Promise<number> {
+  return runScopedOn(base, sysCtx(tenantId), async (db) => {
+    const stamp = JSON.stringify({ cancelledAt: new Date().toISOString() });
+    return db.$executeRaw`
+      UPDATE scheduler_jobs
+         SET status = CASE WHEN status = 'PENDING' THEN 'DONE' ELSE status END,
+             payload = payload || ${stamp}::jsonb,
+             updated_at = now()
+       WHERE tenant_id = ${tenantId}
+         AND kind = 'REDIRECT_FOLLOWUP'
+         AND dedupe_key = ${followUpDedupeKey(widgetThreadId)}`;
+  });
+}
+
 export type RedirectFollowUpStage = "chat" | "whatsapp" | "closing";
 
 export interface RedirectFollowUpPayload {
@@ -373,6 +405,36 @@ export async function redirectFollowUpHandler(
 ): Promise<JobResult> {
   const payload = parseRedirectFollowUpPayload(job.payload);
   if (!payload) return { outcome: "done" };
+
+  // Retired while this row sat claimed? `job.payload` is the claim-time snapshot, which is exactly
+  // the moment before the stamp lands, so the row is re-read. Every stage of this ladder is
+  // customer-visible and the last one resolves both conversations, so the check goes before all of
+  // them — including the reschedule, since advancing a retired ladder just moves the problem.
+  //
+  // A read that fails does NOT retire the job: an unknown answer must not silently drop work that
+  // was legitimately armed.
+  const stamped = await runScopedOn(base, sysCtx(job.tenantId), (db) =>
+    db.schedulerJob.findUnique({
+      where: { id: job.id },
+      select: { payload: true },
+    }),
+  ).catch((err) => {
+    logger.warn(
+      "channel-redirect: could not re-read the cancellation stamp (job=%s): %s",
+      String(job.id),
+      err instanceof Error ? err.message : String(err),
+    );
+    return null;
+  });
+  if (
+    (stamped?.payload as { cancelledAt?: unknown } | null)?.cancelledAt != null
+  ) {
+    logger.info(
+      "channel-redirect: ladder retired while claimed, standing down (job=%s)",
+      String(job.id),
+    );
+    return { outcome: "done" };
+  }
   const parsed = parseThreadId(payload.widgetThreadId);
   if (!parsed || parsed.tenantId !== job.tenantId) return { outcome: "done" };
   const tenantId = job.tenantId;

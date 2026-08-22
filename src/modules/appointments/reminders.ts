@@ -328,29 +328,36 @@ export async function appointmentReminderHandler(
   // Re-read rather than trusted from `job.payload`: that snapshot is from claim time, which is
   // exactly the moment before the stamp lands. A read that fails does NOT suppress the reminder —
   // an unknown answer must not silently drop a customer-facing message that was legitimately armed.
-  const retired = await runScopedOn(base, sysCtx(tenantId), (db) =>
-    db.schedulerJob.findUnique({
-      where: { id: job.id },
-      select: { payload: true },
-    }),
-  ).catch((err) => {
-    logger.warn(
-      "appointment reminder: could not re-read the cancellation stamp (job=%s): %s",
-      String(job.id),
-      err instanceof Error ? err.message : String(err),
-    );
-    return null;
-  });
-  if (
-    retired &&
-    (retired.payload as { cancelledAt?: unknown } | null)?.cancelledAt != null
-  ) {
-    logger.info(
-      "appointment reminder: retired while claimed, not sending (job=%s)",
-      String(job.id),
-    );
-    return { outcome: "done" };
-  }
+  const retired = async (): Promise<boolean> => {
+    const row = await runScopedOn(base, sysCtx(tenantId), (db) =>
+      db.schedulerJob.findUnique({
+        where: { id: job.id },
+        select: { payload: true },
+      }),
+    ).catch((err) => {
+      logger.warn(
+        "appointment reminder: could not re-read the cancellation stamp (job=%s): %s",
+        String(job.id),
+        err instanceof Error ? err.message : String(err),
+      );
+      return null;
+    });
+    if (!row) return false;
+    const stamped =
+      (row.payload as { cancelledAt?: unknown } | null)?.cancelledAt != null;
+    if (stamped) {
+      logger.info(
+        "appointment reminder: retired while claimed, not sending (job=%s)",
+        String(job.id),
+      );
+    }
+    return stamped;
+  };
+
+  // Asked TWICE, and the two calls buy different things. Here it saves the Google round trip, which
+  // holds this handler for up to ten seconds. After it — see below — is where the window actually
+  // closes, because a /reset arriving during that call would otherwise find the answer already read.
+  if (await retired()) return { outcome: "done" };
 
   // Verify the event before nudging: skip if it was cancelled / deleted / already started (e.g. edited
   // directly in Google). A transient lookup failure (undefined) falls through to nudging anyway.
@@ -372,6 +379,10 @@ export async function appointmentReminderHandler(
       if (ev.summary) summary = ev.summary;
     }
   }
+
+  // The boundary that matters: the last thing before the customer hears from us. The check above
+  // ran before a network call long enough for the reset to land inside it.
+  if (await retired()) return { outcome: "done" };
 
   await runAgentNudge({
     tenantId,
