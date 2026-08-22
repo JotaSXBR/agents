@@ -23800,7 +23800,7 @@
                     "type": "string"
                   },
                   "conversationId": {
-                    "description": "Conversation id to attach the quote to (BigInt string).",
+                    "description": "Chatwoot conversation id this quote belongs to. Required for the agent to be able to send it (send_quote matches the quote to the conversation it is called from); a quote generated without it can only be read through this API.",
                     "type": "string"
                   },
                   "snapshot": {
@@ -23900,7 +23900,7 @@
                     "type": "string"
                   },
                   "conversationId": {
-                    "description": "Conversation id to attach the quote to (BigInt string).",
+                    "description": "Chatwoot conversation id this quote belongs to. Required for the agent to be able to send it (send_quote matches the quote to the conversation it is called from); a quote generated without it can only be read through this API.",
                     "type": "string"
                   },
                   "snapshot": {
@@ -24000,7 +24000,7 @@
                     "type": "string"
                   },
                   "conversationId": {
-                    "description": "Conversation id to attach the quote to (BigInt string).",
+                    "description": "Chatwoot conversation id this quote belongs to. Required for the agent to be able to send it (send_quote matches the quote to the conversation it is called from); a quote generated without it can only be read through this API.",
                     "type": "string"
                   },
                   "snapshot": {

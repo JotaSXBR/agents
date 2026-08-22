@@ -752,19 +752,23 @@ export interface ToolsetCtx {
   // (defaults are the real ones). The assertion resolves DNS, so a hermetic test has to stub it —
   // same convention as ToolpackCtx.assertSafe.
   imageDeps?: ImageFetchDeps;
+  // Injectable for tests: where send_quote reads the rendered PDF from (default: the configured
+  // quotes directory).
+  quotesStorageDir?: string;
   turnState?: {
     resolveRequested: boolean;
-    // Mirror of TurnState.pendingImages: send_image queues here and the runtime delivers after the
-    // turn's gates.
-    pendingImages: {
+    // Mirror of TurnState.pendingAttachments: send_image / send_quote queue here and the runtime
+    // delivers after the turn's gates.
+    pendingAttachments: {
       bytes: ArrayBuffer;
       mime: string;
       fileName: string;
       caption?: string;
       order: number;
+      tool: "send_image" | "send_quote";
     }[];
     imagesInFlight: number;
-    imagesSeq: number;
+    attachmentsSeq: number;
   };
   // Structural mirror of HandoffTurnState in tools/native.ts, for the same reason as turnState.
   // Two fields, not one: the line the model wants delivered, and whether the transfer completed.
@@ -778,23 +782,26 @@ export interface ToolBuildDeps {
       conversationId: number;
       turnState?: {
         resolveRequested: boolean;
-        // Mirror of TurnState.pendingImages: send_image queues here and the runtime delivers after the
-        // turn's gates.
-        pendingImages: {
+        // Mirror of TurnState.pendingAttachments: send_image / send_quote queue here and the runtime
+        // delivers after the turn's gates.
+        pendingAttachments: {
           bytes: ArrayBuffer;
           mime: string;
           fileName: string;
           caption?: string;
           order: number;
+          tool: "send_image" | "send_quote";
         }[];
         imagesInFlight: number;
-        imagesSeq: number;
+        attachmentsSeq: number;
       };
       handoffState?: { customerMessage: string | null; completed: boolean };
       transferWithSummary?: boolean;
       handoff?: HandoffConfig;
       handoffTargets?: HandoffTargets;
       tenantId?: bigint;
+      threadId?: string;
+      quotesStorageDir?: string;
       base?: PrismaClient;
       contactDbId?: bigint | null;
       conversationDbId?: bigint | null;
@@ -1088,6 +1095,14 @@ export async function buildToolset(
         handoff: effectiveHandoff,
         handoffTargets,
         tenantId: ctx.tenantId,
+        // send_quote matches a stored quote on the thread key, never on the conversation id alone
+        // (which repeats across a tenant's Chatwoot instances). Absent off a real conversation, and
+        // the tool then declines rather than guessing.
+        threadId:
+          ctx.conversationId > 0
+            ? chatwootThreadId(ctx.tenantId, ctx.instanceId, ctx.conversationId)
+            : undefined,
+        quotesStorageDir: ctx.quotesStorageDir,
         base: ctx.base,
         contactDbId: cfg.contactDbId,
         conversationDbId: cfg.conversationDbId,

@@ -5,6 +5,7 @@ import {
   Calculator,
   CheckCircle2,
   Clock,
+  FileText,
   Image as ImageIcon,
   LayoutGrid,
   type LucideIcon,
@@ -31,6 +32,7 @@ export const NATIVE_TOOL_ICONS: Record<string, LucideIcon> = {
   set_voice_preference: Mic,
   react_to_message: Smile,
   send_image: ImageIcon,
+  send_quote: FileText,
   skip_reply: BellOff,
   calculator: Calculator,
   get_current_time: Clock,
@@ -134,6 +136,15 @@ export function nativeToolMeta(name: string, t: TFunction): NativeToolMeta {
         description: t(
           "nativeTools.send_image.desc",
           "Deliver an image to the customer from its URL, limited to the hosts you allow.",
+        ),
+      };
+    case "send_quote":
+      return {
+        icon,
+        label: t("nativeTools.send_quote.label", "Send quote"),
+        description: t(
+          "nativeTools.send_quote.desc",
+          "Attach this conversation's own generated quote to the reply, as a PDF.",
         ),
       };
     case "skip_reply":

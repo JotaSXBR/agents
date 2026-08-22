@@ -370,9 +370,9 @@ describe("native tools", () => {
     const { client, calls } = recordingClient();
     const turnState = {
       resolveRequested: false,
-      pendingImages: [],
+      pendingAttachments: [],
       imagesInFlight: 0,
-      imagesSeq: 0,
+      attachmentsSeq: 0,
     };
     const tools = buildNativeTools({ client, conversationId: 7, turnState });
     const out = String(await byName(tools, "resolve_conversation").invoke({}));

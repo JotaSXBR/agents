@@ -94,7 +94,7 @@ export const quotesController = new Elysia({
         conversationId: t.Optional(
           t.String({
             description:
-              "Conversation id to attach the quote to (BigInt string).",
+              "Chatwoot conversation id this quote belongs to. Required for the agent to be able to send it (send_quote matches the quote to the conversation it is called from); a quote generated without it can only be read through this API.",
           }),
         ),
         snapshot: t.Object(

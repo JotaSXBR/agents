@@ -1589,6 +1589,10 @@
       "desc": "Deliver an image to the customer from its URL, limited to the hosts you allow.",
       "label": "Send image"
     },
+    "send_quote": {
+      "desc": "Attach this conversation's own generated quote to the reply, as a PDF.",
+      "label": "Send quote"
+    },
     "set_custom_attribute": {
       "desc": "Set a custom attribute on the conversation, the contact, or the kanban card (e.g. lead stage, qualification flag).",
       "label": "Set attribute"

@@ -5,6 +5,10 @@ import config from "@/config";
 import { AppError, NotFoundError } from "@/lib/errors";
 import { type QuoteRenderData, renderQuotePdf } from "@/lib/pdf";
 import { runScopedOn, type TenantContext } from "@/lib/tenancy";
+import {
+  type QuoteDeliveryBlock,
+  quoteDeliveryVerdict,
+} from "@/modules/quotes/deliverable";
 
 // Quote generation. Two-phase + idempotent (the hardened spec): a burst/retry/resume with the same
 // idempotencyKey produces ONE quote and ONE PDF, never N links to the lead.
@@ -53,6 +57,59 @@ function storageKey(tenantId: bigint, quoteId: bigint): string {
   return `${tenantId}/${quoteId}.pdf`;
 }
 
+// The name the CUSTOMER sees on the attachment, and the same one the authenticated route already
+// puts in its Content-Disposition: one artifact, one name, in whatever locale the tenant runs.
+export function quoteFileName(quoteId: bigint | string): string {
+  return `quote-${quoteId}.pdf`;
+}
+
+// A stored PDF, or null when the row points at a file that is not there. The filesystem has no RLS,
+// so the KEY is the boundary: it is only ever resolvable through a tenant-scoped read of the row.
+async function readQuoteBytes(
+  dir: string,
+  key: string,
+): Promise<ArrayBuffer | null> {
+  const file = Bun.file(`${dir}/${key}`);
+  if (!(await file.exists())) return null;
+  return await file.arrayBuffer();
+}
+
+// Chatwoot conversation ids are int4 on our mirror. A caller-supplied value outside that range is
+// not a conversation anybody has; binding it would make Postgres raise on a lookup that meant to
+// answer "no such row".
+const MAX_CHATWOOT_CONVERSATION_ID = 2147483647n;
+
+// The conversation a quote belongs to arrives as a CHATWOOT conversation id, which is unique per
+// Chatwoot account and not per tenant: a tenant running more than one instance holds conversations
+// numbered alike. Every other conversation lookup in the tree keys on (tenant, instance,
+// conversation) for exactly that reason, and this table was the outlier that could afford not to,
+// because nothing read the column. Delivering the PDF to the customer (issue #21) reads it, so the
+// ambiguity became reachable, and the failure it produces is another customer's quote.
+//
+// The row therefore carries the resolved THREAD id, which is unique within the tenant, and the
+// resolution is fail-closed: no mirrored conversation, or more than one, leaves it null and
+// `send_quote` refuses rather than picking. `conversationId` is untouched and stays as the caller
+// wrote it — it is what the console shows, and it is not what delivery matches on.
+async function resolveThreadId(
+  db: Pick<PrismaClient, "conversation">,
+  conversationId: bigint | null | undefined,
+): Promise<string | null> {
+  if (
+    conversationId === null ||
+    conversationId === undefined ||
+    conversationId <= 0n ||
+    conversationId > MAX_CHATWOOT_CONVERSATION_ID
+  ) {
+    return null;
+  }
+  const rows = await db.conversation.findMany({
+    where: { chatwootConversationId: Number(conversationId) },
+    select: { threadId: true },
+    take: 2,
+  });
+  return rows.length === 1 ? (rows[0]?.threadId ?? null) : null;
+}
+
 function isUniqueViolation(err: unknown): boolean {
   return (
     err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002"
@@ -70,13 +127,17 @@ export async function generateQuote(
   // Phase A: race-safe create-or-load of the PENDING row (+ the tenant name for the header,
   // read scoped so it is always the caller's own tenant).
   const loaded = await runScopedOn(base, sysCtx(tenantId), async (db) => {
+    // Resolved BEFORE the create, so the row is born with the key delivery matches on. An explicit
+    // caller-supplied thread wins: it is already the unambiguous form.
+    const threadId =
+      params.threadId ?? (await resolveThreadId(db, params.conversationId));
     await db.quote
       .createMany({
         data: [
           {
             tenantId,
             conversationId: params.conversationId ?? null,
-            threadId: params.threadId ?? null,
+            threadId,
             idempotencyKey: params.idempotencyKey,
             snapshot: snapshot as Prisma.InputJsonValue,
             status: "PENDING",
@@ -154,16 +215,62 @@ export async function getQuotePdf(
       },
     }),
   );
-  if (!row?.pdfStorageKey || row.status !== "READY") {
-    throw new NotFoundError("quote not found");
-  }
-  if (row.revoked) throw new NotFoundError("quote not found");
-  if (row.expiresAt && row.expiresAt.getTime() < Date.now()) {
-    throw new NotFoundError("quote not found");
-  }
-  const file = Bun.file(`${dir}/${row.pdfStorageKey}`);
-  if (!(await file.exists())) throw new NotFoundError("quote not found");
-  return { bytes: await file.arrayBuffer() };
+  // Every block answers the same 404 here, deliberately: which of them it was is information about
+  // a quote this caller may not read. `send_quote` asks the same predicate and DOES name the reason,
+  // because there the answer is a sentence to a customer (modules/quotes/deliverable.ts).
+  const verdict = row ? quoteDeliveryVerdict(row, new Date()) : null;
+  if (!verdict?.ok) throw new NotFoundError("quote not found");
+  const bytes = await readQuoteBytes(dir, verdict.pdfStorageKey);
+  if (!bytes) throw new NotFoundError("quote not found");
+  return { bytes };
+}
+
+// What `send_quote` gets back: the bytes to attach, or the reason there is nothing to attach.
+export type QuoteForDelivery =
+  | { ok: true; id: string; fileName: string; bytes: ArrayBuffer }
+  | { ok: false; reason: "none" | "missing_file" | QuoteDeliveryBlock };
+
+// The quote this conversation would send, for the tool that sends it (issue #21).
+//
+// It reads the thread's MOST RECENT quote and then asks whether that one can go out — never "the
+// most recent one that can". A revised quote supersedes the one before it, and a fallback would
+// attach the price the operator just replaced, silently, at the moment the customer is deciding on
+// it. So a revoked or expired newest quote is a refusal with a reason, not a reason to look further
+// back.
+//
+// Matched on `threadId` and never on `conversationId`: see resolveThreadId for why that column is
+// not unique enough to hand a document to a customer by.
+export async function loadQuoteForDelivery(
+  ctx: TenantContext,
+  threadId: string,
+  base: PrismaClient = basePrisma,
+  storageDir?: string,
+): Promise<QuoteForDelivery> {
+  const dir = storageDir ?? config.quotesStorageDir;
+  const row = await runScopedOn(base, ctx, (db) =>
+    db.quote.findFirst({
+      where: { threadId },
+      orderBy: { id: "desc" },
+      select: {
+        id: true,
+        status: true,
+        pdfStorageKey: true,
+        revoked: true,
+        expiresAt: true,
+      },
+    }),
+  );
+  if (!row) return { ok: false, reason: "none" };
+  const verdict = quoteDeliveryVerdict(row, new Date());
+  if (!verdict.ok) return { ok: false, reason: verdict.block };
+  const bytes = await readQuoteBytes(dir, verdict.pdfStorageKey);
+  if (!bytes) return { ok: false, reason: "missing_file" };
+  return {
+    ok: true,
+    id: String(row.id),
+    fileName: quoteFileName(row.id),
+    bytes,
+  };
 }
 
 export interface QuoteListItem {

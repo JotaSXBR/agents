@@ -33,6 +33,10 @@ import {
   type SendImageConfig,
 } from "@/modules/images/settings";
 import type { SideEffectErrorReporter } from "@/modules/integrations/toolpacks";
+import {
+  loadQuoteForDelivery,
+  type QuoteForDelivery,
+} from "@/modules/quotes/service";
 import { emitOutbound } from "@/modules/webhooks/outbound/service";
 import {
   DEFAULT_TIMEZONE,
@@ -64,11 +68,15 @@ function sysCtx(tenantId: bigint): TenantContext {
 // takeover and discard the reply — and the reply would reopen the conversation anyway).
 export interface TurnState {
   resolveRequested: boolean;
-  // Images the agent asked to send this turn, fetched and validated but NOT yet delivered. They ride
+  // Files the agent asked to send this turn, loaded and validated but NOT yet delivered. They ride
   // the same post-time pipeline as the reply (ownership recheck, supersede gate, output guardrail),
   // because a tool that posts from inside the graph invocation can message a customer whose turn is
   // then discarded — the same reason resolve_conversation is deferred.
-  pendingImages: PendingImage[];
+  //
+  // One queue for every tool that attaches something (send_image, send_quote): the gates a file has
+  // to pass to reach a customer are a property of the TURN, not of what the file is, and a second
+  // queue would be a second place to remember them.
+  pendingAttachments: PendingAttachment[];
   // Downloads accepted but not yet queued. LangGraph's ToolNode runs one response's tool calls with
   // Promise.all, so a batch of send_image calls all reach the ceiling check before any of them has
   // queued anything: without a reservation taken BEFORE the await, every call in the batch reads the
@@ -78,7 +86,7 @@ export interface TurnState {
   // the queue fills in COMPLETION order and the customer would receive the pictures — and the
   // captions written for them — in whatever order the hosts happened to answer. The order the model
   // asked for is the one that matches the words around them.
-  imagesSeq: number;
+  attachmentsSeq: number;
 }
 
 // Isolated from TurnState on purpose: reactive turns and proactive nudges share handoff delivery,
@@ -113,13 +121,16 @@ export function handoffAnsweredTheTurn(
   return !!state && !!state.customerMessage && state.completed;
 }
 
-export interface PendingImage {
+export interface PendingAttachment {
   bytes: ArrayBuffer;
   mime: string;
   fileName: string;
   caption?: string;
   // Position in the model's tool-call order, not in download-completion order.
   order: number;
+  // Which tool queued it. Read by the delivery loop for the flow line and for the failure message:
+  // an operator reading "send_image failed" about a quote learns the wrong thing to go look at.
+  tool: Extract<NativeToolName, "send_image" | "send_quote">;
 }
 
 export interface ToolCtx {
@@ -143,6 +154,11 @@ export interface ToolCtx {
   // For set_voice_preference (a DB write to Contact.voiceReply, RLS-scoped). Absent on paths
   // without a mirrored contact (the tool then no-ops with a message).
   tenantId?: bigint;
+  // For send_quote: the conversation's own thread key (tenant:instance:conversation), which is what
+  // a stored quote is matched on. Composed at turn prep from the three ids rather than passed down
+  // from the runtime, so it is the same string on every path that has all three. Absent ⇒ the tool
+  // declines instead of falling back to a conversation id that is only unique per Chatwoot account.
+  threadId?: string;
   base?: PrismaClient;
   contactDbId?: bigint | null;
   // NOTE: Our Conversation row id, for the write-through that keeps the mirrored attribute bags in
@@ -169,6 +185,9 @@ export interface ToolCtx {
   // the tool refuses every call — the URL is model-supplied, so an unconfigured allowlist must fail
   // closed rather than open.
   sendImage?: SendImageConfig;
+  // Injectable for tests (where send_quote reads the rendered PDF from); defaults to the configured
+  // quotes directory. Same role as fetchImpl below, for the one file this tool reads off disk.
+  quotesStorageDir?: string;
   // Injectable for tests (the image download); default real fetch + assertSafeOutboundUrl. Same
   // convention as ToolpackCtx: the SSRF assertion resolves DNS, so a hermetic test has to stub it.
   fetchImpl?: typeof fetch;
@@ -1053,6 +1072,17 @@ function skipReplyTool(_ctx: ToolCtx) {
   );
 }
 
+// The image half of the shared attachment queue, which is what both send_image ceilings are about.
+function queuedImages(turnState: TurnState): PendingAttachment[] {
+  return turnState.pendingAttachments.filter((a) => a.tool === "send_image");
+}
+
+// The model-facing refusal when a turn has already taken all the images it may carry. Same wording
+// for the count and the byte budget: from the model's side both mean "not this turn".
+function limitReached(): string {
+  return `Limite de imagens deste turno atingido (${SEND_IMAGE_MAX_PER_TURN}). Envie as demais em outra mensagem ou responda com o link em texto.`;
+}
+
 // Sends an image the agent already has a URL for (a product photo from an HTTP tool, an MCP tool or
 // a catalog integration) as a real attachment, instead of pasting a link the customer has to open.
 //
@@ -1060,12 +1090,6 @@ function skipReplyTool(_ctx: ToolCtx) {
 // in the agent's config, never in a tool argument: a prompt injection can write any URL it likes and
 // still not reach a host the operator did not list. See modules/images/fetch for the rest of the
 // fence (SSRF assertion, no redirects, byte cap on the body, type read from the file's signature).
-// The model-facing refusal when a turn has already taken all the images it may carry. Same wording
-// for the count and the byte budget: from the model's side both mean "not this turn".
-function limitReached(): string {
-  return `Limite de imagens deste turno atingido (${SEND_IMAGE_MAX_PER_TURN}). Envie as demais em outra mensagem ou responda com o link em texto.`;
-}
-
 function sendImageTool(ctx: ToolCtx) {
   const cfg = ctx.sendImage ?? SEND_IMAGE_DEFAULTS;
   const hosts = cfg.allowedHosts;
@@ -1098,14 +1122,18 @@ function sendImageTool(ctx: ToolCtx) {
       // BEFORE the await, because the batch runs concurrently — a check that spans the download
       // would be read by every call while the queue is still empty. Bytes are enforced at the other
       // end, where the real size is known; the count keeps the in-flight total bounded meanwhile.
+      // NOTE: Counts IMAGES, not the queue. The queue also carries the turn's quote (send_quote),
+      // which is our own rendered file and is bounded by its own rule — one per turn. Letting it eat
+      // an image slot would make a ceiling the operator reads as "images per message" mean something
+      // else depending on whether a quote went out with them.
       const tooManyQueued =
-        turnState.pendingImages.length + turnState.imagesInFlight >=
+        queuedImages(turnState).length + turnState.imagesInFlight >=
         SEND_IMAGE_MAX_PER_TURN;
       if (tooManyQueued) {
         return limitReached();
       }
       turnState.imagesInFlight++;
-      const order = turnState.imagesSeq++;
+      const order = turnState.attachmentsSeq++;
       try {
         const res = await fetchImageForDelivery(url, cfg, {
           fetchImpl: ctx.fetchImpl,
@@ -1124,19 +1152,20 @@ function sendImageTool(ctx: ToolCtx) {
         // while this one downloaded, and a budget that excludes the candidate lets the last accepted
         // image carry the total past the ceiling. No await between the read and the push, so the
         // pair is atomic.
-        const queuedBytes = turnState.pendingImages.reduce(
+        const queuedBytes = queuedImages(turnState).reduce(
           (n, i) => n + i.bytes.byteLength,
           0,
         );
         if (queuedBytes + res.bytes.byteLength > SEND_IMAGE_MAX_TURN_BYTES) {
           return limitReached();
         }
-        turnState.pendingImages.push({
+        turnState.pendingAttachments.push({
           bytes: res.bytes,
           mime: res.mime,
           fileName: res.fileName,
           caption: caption?.trim() || undefined,
           order,
+          tool: "send_image",
         });
         // NOTE: No file name here. This string is the tool's OUTPUT, and `ToolFlowLogger` stores tool
         // outputs verbatim in `ExecutionLog.detail` — a name derived from the URL path would put back
@@ -1191,6 +1220,97 @@ function sendImageRefusal(reason: ImageFetchFailure, detail?: string): string {
     default:
       return "Não consegui baixar a imagem agora. Responda com o link em texto.";
   }
+}
+
+// Model-facing explanation of why there is no quote to attach. Each one tells the agent what to say
+// or do INSTEAD, because the customer is mid-decision and "I could not send it" with no follow-up is
+// the worst moment in the conversation to leave a gap.
+function sendQuoteRefusal(
+  reason: Exclude<QuoteForDelivery, { ok: true }>["reason"],
+): string {
+  switch (reason) {
+    case "none":
+      return "Não há orçamento gerado para esta conversa, então não há nada para anexar. Não prometa o envio: siga a conversa e só chame esta ferramenta depois que o orçamento existir.";
+    case "not_rendered":
+      return "O orçamento desta conversa ainda está sendo gerado. Avise o cliente que ele chega em instantes e chame esta ferramenta de novo depois.";
+    case "revoked":
+      return "O orçamento desta conversa foi cancelado pela equipe, então não pode ser enviado. Não prometa o envio; ofereça encaminhar para um atendente.";
+    case "expired":
+      return "O orçamento desta conversa expirou, então não pode ser enviado. Ofereça preparar um novo em vez de mandar o antigo.";
+    default:
+      return "Não consegui anexar o orçamento agora. Ofereça encaminhar para um atendente.";
+  }
+}
+
+// Sends the quote this conversation already has, as a PDF attachment. The step the product was
+// missing (issue #21): POST /v1/quotes rendered the document and stored it, and the only way to read
+// it back was a route behind a tenant credential — which is the right default for a file the
+// filesystem cannot scope, and which the customer will never hold.
+//
+// The tool takes NO quote id, and that is a fence rather than a convenience. A quote is addressed to
+// one lead, an id in a tool argument is MODEL-supplied, and inside a tenant every other lead's quote
+// is a valid id: one hallucinated or injected number is somebody else's name and prices delivered to
+// the wrong person. The row is looked up by the conversation the tool is bound to instead, which the
+// model has no way to influence.
+function sendQuoteTool(ctx: ToolCtx) {
+  const guidance = ctx.toolInstructions?.send_quote;
+  return failableTool(
+    async () => {
+      // Queued, not sent, for the same reason as send_image: delivery happens after the turn's
+      // gates, so a turn that is superseded, taken over or blocked must not have already put a
+      // priced document in front of the customer.
+      const turnState = ctx.turnState;
+      if (!turnState) {
+        return "Não é possível anexar o orçamento neste momento (mensagem proativa). Diga ao cliente que ele será enviado na conversa.";
+      }
+      if (!ctx.tenantId || !ctx.threadId) {
+        return "Não é possível anexar o orçamento nesta conversa. Ofereça encaminhar para um atendente.";
+      }
+      // The turn sends AT MOST ONE quote, which is the whole of this tool's ceiling: the file is
+      // ours and small, so the byte budget send_image carries buys nothing here, while a second copy
+      // of the same document in one message is the actual failure mode. Checked twice around the
+      // await because one model response's tool calls run under Promise.all — the check below is the
+      // one that holds (no await between it and the push), and this one only spares the DB read.
+      if (turnState.pendingAttachments.some((a) => a.tool === "send_quote")) {
+        return "O orçamento já vai junto com a sua resposta deste turno.";
+      }
+      const order = turnState.attachmentsSeq++;
+      const found = await loadQuoteForDelivery(
+        sysCtx(ctx.tenantId),
+        ctx.threadId,
+        ctx.base,
+        ctx.quotesStorageDir,
+      );
+      if (!found.ok) {
+        // NOTE: A quote whose file is gone is the operator's problem (a storage volume that did not
+        // come back), not the model's, so it is the one reason marked as an integration failure.
+        // The rest are normal operation from the model's side: it has something useful to say.
+        const message = sendQuoteRefusal(found.reason);
+        return found.reason === "missing_file" ? toolFailure(message) : message;
+      }
+      if (turnState.pendingAttachments.some((a) => a.tool === "send_quote")) {
+        return "O orçamento já vai junto com a sua resposta deste turno.";
+      }
+      turnState.pendingAttachments.push({
+        bytes: found.bytes,
+        mime: "application/pdf",
+        fileName: found.fileName,
+        order,
+        tool: "send_quote",
+      });
+      // NOTE: No title and no id here. This string is the tool's OUTPUT, and `ToolFlowLogger` stores
+      // tool outputs verbatim in `ExecutionLog.detail`, a column that carries no customer data — and
+      // a quote's title is written about a named lead.
+      return "Orçamento pronto para envio; ele vai junto com a sua resposta deste turno.";
+    },
+    {
+      name: "send_quote",
+      description:
+        "Send the customer the QUOTE already prepared for this conversation, as a PDF attached to your reply. Call it when the customer asks for the quote, the price in writing, or a document they can keep — and whenever you are about to describe prices that are already in a prepared quote. It takes no arguments: it always sends this conversation's own quote, so you never need (and never have) a quote number. If there is nothing to send, it says so and you should follow what it tells you instead of promising the document." +
+        (guidance ? `\n\n${guidance}` : ""),
+      schema: z.object({}),
+    },
+  );
 }
 
 // Utility tool: exact arithmetic without a model round-trip. Context-free, so it is also exposed
@@ -1265,6 +1385,7 @@ export function buildNativeTools(
     setVoicePreferenceTool(ctx),
     reactToMessageTool(ctx),
     sendImageTool(ctx),
+    sendQuoteTool(ctx),
     skipReplyTool(ctx),
     calculatorTool(ctx),
     getCurrentTimeTool(ctx),

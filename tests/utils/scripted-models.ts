@@ -284,6 +284,32 @@ export class SendImageThenReplyModel {
   }
 }
 
+// Asks for the conversation's quote and then answers. The tool takes no arguments on purpose (the
+// quote is the conversation's own), so this model is the whole of what a real turn does.
+export class SendQuoteThenReplyModel {
+  constructor(private reply: string) {}
+  async invoke(): Promise<AIMessage> {
+    return new AIMessage(this.reply);
+  }
+  bindTools(_tools: unknown) {
+    const self = this;
+    let n = 0;
+    return {
+      async invoke(): Promise<AIMessage> {
+        n++;
+        return n === 1
+          ? new AIMessage({
+              content: "",
+              tool_calls: [
+                { name: "send_quote", args: {}, id: "call_send_quote" },
+              ],
+            })
+          : new AIMessage(self.reply);
+      },
+    };
+  }
+}
+
 // Queues an image and only then hands off. The image is not a duplicate of the handoff's closing
 // line, so it still belongs to the customer: this is the shape that tells a suppressed duplicate
 // apart from a dropped attachment.

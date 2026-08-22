@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { rm } from "node:fs/promises";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { AIMessage, type BaseMessage } from "@langchain/core/messages";
 import { FakeListChatModel } from "@langchain/core/utils/testing";
@@ -22,6 +23,7 @@ import type { ChatwootClient } from "@/modules/chatwoot/client";
 import type { NormalizedChatwootEvent } from "@/modules/chatwoot/types";
 import { readGuardrailHealth } from "@/modules/guardrails/health";
 import { selectClosedPrefix } from "@/modules/memory/cut";
+import { generateQuote } from "@/modules/quotes/service";
 import { seedChatwootInstance } from "../utils/chatwoot";
 import {
   EmptyThenReplyModel,
@@ -35,6 +37,7 @@ import {
   SendImageOnlyModel,
   SendImageThenHandoffModel,
   SendImageThenReplyModel,
+  SendQuoteThenReplyModel,
   SetVoiceThenHandoffModel,
 } from "../utils/scripted-models";
 
@@ -166,6 +169,8 @@ const IMG_BYTES = new Uint8Array([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
 ]);
 const IMG_URL = "https://cdn.loja.com.br/produtos/camiseta.png";
+const QUOTE_DIR = `/tmp/fazerai-runtime-quotes-${process.pid}`;
+
 const imageDeps = {
   fetchImpl: (async () =>
     new Response(IMG_BYTES, {
@@ -295,6 +300,7 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
         "agents",
         "vault_entries",
         "chatwoot_instances",
+        "quotes",
       ]) {
         await suDb.$executeRawUnsafe(
           `DELETE FROM ${table} WHERE tenant_id = ${tenantId}`,
@@ -306,6 +312,7 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
     }
     await suDb.$disconnect();
     await appDb.$disconnect();
+    await rm(QUOTE_DIR, { recursive: true, force: true });
   });
 
   test("incoming message → agent replies via the bot token", async () => {
@@ -1610,6 +1617,64 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
     ]);
   });
 
+  // Issue #21. The whole point of the feature, end to end: a quote that only existed behind an
+  // authenticated route reaches the customer as a file, through the same gates the reply passes and
+  // ahead of the sentence that introduces it.
+  test("the conversation's quote is delivered as a PDF, before the reply", async () => {
+    await seedConversation(940, null);
+    const quote = await generateQuote({
+      tenantId,
+      idempotencyKey: `runtime-quote-${process.pid}`,
+      snapshot: {
+        title: "Orçamento",
+        currency: "BRL",
+        items: [{ description: "Plano", quantity: 1, unitPrice: 199.9 }],
+      },
+      conversationId: 940n,
+      base: appDb,
+      storageDir: QUOTE_DIR,
+    });
+    const calls: Array<[string, number, string]> = [];
+    const outcome = await runAgentTurn({
+      tenantId,
+      instanceId,
+      agentBotId: 9,
+      event: incoming({ conversationId: 940 }),
+      base: appDb,
+      deps: {
+        makeModel: () =>
+          new SendQuoteThenReplyModel(
+            "Segue o orçamento!",
+          ) as unknown as BaseChatModel,
+        makeClient: makeImageClient(calls),
+        checkpointer: new MemorySaver(),
+        quotesStorageDir: QUOTE_DIR,
+      },
+    });
+    expect(outcome).toBe("posted");
+    expect(calls).toEqual([
+      ["sendFileAttachment", 940, `quote-${quote.id}.pdf`],
+      ["sendMessage", 940, "Segue o orçamento!"],
+    ]);
+
+    // The trail names the tool that queued it. An operator filtering for the tool they granted has
+    // to find the line it produced, and a quote reported as send_image sends them to the image host
+    // allowlist to debug a PDF read off our own disk. emitFlowEvent is fire-and-forget, so poll.
+    let loggedAsQuote = false;
+    for (let i = 0; i < 30 && !loggedAsQuote; i++) {
+      const rows = await suDb.executionLog.findMany({
+        where: { tenantId, stage: "tool" },
+        select: { detail: true },
+      });
+      loggedAsQuote = rows.some((r) => {
+        const d = r.detail as Record<string, unknown> | null;
+        return d?.tool === "send_quote" && d?.outcome === "sent";
+      });
+      if (!loggedAsQuote) await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(loggedAsQuote).toBe(true);
+  });
+
   // "Show me the three colours" is one response with three tool calls, which LangGraph runs with
   // Promise.all. Whoever answers first would otherwise be first in the conversation, and the customer
   // would read "a azul é essa" under the green one.
@@ -1691,9 +1756,11 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
     expect(calls).toEqual([["sendFileAttachment", 932, "imagem.png"]]);
   });
 
-  // The other half of that rule: when the images were the whole turn and NONE of them got through,
-  // nothing reached the customer. Reporting "empty" would let the deferred resolve close an
-  // unanswered conversation, and the callers only record a turn error when the turn throws.
+  // The other half of that rule: when the attachments were the whole turn and NONE of them got
+  // through, nothing reached the customer. Reporting "empty" would let the deferred resolve close an
+  // unanswered conversation, and the callers only record a turn error when the turn throws. The
+  // message says "anexo" and not "imagem" because the queue carries the turn's quote too (issue #21),
+  // and this throw is what an operator reads as the turn's error.
   test("an image-only turn whose delivery fails does not resolve, and fails loudly", async () => {
     await allowImageHost();
     await seedConversation(933, null);
@@ -1713,7 +1780,7 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
           imageDeps,
         },
       }),
-    ).rejects.toThrow(/nenhuma imagem foi entregue/);
+    ).rejects.toThrow(/anexo: nada foi entregue/);
     expect(calls).toEqual([["sendFileAttachment", 933, "imagem.png"]]);
     expect((await mirroredStatus(933)) === "resolved").toBe(false);
   });

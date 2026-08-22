@@ -1594,6 +1594,10 @@
       "desc": "Entrega uma imagem ao cliente a partir da URL dela, restrita aos hosts que você liberar.",
       "label": "Enviar imagem"
     },
+    "send_quote": {
+      "desc": "Anexa à resposta o orçamento já gerado para esta conversa, em PDF.",
+      "label": "Enviar orçamento"
+    },
     "set_custom_attribute": {
       "desc": "Define um atributo personalizado na conversa, no contato ou no card do kanban (ex.: estágio do lead, qualificação).",
       "label": "Definir atributo"
