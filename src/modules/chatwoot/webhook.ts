@@ -35,6 +35,7 @@ import {
 import { linkRedirectConversations } from "@/modules/channel-redirect/cross-link";
 import {
   armRedirectChatFollowUp,
+  cancelContactRedirectFollowUps,
   deliverRedirectClosing,
   followUpDedupeKey,
 } from "@/modules/channel-redirect/followup";
@@ -682,19 +683,10 @@ async function maybeConsumeCommandOrGate(params: {
   tenantId: bigint;
   instanceId: bigint;
   n: NormalizedChatwootEvent;
-  // This persona's Chatwoot agent bot, for the same ownership predicate the turn itself runs. /reset
-  // has to answer "would the agent be allowed to speak here", and an assignment to ANOTHER persona's
-  // bot is one of the ways the answer is no.
-  agentBotId: number | null;
   // The parsed control command (null = not a command) and whether it is ACTIVE (the bound agent is in
   // test mode). Both resolved by the caller before the mirror ran.
   command: ControlCommand | null;
   commandActive: boolean;
-  // Whether the bot may act on this conversation at all (the caller's `shouldBotHandle`). False
-  // reaches here ONLY for a control command, and it changes what the trailing gate may say: the
-  // activation notice tells the operator to send /teste, and on a conversation a human is holding
-  // that instruction is wrong — /teste activates and the agent still says nothing.
-  botOwns: boolean;
   base: PrismaClient;
 }): Promise<boolean> {
   const { tenantId, instanceId, n, command, commandActive, base } = params;
@@ -985,16 +977,24 @@ async function maybeConsumeCommandOrGate(params: {
       );
     }
     // Activation is not the same as being able to answer. /teste only lifts the test-mode silence;
-    // the ownership gate is separate, and a conversation a human is holding stays silent with test
-    // mode fully on. Saying "activated" and nothing else is what made that read as a bug — so when
-    // the gate would still refuse, the acknowledgement says so and names the command that fixes it.
+    // the ownership gate is separate, and a conversation the agent does not hold stays silent with
+    // test mode fully on. Saying "activated" and nothing else is what made that read as a bug — so
+    // when the gate would still refuse, the acknowledgement says so and names the command that fixes
+    // it.
+    //
+    // `stillOurs()` and not the caller's `act`: that one was decided against the bot whose webhook
+    // route the delivery arrived on, and Chatwoot fans a message out to the conversation's assigned
+    // bot AND the inbox's — so on a conversation assigned to another persona's bot the two differ,
+    // and the plain "activated" would be posted about a conversation this inbox's agent cannot
+    // answer in. The wording names no holder for the same reason: a human, another persona's bot and
+    // an `open` status all reach here, and only "not with this agent" is true of all three.
     //
     // Diagnosed here, ACTED ON in /reset: silently pulling a conversation away from an agent who
     // legitimately took it is a bigger surprise than a clear message.
     await postAcknowledgement(
-      params.botOwns
+      (await stillOurs())
         ? "🧪 Modo teste ativado para esta conversa."
-        : "🧪 Modo teste ativado para esta conversa. Mas ela está atribuída a um humano, então o agente ainda não vai responder. Envie /reset para devolvê-la ao agente.",
+        : "🧪 Modo teste ativado para esta conversa. Mas ela não está com este agente, então ele ainda não vai responder. Envie /reset para devolvê-la ao agente.",
     );
     logger.info("chatwoot: /teste activated (conv=%s)", String(conversationId));
     return true;
@@ -1028,45 +1028,6 @@ async function maybeConsumeCommandOrGate(params: {
         return null;
       }
     };
-
-    // The state that decides whether the agent may speak AT ALL, and the reason the rest of this
-    // command was useless after a handoff: `shouldBotHandle` needs both `status === "pending"` and
-    // an assignee that is not a human, and /reset used to touch neither. The canonical test loop —
-    // activate with /teste, let the agent transfer to a human, resolve, start over — ended with a
-    // conversation that announces itself as active and then never answers, and the only thing that
-    // undid it was "Devolver para IA" in the console. That is behind a login, and the common case is
-    // an operator handing a test agent to a client who has Chatwoot and no console at all.
-    //
-    // Asked with the same predicate the turn asks, rather than testing the assignee alone: an
-    // assignment to another persona's bot, or a conversation left `open`, silences it just as
-    // effectively. Skipped when the answer is already yes, so an ordinary reset does not spend two
-    // admin calls undoing nothing.
-    //
-    // `returnConversationToAgent` and not a local unassign+toggle: the ORDER is load-bearing and
-    // documented there, the two cannot collapse into one `toggle_status`, and it mirrors the write
-    // so the very next delivery passes the gate instead of waiting for a Chatwoot event.
-    //
-    // Asked about the persona bound to THIS INBOX, not about `params.agentBotId`. The latter is the
-    // bot whose webhook route the delivery arrived on, and Chatwoot fans a message out to the
-    // conversation's assigned bot AND the inbox's, so on a conversation assigned to another
-    // persona's bot the two differ — and comparing against the route's bot would answer "still
-    // ours" about a conversation the inbox's agent cannot touch. `persona()` is memoized and the
-    // acknowledgement resolves it anyway, so asking costs nothing.
-    const inboxPersona = await persona();
-    if (
-      !shouldBotHandle(
-        {
-          assigneeType: ctx.conv.assigneeType,
-          assigneeId: ctx.conv.assigneeId,
-          status: ctx.conv.status,
-        },
-        { ourAgentBotId: inboxPersona?.chatwootAgentBotId ?? null },
-      )
-    ) {
-      await step("return the conversation to the agent", "atribuição", () =>
-        returnConversationToAgent(sysCtx(tenantId), ctx.conv.id, {}, base),
-      );
-    }
 
     // Clear the agent's memory thread (per contact-inbox / channel), the AgentThread marker (the
     // divider's last-conversation + the ingestion watermark) AND the compacted memory of past
@@ -1264,18 +1225,31 @@ async function maybeConsumeCommandOrGate(params: {
     // already cancelled above; these carry exactly the same argument and were left running, so a
     // reminder from a test booking would fire at the customer referring to an episode the operator
     // believes is erased.
+    //
+    // The redirect ladder is cancelled by CONTACT, not by this conversation's thread: it is keyed by
+    // the WIDGET thread while its stages message and resolve BOTH sides of the pair, so the entry
+    // conversation — where `redirectCount` lives, and therefore where the funnel is re-run from —
+    // cannot reach it by its own key. The reasoning lives with the helper. A conversation with no
+    // mirrored contact keeps the single-key cancel, which is all its thread can name.
     await step(
       "cancel redirect follow-up",
       "follow-up de redirecionamento",
-      () =>
-        cancelPendingJob(
-          tenantId,
-          "REDIRECT_FOLLOWUP",
-          followUpDedupeKey(
-            chatwootThreadId(tenantId, instanceId, conversationId),
-          ),
-          base,
-        ),
+      (): Promise<number | boolean> =>
+        ctx.conv.contactId !== null
+          ? cancelContactRedirectFollowUps(
+              tenantId,
+              instanceId,
+              ctx.conv.contactId,
+              base,
+            )
+          : cancelPendingJob(
+              tenantId,
+              "REDIRECT_FOLLOWUP",
+              followUpDedupeKey(
+                chatwootThreadId(tenantId, instanceId, conversationId),
+              ),
+              base,
+            ),
     );
     await step("cancel appointment reminders", "lembretes de agendamento", () =>
       cancelThreadAppointmentReminders(
@@ -1284,6 +1258,36 @@ async function maybeConsumeCommandOrGate(params: {
         base,
       ),
     );
+
+    // LAST, and that ordering is the point. The state that decides whether the agent may speak AT
+    // ALL — `shouldBotHandle` needs both `status === "pending"` and an assignee that is not a human
+    // — is also the state that makes the NEXT delivery actionable. Returned first, a customer
+    // message arriving while the steps above are still running passes the gate and starts a turn on
+    // the very episode this command is in the middle of erasing: memory not yet cleared, attributes
+    // still set, the previous ladder still armed. Returned last, that window holds the human's
+    // ownership, which is the state the conversation was already in.
+    //
+    // The reason the rest of this command was useless after a handoff, and the reason it runs at
+    // all: the canonical test loop — activate with /teste, let the agent transfer to a human,
+    // resolve, start over — ended with a conversation that announces itself as active and then never
+    // answers, and the only thing that undid it was "Devolver para IA" in the console. That is
+    // behind a login, and the common case is an operator handing a test agent to a client who has
+    // Chatwoot and no console at all.
+    //
+    // `stillOurs()` rather than testing the assignee alone: an assignment to another persona's bot,
+    // or a conversation left `open`, silences it just as effectively — and it asks about the persona
+    // bound to THIS INBOX from a FRESH read, which is the same question the acknowledgement below
+    // asks. Skipped when the answer is already yes, so an ordinary reset does not spend two admin
+    // calls undoing nothing.
+    //
+    // `returnConversationToAgent` and not a local unassign+toggle: the ORDER is load-bearing and
+    // documented there, the two cannot collapse into one `toggle_status`, and it mirrors the write
+    // so the very next delivery passes the gate instead of waiting for a Chatwoot event.
+    if (!(await stillOurs())) {
+      await step("return the conversation to the agent", "atribuição", () =>
+        returnConversationToAgent(sysCtx(tenantId), ctx.conv.id, {}, base),
+      );
+    }
     // Best-effort is the design; announcing a full reset after a partial one is not. The operator
     // typed /reset to get a clean slate, and acting on a conversation that is not clean is worse than
     // knowing what survived.
@@ -1319,14 +1323,14 @@ async function maybeConsumeCommandOrGate(params: {
     if (
       ctx.conv.testNoticeSentAt === null &&
       (await postPrivateNote(
-        params.botOwns
+        (await stillOurs())
           ? "🧪 Este agente está em modo teste. Ele não responde automaticamente nesta conversa. Envie /teste para ativar as respostas aqui."
           : // This notice fires ONLY while the conversation has never been activated, and `/reset`
             // needs `testActivatedAt` to run (shouldRunReset) — so pointing at it alone would send
             // the operator down the same no-op path, and the one-shot watermark would then suppress
             // any further guidance. Both commands, in the order that works: /teste lifts the
-            // test-mode silence, /reset returns the conversation the human is holding.
-            "🧪 Este agente está em modo teste e esta conversa está atribuída a um humano, então ele não vai responder. Envie /teste para ativar as respostas aqui e, em seguida, /reset para devolver a conversa ao agente.",
+            // test-mode silence, /reset returns the conversation to the agent.
+            "🧪 Este agente está em modo teste e esta conversa não está com ele, então ele não vai responder. Envie /teste para ativar as respostas aqui e, em seguida, /reset para devolver a conversa ao agente.",
       ))
     ) {
       try {
@@ -1782,8 +1786,6 @@ export async function processChatwootDelivery(
       n,
       command,
       commandActive,
-      agentBotId: params.agentBotId,
-      botOwns: act,
       base,
     });
     if (!consumed) {

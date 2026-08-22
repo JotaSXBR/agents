@@ -672,6 +672,39 @@ describe.skipIf(!dbUp)(
       ).toEqual([]);
     });
 
+    // WHEN the conversation goes back to the agent, which is a different question from whether it
+    // does. Returning it is what makes the NEXT delivery actionable, so a customer message arriving
+    // while the cleanup is still running would pass the gate and start a turn on the episode this
+    // command is halfway through erasing. The assignment is therefore the LAST thing the reset
+    // touches — everything before it runs while the human still holds the conversation.
+    test("the conversation goes back to the agent only after the episode is cleared", async () => {
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      await sendReset("/reset", CONV_ID, {
+        status: "open",
+        assigneeType: "User",
+      });
+
+      const assignmentAt = cw.calls.findIndex((c) =>
+        c.path.endsWith(`/conversations/${CONV_ID}/assignments`),
+      );
+      expect(assignmentAt).toBeGreaterThan(-1);
+      // Every cleanup call the command makes, by the endpoint it lands on. The acknowledgement is
+      // excluded on purpose: it is the one thing that SHOULD come after the return.
+      const cleanupAt = cw.calls
+        .map((c, i) => [c, i] as const)
+        .filter(
+          ([c]) =>
+            c.path.endsWith("/custom_attributes") ||
+            c.path.endsWith("/labels") ||
+            c.path.includes("/kanban/tasks/") ||
+            (c.method === "PUT" && c.path.includes("/contacts/")),
+        )
+        .map(([, i]) => i);
+      expect(cleanupAt.length).toBeGreaterThan(0);
+      expect(Math.max(...cleanupAt)).toBeLessThan(assignmentAt);
+    });
+
     // The redirect gate's anchors, which /reset ignored while clearing the three notice watermarks
     // right next to them. Same shape, same purpose, opposite treatment: once the redirect has fired,
     // `redirectCount` is at its cap and the cooldown anchor is set, so the operator who resets to run
@@ -768,6 +801,176 @@ describe.skipIf(!dbUp)(
       await suDb.schedulerJob.deleteMany({ where: { tenantId } });
     });
 
+    // The ladder is keyed by the WIDGET thread, and its stages act on BOTH sides of the pair: stage 2
+    // re-sends the link on the WhatsApp ENTRY conversation, stage 3 closes and resolves both. So the
+    // entry conversation — which is where `redirectCount` lives, and therefore where the operator
+    // re-runs the funnel from — cannot reach it by its own thread id. Cancelling only that key left
+    // the previous episode's ladder free to message and resolve the conversation just cleared.
+    test("the redirect ladder is cancelled from the entry side of the pair", async () => {
+      const contact = await suDb.conversation.findFirstOrThrow({
+        where: { tenantId, chatwootConversationId: CONV_ID },
+        select: { contactId: true, inboxId: true },
+      });
+      const widgetThread = `${tenantId}:${instanceId}:44`;
+      await suDb.conversation.create({
+        data: {
+          tenantId,
+          chatwootInstanceId: instanceId,
+          inboxId: contact.inboxId,
+          contactId: contact.contactId,
+          chatwootConversationId: 44,
+          contactInboxId: 304,
+          status: "pending",
+          threadId: widgetThread,
+        },
+      });
+      await suDb.schedulerJob.create({
+        data: {
+          tenantId,
+          kind: "REDIRECT_FOLLOWUP",
+          dedupeKey: `redirect-followup:${widgetThread}`,
+          runAt: new Date(Date.now() + 3_600_000),
+          payload: { stage: "closing", widgetThreadId: widgetThread },
+        },
+      });
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      // Typed on the ENTRY conversation, whose own key was never enqueued.
+      await sendReset();
+
+      const job = await suDb.schedulerJob.findFirstOrThrow({
+        where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
+        select: { status: true },
+      });
+      expect(job.status).toBe("DONE");
+      await suDb.schedulerJob.deleteMany({ where: { tenantId } });
+      await suDb.conversation.deleteMany({
+        where: { tenantId, chatwootConversationId: 44 },
+      });
+    });
+
+    // The fence on that widening. A Contact is unique per TENANT, not per Chatwoot instance, so a
+    // tenant running two accounts shares one contact row across both — and the ladder key is built
+    // from THIS instance's id plus the conversation id, which on another instance is just some other
+    // conversation's number. Without the instance predicate the reset reaches across and cancels a
+    // ladder belonging to a conversation nobody touched.
+    test("the ladder cancel does not reach the contact's other Chatwoot instance", async () => {
+      const mine = await suDb.conversation.findFirstOrThrow({
+        where: { tenantId, chatwootConversationId: CONV_ID },
+        select: { contactId: true },
+      });
+      const other = await seedChatwootInstance(suDb, {
+        tenantId,
+        accountId: 2,
+        baseUrl: "https://203.0.113.11:9",
+        adminToken: encryptJson(ADMIN_TOKEN),
+      });
+      const otherInbox = await suDb.inbox.create({
+        data: {
+          tenantId,
+          chatwootInstanceId: other.id,
+          chatwootInboxId: 8,
+          name: "Outra conta",
+        },
+      });
+      await suDb.conversation.create({
+        data: {
+          tenantId,
+          chatwootInstanceId: other.id,
+          inboxId: otherInbox.id,
+          contactId: mine.contactId,
+          chatwootConversationId: 46,
+          contactInboxId: 306,
+          status: "pending",
+          threadId: `${tenantId}:${other.id}:46`,
+        },
+      });
+      // Conversation 46 of THIS instance is a different conversation entirely, and this is its ladder.
+      await suDb.schedulerJob.create({
+        data: {
+          tenantId,
+          kind: "REDIRECT_FOLLOWUP",
+          dedupeKey: `redirect-followup:${tenantId}:${instanceId}:46`,
+          runAt: new Date(Date.now() + 3_600_000),
+          payload: { stage: "chat" },
+        },
+      });
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      await sendReset();
+
+      const job = await suDb.schedulerJob.findFirstOrThrow({
+        where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
+        select: { status: true },
+      });
+      expect(job.status).toBe("PENDING");
+      await suDb.schedulerJob.deleteMany({ where: { tenantId } });
+      await suDb.conversation.deleteMany({
+        where: { tenantId, chatwootConversationId: 46 },
+      });
+      await suDb.inbox.delete({ where: { id: otherInbox.id } });
+      await suDb.chatwootInstance.delete({ where: { id: other.id } });
+    });
+
+    // And the opposite fence on the reminders. They are keyed `reminder:<eventId>:<offset>`, so the
+    // command has to find them by the thread their payload carries — but going from that thread back
+    // to the EVENT and cancelling the whole prefix reaches outside the conversation that typed the
+    // command: a reschedule re-arms the surviving offsets with whichever conversation asked for it,
+    // while already-fired rows keep the old thread. One reset would then retire a live reminder
+    // belonging to a conversation nobody touched.
+    test("the reminder cancellation stops at this conversation's thread", async () => {
+      const mine = `${tenantId}:${instanceId}:${CONV_ID}`;
+      const theirs = `${tenantId}:${instanceId}:45`;
+      await suDb.schedulerJob.createMany({
+        data: [
+          {
+            // Fired here, still carrying this thread: the row that names the event.
+            tenantId,
+            kind: "APPOINTMENT_REMINDER",
+            dedupeKey: "reminder:evt-shared:1440",
+            status: "DONE",
+            runAt: new Date(Date.now() - 3_600_000),
+            payload: { threadId: mine, eventId: "evt-shared", calendarId: "c" },
+          },
+          {
+            // Same event, re-armed from ANOTHER conversation after a reschedule.
+            tenantId,
+            kind: "APPOINTMENT_REMINDER",
+            dedupeKey: "reminder:evt-shared:60",
+            runAt: new Date(Date.now() + 3_600_000),
+            payload: {
+              threadId: theirs,
+              eventId: "evt-shared",
+              calendarId: "c",
+            },
+          },
+        ],
+      });
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      await sendReset();
+
+      const rows = await suDb.schedulerJob.findMany({
+        where: { tenantId, kind: "APPOINTMENT_REMINDER" },
+        select: { dedupeKey: true, status: true, payload: true },
+        orderBy: { dedupeKey: "asc" },
+      });
+      expect(
+        rows.map((r) => [
+          r.dedupeKey,
+          r.status,
+          (r.payload as { cancelledAt?: string })?.cancelledAt !== undefined,
+        ]),
+      ).toEqual([
+        // Ours: tombstoned even though it had already fired, because the appointment block is
+        // rendered from these rows and cannot tell "cancelled" from "fired".
+        ["reminder:evt-shared:1440", "DONE", true],
+        // Theirs: untouched, still armed.
+        ["reminder:evt-shared:60", "PENDING", false],
+      ]);
+      await suDb.schedulerJob.deleteMany({ where: { tenantId } });
+    });
+
     // The third scope. `set_custom_attribute` writes to conversation, contact and card, and /reset
     // cleared one — so after a reset the agent still knew the budget and the qualification answers
     // it had collected in the run that was just wiped, and did not ask again.
@@ -811,7 +1014,9 @@ describe.skipIf(!dbUp)(
       const ack = ackCalls(cw.calls)
         .map((c) => (c.body as { content?: string })?.content ?? "")
         .join(" ");
-      expect(ack).toContain("atribuída a um humano");
+      // Names no holder: a human, another persona's bot and a conversation left `open` all reach
+      // here, and only "not with this agent" is true of all three.
+      expect(ack).toContain("não está com este agente");
       expect(ack).toContain("/reset");
       expect(
         ackCalls(cw.calls).every(
@@ -829,12 +1034,17 @@ describe.skipIf(!dbUp)(
       expect(ack2).toBe("🧪 Modo teste ativado para esta conversa.");
     });
 
-    // Which bot the question is about. Chatwoot fans a message out to the conversation's assigned
-    // bot AND the inbox's, so the delivery can arrive on a ROUTE that belongs to a different persona
-    // than the one bound to this inbox. Asking "is it ours" about the route's bot then answers yes
-    // about a conversation the inbox's agent cannot touch, and /reset leaves it that way.
-    test("ownership is asked about the inbox's persona, not the route the delivery came on", async () => {
-      const { token: otherToken, hash: otherHash } = generateRouteToken();
+    // A SECOND persona bound to the same instance, holding this conversation. Both ownership tests
+    // below need the same three rows, and the shape is the load-bearing part: the conversation is
+    // `pending` (shouldBotHandle rejects any other status BEFORE it compares bot ids, so an `open`
+    // one answers "not ours" for a reason that has nothing to do with which bot is being asked
+    // about), and the assignment lives in the MIRROR rather than in the payload, which is the
+    // fallback a degraded event takes.
+    const seedOtherPersonaHoldingIt = async (): Promise<{
+      token: string;
+      agentId: bigint;
+    }> => {
+      const { token, hash } = generateRouteToken();
       const otherAgent = await suDb.agent.create({
         data: {
           tenantId,
@@ -851,16 +1061,24 @@ describe.skipIf(!dbUp)(
           chatwootAgentBotId: 77,
           accessToken: encryptJson(BOT_TOKEN),
           webhookSecret: encryptJson(SECRET),
-          webhookRouteTokenHash: otherHash,
+          webhookRouteTokenHash: hash,
           name: "Outra persona",
         },
       });
-      // Stored ownership: assigned to bot 77. The delivery below says nothing about the assignee,
-      // so this is what the gate reads — the same fallback a degraded event takes.
       await suDb.conversation.updateMany({
         where: { tenantId, chatwootConversationId: CONV_ID },
         data: { status: "pending", assigneeType: "AgentBot", assigneeId: 77 },
       });
+      return { token, agentId: otherAgent.id };
+    };
+
+    // Which bot the question is about. Chatwoot fans a message out to the conversation's assigned
+    // bot AND the inbox's, so the delivery can arrive on a ROUTE that belongs to a different persona
+    // than the one bound to this inbox. Asking "is it ours" about the route's bot then answers yes
+    // about a conversation the inbox's agent cannot touch, and /reset leaves it that way.
+    test("ownership is asked about the inbox's persona, not the route the delivery came on", async () => {
+      const { token: otherToken, agentId: otherAgentId } =
+        await seedOtherPersonaHoldingIt();
       const cw = fakeChatwoot();
       globalThis.fetch = cw.impl;
       // `pending` on purpose: `shouldBotHandle` rejects any other status BEFORE it compares bot ids,
@@ -883,7 +1101,31 @@ describe.skipIf(!dbUp)(
           )
           .map((c) => c.body),
       ).toEqual([{ assignee_id: 0 }]);
-      await suDb.agent.delete({ where: { id: otherAgent.id } });
+      await suDb.agent.delete({ where: { id: otherAgentId } });
+    });
+
+    // The same question, asked by the OTHER command. /teste's acknowledgement branches on whether the
+    // agent may speak here, and it used to branch on the caller's `act` — which is decided against
+    // the ROUTE's bot. On a conversation held by another persona's bot, delivered on that persona's
+    // route, `act` is true and the plain "activated" is posted about a conversation the inbox's agent
+    // still cannot answer in: the silence this whole change exists to explain, restated as success.
+    test("/teste answers about the inbox's persona too, not the route", async () => {
+      const { token: otherToken, agentId: otherAgentId } =
+        await seedOtherPersonaHoldingIt();
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      await sendReset("/teste", CONV_ID, {
+        status: "pending",
+        silentMeta: true,
+        routeToken: otherToken,
+      });
+
+      const ack = ackCalls(cw.calls)
+        .map((c) => (c.body as { content?: string })?.content ?? "")
+        .join(" ");
+      expect(ack).toContain("não está com este agente");
+      expect(ack).toContain("/reset");
+      await suDb.agent.delete({ where: { id: otherAgentId } });
     });
 
     // The notice fires only while the conversation was NEVER activated, and /reset needs

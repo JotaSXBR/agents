@@ -148,37 +148,44 @@ export async function cancelAppointmentReminders(
   });
 }
 
-// Every appointment this conversation booked, cancelled and tombstoned in one go. /reset is the
-// caller: the reminders are keyed by EVENT (`reminder:<eventId>:<offset>`), so a command that only
-// knows the thread cannot reach them by dedupe key — but the rows carry the thread in their payload,
-// which is the same lookup `loadAppointmentContext` already uses per turn.
+// Retire every appointment reminder THIS conversation armed: pending rows cancelled, every row
+// tombstoned. /reset is the caller.
 //
-// ALL rows, not just PENDING ones: `cancelAppointmentReminders` tombstones fired rows too, and a
-// fired reminder whose start is still ahead is exactly what keeps the appointment block in the
-// prompt after the operator was told the conversation was cleared.
+// Scoped by the thread the rows carry in their payload, and never by the event: the reminders are
+// keyed `reminder:<eventId>:<offset>`, so a command that only knows the thread cannot reach them by
+// dedupe key — but the event is the wrong widening. A reschedule re-arms the surviving offsets with
+// the payload of whatever conversation asked for it (enqueueJob's upsert is authoritative), while
+// already-fired rows keep the OLD thread; going from a fired row's event id back to the whole
+// `reminder:<eventId>:` prefix would cancel and tombstone the LIVE reminders of the conversation that
+// now owns the appointment. The thread predicate is the same lookup `loadAppointmentContext` uses per
+// turn, and it cannot reach outside the conversation that typed the command.
+//
+// ALL rows, not just PENDING ones: `loadAppointmentContext` re-reads fired rows too, and a fired
+// reminder whose start is still ahead is exactly what keeps the appointment block in the prompt after
+// the operator was told the conversation was cleared. The tombstone is what tells the two apart —
+// cancelling marks a job DONE, which is indistinguishable from "fired". One atomic statement, never
+// read-modify-write, so a concurrent re-arm's payload is stamped or replaced whole.
 //
 // The calendar event itself is deliberately NOT touched. Deleting a real booking is not what the
 // operator asked for by typing /reset, and it is not undoable.
+//
+// Returns the number of rows retired.
 export async function cancelThreadAppointmentReminders(
   tenantId: bigint,
   threadId: string,
   base: PrismaClient = basePrisma,
 ): Promise<number> {
-  const eventIds = await runScopedOn(base, sysCtx(tenantId), async (db) => {
-    const rows = await db.$queryRaw<Array<{ event_id: string | null }>>`
-      SELECT DISTINCT payload->>'eventId' AS event_id
-        FROM scheduler_jobs
+  return runScopedOn(base, sysCtx(tenantId), async (db) => {
+    const stamp = JSON.stringify({ cancelledAt: new Date().toISOString() });
+    return db.$executeRaw`
+      UPDATE scheduler_jobs
+         SET status = CASE WHEN status = 'PENDING' THEN 'DONE' ELSE status END,
+             payload = payload || ${stamp}::jsonb,
+             updated_at = now()
        WHERE tenant_id = ${tenantId}
          AND kind = 'APPOINTMENT_REMINDER'
          AND payload->>'threadId' = ${threadId}`;
-    return rows
-      .map((r) => r.event_id)
-      .filter((id): id is string => typeof id === "string" && id !== "");
   });
-  for (const eventId of eventIds) {
-    await cancelAppointmentReminders(tenantId, eventId, base);
-  }
-  return eventIds.length;
 }
 
 // True while this conversation (by thread) has at least one LIVE appointment — a queued reminder row

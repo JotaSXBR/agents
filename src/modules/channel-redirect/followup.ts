@@ -1,6 +1,7 @@
 import type { PrismaClient } from "@/../generated/prisma/client";
 import logger from "@/api/lib/logger";
 import basePrisma from "@/api/lib/prisma";
+import { chatwootThreadId } from "@/graph/checkpointer";
 import { type AgentNudge, parseThreadId, runAgentNudge } from "@/graph/nudge";
 import type { RuntimeDeps } from "@/graph/runtime";
 import { runScopedOn, type TenantContext } from "@/lib/tenancy";
@@ -44,6 +45,49 @@ function sysCtx(tenantId: bigint): TenantContext {
 
 export function followUpDedupeKey(widgetThreadId: string): string {
   return `redirect-followup:${widgetThreadId}`;
+}
+
+// Cancel every redirect ladder armed for a CONTACT — both sides of the pair at once.
+//
+// The job is keyed by the WIDGET thread (that is the conversation whose idleness the ladder measures),
+// but its stages act on BOTH conversations: stage 2 re-sends the link on the WhatsApp ENTRY
+// conversation, and stage 3 posts the closing on both and resolves both. So "cancel the ladder this
+// episode armed" cannot be asked from one conversation's thread id: a /reset typed on the entry
+// conversation — which is exactly where the funnel is re-run from, since `redirectSentAt` and
+// `redirectCount` live there — would cancel a key that was never enqueued, and the previous episode's
+// ladder would go on to message and resolve the conversation the operator just cleared.
+//
+// The contact is the unit the funnel actually chases: one lead, two conversations. Keys that were
+// never armed simply match nothing, so the widening costs one query and cancels nothing extra.
+// Returns the number of pending ladders cancelled.
+export async function cancelContactRedirectFollowUps(
+  tenantId: bigint,
+  instanceId: bigint,
+  contactId: bigint,
+  base: PrismaClient = basePrisma,
+): Promise<number> {
+  return runScopedOn(base, sysCtx(tenantId), async (db) => {
+    const convs = await db.conversation.findMany({
+      where: { contactId, chatwootInstanceId: instanceId },
+      select: { chatwootConversationId: true },
+    });
+    if (convs.length === 0) return 0;
+    const res = await db.schedulerJob.updateMany({
+      where: {
+        kind: "REDIRECT_FOLLOWUP",
+        status: "PENDING",
+        dedupeKey: {
+          in: convs.map((c) =>
+            followUpDedupeKey(
+              chatwootThreadId(tenantId, instanceId, c.chatwootConversationId),
+            ),
+          ),
+        },
+      },
+      data: { status: "DONE" },
+    });
+    return res.count;
+  });
 }
 
 export type RedirectFollowUpStage = "chat" | "whatsapp" | "closing";
