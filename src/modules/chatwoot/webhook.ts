@@ -881,12 +881,28 @@ async function maybeConsumeCommandOrGate(params: {
     }
   };
 
-  const answerBlocker = async (): Promise<"none" | "ownership" | "disabled"> =>
-    !(await agentStillEnabled())
-      ? "disabled"
-      : (await stillOurs())
-        ? "none"
-        : "ownership";
+  // Neither half may throw. /reset asks this AFTER its cleanup has run, so a rejection here loses the
+  // acknowledgement of work already done and leaves the delivery mid-flight; /teste asks it after the
+  // activation is committed. `none` is the fallback both consumers want, and they want it for
+  // opposite-looking reasons that agree: the hand-back is the irreversible act, so an unknown answer
+  // must not trigger it, and the wrong text is cheaper in this direction too — "activated" on a
+  // conversation a human holds is a silence the operator retries out of, while "send /reset" on a
+  // conversation the agent already owns talks them into clearing an episode for nothing.
+  const answerBlocker = async (): Promise<
+    "none" | "ownership" | "disabled"
+  > => {
+    if (!(await agentStillEnabled())) return "disabled";
+    try {
+      return (await stillOurs()) ? "none" : "ownership";
+    } catch (err) {
+      logger.warn(
+        "chatwoot: could not read whether the conversation is still the bot's (conv=%s): %s",
+        String(conversationId),
+        errMsg(err),
+      );
+      return "none";
+    }
+  };
 
   // Returns whether the message actually left. Whoever records that it was sent has to read this: the
   // away message would otherwise burn the day it just claimed, and the redirect gate would close its

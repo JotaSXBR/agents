@@ -1093,6 +1093,54 @@ describe.skipIf(!dbUp)(
       });
     });
 
+    // The nullable half of that ordering. `lastEventAt` starts null and Postgres sorts NULLs FIRST on
+    // a descending order, so a conversation that never carried an event outranks the live one — and
+    // the side lookup then answers with a conversation that is not this one, `isEntry` goes false,
+    // and the episode silently stops being recognised: sibling anchors kept, ladder still armed.
+    test("a conversation that never carried an event does not outrank the live one", async () => {
+      await withRedirectPair(async (_convId, widgetThread) => {
+        const mine = await suDb.conversation.findFirstOrThrow({
+          where: { tenantId, chatwootConversationId: CONV_ID },
+          select: { contactId: true, inboxId: true },
+        });
+        // Same contact, same ENTRY inbox, no activity at all.
+        await suDb.conversation.create({
+          data: {
+            tenantId,
+            chatwootInstanceId: instanceId,
+            inboxId: mine.inboxId,
+            contactId: mine.contactId,
+            chatwootConversationId: 51,
+            contactInboxId: 311,
+            status: "resolved",
+            threadId: `${tenantId}:${instanceId}:51`,
+            lastEventAt: null,
+          },
+        });
+        await suDb.schedulerJob.create({
+          data: {
+            tenantId,
+            kind: "REDIRECT_FOLLOWUP",
+            dedupeKey: `redirect-followup:${widgetThread}`,
+            runAt: new Date(Date.now() + 3_600_000),
+            payload: { stage: "chat", widgetThreadId: widgetThread },
+          },
+        });
+        const cw = fakeChatwoot();
+        globalThis.fetch = cw.impl;
+        await sendReset();
+
+        const job = await suDb.schedulerJob.findFirstOrThrow({
+          where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
+          select: { status: true },
+        });
+        expect(job.status).toBe("DONE");
+        await suDb.conversation.deleteMany({
+          where: { tenantId, chatwootConversationId: 51 },
+        });
+      });
+    });
+
     // Which conversation is "the widget side" when the contact has been through the funnel before.
     // The live one: an old widget conversation is a previous episode, and its ladder was retired when
     // it resolved. Picking it instead would cancel nothing and leave the running ladder armed.
@@ -1577,6 +1625,48 @@ describe.skipIf(!dbUp)(
           data: { enabled: true },
         });
       }
+    });
+
+    // The ownership read is asked after the cleanup has already run, so a rejection there would lose
+    // the acknowledgement for work that DID happen and leave the delivery mid-flight. Unknown
+    // ownership answers `none`: the irreversible half (taking the conversation off a human) is the
+    // one that must not fire on a guess.
+    test("an ownership read that fails does not strand the command", async () => {
+      const blind = appDb.$extends({
+        query: {
+          conversation: {
+            findUnique({ args, query }) {
+              const sel = (args.select ?? {}) as Record<string, unknown>;
+              // The fence's own read, identified by the three columns it asks for.
+              if (
+                Object.keys(sel).length === 3 &&
+                sel.assigneeType === true &&
+                sel.assigneeId === true &&
+                sel.status === true
+              ) {
+                return Promise.reject(new Error("connection reset"));
+              }
+              return query(args);
+            },
+          },
+        },
+      }) as unknown as PrismaClient;
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      await sendReset("/reset", CONV_ID, {
+        status: "open",
+        assigneeType: "User",
+        base: blind,
+      });
+
+      // The command still reports what it did...
+      expect(ackCalls(cw.calls).length).toBeGreaterThan(0);
+      // ...and did not take the conversation from the human on an answer it does not have.
+      expect(
+        cw.calls.filter((c) =>
+          c.path.endsWith(`/conversations/${CONV_ID}/assignments`),
+        ),
+      ).toEqual([]);
     });
 
     // And the row being GONE, which is the other thing a re-read can find. Deleting the agent while

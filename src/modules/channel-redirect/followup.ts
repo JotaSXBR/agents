@@ -93,8 +93,10 @@ export async function resolveRedirectEpisode(
         inbox: { select: { chatwootInboxId: true } },
       },
       // Most recently active first, so `find` below picks the live conversation of each side rather
-      // than a long-resolved one. Mirrors resolveWhatsAppSibling.
-      orderBy: { lastEventAt: "desc" },
+      // than a long-resolved one. `nulls: "last"` is not decoration: the column is nullable and
+      // Postgres sorts NULLs FIRST on a descending order, so a conversation that never carried an
+      // event would outrank the live one and the whole episode would silently stop being recognised.
+      orderBy: { lastEventAt: { sort: "desc", nulls: "last" } },
     });
     const sideOf = (inboxId: number | null): number | null =>
       inboxId === null
