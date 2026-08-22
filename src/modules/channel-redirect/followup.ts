@@ -134,6 +134,13 @@ export async function resolveRedirectEpisode(
 // pushed into cancelPendingJob: that primitive has eight callers across four modules, and each of
 // them would need its own handler-side fence to make the change mean anything.
 //
+// The claim token is bumped with it, and that is what makes the fence hold at the LAST boundary the
+// handler does not own: its return value. `completeJob`/`rescheduleJob`/`failJob` all CAS on the
+// token the claim handed out (issue #164), so a stamp landing after the handler's final read still
+// wins — the reschedule writes nothing instead of replacing the payload and re-arming the stage the
+// stamp was meant to stop. The mechanism already existed for exactly this sentence: "a run that was
+// superseded while it worked writes nothing".
+//
 // A re-arm replaces the payload wholesale (enqueueJob's upsert is authoritative), so a lead who
 // replies in the chat clears the stamp along with the rest of the old payload.
 export async function retireRedirectFollowUp(
@@ -147,6 +154,7 @@ export async function retireRedirectFollowUp(
       UPDATE scheduler_jobs
          SET status = CASE WHEN status = 'PENDING' THEN 'DONE' ELSE status END,
              payload = payload || ${stamp}::jsonb,
+             claim_seq = claim_seq + 1,
              updated_at = now()
        WHERE tenant_id = ${tenantId}
          AND kind = 'REDIRECT_FOLLOWUP'

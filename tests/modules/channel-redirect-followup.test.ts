@@ -14,7 +14,11 @@ import {
 } from "@/modules/channel-redirect/followup";
 import { CHANNEL_REDIRECT_DEFAULTS } from "@/modules/channel-redirect/service";
 import type { ChatwootClient } from "@/modules/chatwoot/client";
-import type { ClaimedJob, enqueueJob } from "@/modules/scheduler/service";
+import {
+  type ClaimedJob,
+  type enqueueJob,
+  rescheduleJob,
+} from "@/modules/scheduler/service";
 import { seedChatwootInstance } from "../utils/chatwoot";
 
 describe("parseRedirectFollowUpPayload", () => {
@@ -535,6 +539,33 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
       where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
       select: { payload: true },
     });
+    expect((row.payload as { cancelledAt?: string })?.cancelledAt).toBeString();
+  });
+
+  // The last boundary the handler does not own: its RETURN. Whatever it decides, the worker is what
+  // writes it, and a stamp landing in that gap would be overwritten by a reschedule that replaces
+  // the payload — re-arming the very stage the stamp stopped. Retiring bumps the claim token, so
+  // the three writes that finish a job (they all CAS on it) find themselves superseded.
+  test("a reschedule written after the retire lands on nothing", async () => {
+    const job = await claimed("chat");
+    await retireRedirectFollowUp(tenantId, widgetThread, appDb);
+
+    const res = await rescheduleJob(
+      tenantId,
+      job.id,
+      job.claimSeq,
+      new Date(Date.now() + 60_000),
+      { stage: "closing", widgetThreadId: widgetThread },
+      appDb,
+    );
+
+    expect(res.applied).toBe(false);
+    const row = await suDb.schedulerJob.findFirstOrThrow({
+      where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
+      select: { status: true, payload: true },
+    });
+    // Still claimed, still tombstoned: the ladder did not come back as PENDING with a clean payload.
+    expect(row.status).toBe("CLAIMED");
     expect((row.payload as { cancelledAt?: string })?.cancelledAt).toBeString();
   });
 

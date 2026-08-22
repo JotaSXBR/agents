@@ -625,6 +625,12 @@ export async function runAgentNudge(
       return "noted-window" as const;
     };
     try {
+      // NOTE: The handoff line is a customer-visible send like any other, and it is the one that
+      // returns BEFORE the terminal deliveries below — so a job retired while the turn ran would
+      // reach the customer through this path alone. What the check cannot undo is the transfer
+      // itself: the tool already ran inside the graph, and a conversation handed to a human stays
+      // handed over. Withholding the sentence is the part that is still ours to decide.
+      if (!(await stillWanted())) return "silent";
       // The same question at two instants, and only the second one governs the send. Asked before
       // the screening so a line that cannot go out anyway costs no model call, and asked again
       // after it because that call is precisely where the window closes: 15 seconds is nothing

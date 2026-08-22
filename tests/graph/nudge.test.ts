@@ -852,6 +852,40 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
     expect(s.resolved).toEqual([9905]);
   });
 
+  // The handoff line returns before the terminal deliveries, so it is the one customer-visible send
+  // the checks around them never see. A job retired while the turn ran reaches the customer through
+  // this path alone — and the transfer itself is NOT undone by the fence: the tool already ran, and
+  // the conversation stays with the human queue. Withholding the sentence is the part still ours.
+  test("a retired job's handoff line is withheld, but the transfer stands", async () => {
+    await seedConv(9983, null);
+    const s = stub();
+    let asks = 0;
+    const outcome = await runAgentNudge({
+      tenantId,
+      threadId: `${tenantId}:${instanceId}:9983`,
+      nudge: { source: "followup", kind: "inactivity", step: 1 },
+      postActions: { assignLabels: ["follow-up"], resolve: true },
+      // Yes on the read before the turn, no by the time the promised line goes out.
+      stillWanted: async () => {
+        asks += 1;
+        return asks < 2;
+      },
+      base: appDb,
+      deps: {
+        makeModel: () =>
+          new HandoffThenReplyModel("", "Um humano vai te atender.") as never,
+        makeClient: s.makeClient,
+        checkpointer: new MemorySaver(),
+        persistUsage: async () => {},
+      },
+    });
+    expect(s.messages).toEqual([]);
+    // The handoff's own `open` still happened — that is the transfer, and it is not this fence's to
+    // reverse. What must not follow it is the resolve.
+    expect(s.resolved).toEqual([9983]);
+    expect(outcome).toBe("silent");
+  });
+
   // The episode has to leave a trace the operator can read. A handed-off follow-up that posted a
   // line and then logged nothing would be invisible on the Logs page, which is the one place the
   // operator goes to find out why the bot went quiet on a conversation.
