@@ -735,39 +735,6 @@ export class ChatwootClient {
     });
   }
 
-  // Remove NAMED keys from a contact's attributes, leaving everything else in place. /reset is the
-  // caller and the selectivity is the point: contact attributes outlive the conversation by design,
-  // so a wholesale clear would wipe an integration's id from a real contact because someone typed
-  // /reset in a test conversation.
-  //
-  // Read-modify-write, and it has to be: the endpoint ASSIGNS the hash it is given (measured — see
-  // setConversationCustomAttributes above), so there is no way to express "drop these keys" other
-  // than sending back the survivors. Inside the same keyed queue as the merging writer, because that
-  // is what stops a concurrent tool call from resurrecting a key this just dropped (issue #112).
-  clearContactCustomAttributeKeys(
-    contactId: number,
-    keys: string[],
-  ): Promise<unknown> {
-    return withKeyedQueue(this.targetKey("contact", contactId), async () => {
-      const existing = (await this.request(
-        this.config.adminToken,
-        "GET",
-        `/contacts/${contactId}`,
-      )) as { payload?: { custom_attributes?: unknown } } | null;
-      const current = attributeBag(existing?.payload?.custom_attributes);
-      const drop = new Set(keys);
-      const survivors = Object.fromEntries(
-        Object.entries(current).filter(([k]) => !drop.has(k)),
-      );
-      return this.request(
-        this.config.adminToken,
-        "PUT",
-        `/contacts/${contactId}`,
-        { custom_attributes: survivors },
-      );
-    });
-  }
-
   // Typing indicator for the split/humanized delivery. `toggle_typing_status` IS in the fork's
   // BOT_ACCESSIBLE_ENDPOINTS (confirmed against access_token_auth_helper.rb), so we use the bot
   // token — the indicator is then attributed to our bot, not to the admin agent. Best-effort (the

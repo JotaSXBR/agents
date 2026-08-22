@@ -1284,21 +1284,29 @@ describe.skipIf(!dbUp)(
       await suDb.schedulerJob.deleteMany({ where: { tenantId } });
     });
 
-    // The third scope. `set_custom_attribute` writes to conversation, contact and card, and /reset
-    // cleared one — so after a reset the agent still knew the budget and the qualification answers
-    // it had collected in the run that was just wiped, and did not ask again.
-    test("the contact keeps what the agent does not own, and loses what it does", async () => {
+    // The line between what this command owns and what it merely has a token for. The card belongs to
+    // this conversation; the contact's Chatwoot attributes are the ACCOUNT's — shared with every
+    // other conversation of every other agent, with no record of who wrote a key. An earlier round of
+    // this change cleared every account-defined contact attribute and would have deleted an
+    // operator's CRM field because someone typed /reset in a test conversation.
+    test("the contact's Chatwoot attributes are not this command's to delete", async () => {
       const cw = fakeChatwoot();
       globalThis.fetch = cw.impl;
       await sendReset();
 
-      const put = cw.calls.find(
-        (c) =>
-          c.method === "PUT" && c.path.endsWith(`/contacts/${CONTACT_CW_ID}`),
-      );
-      // `crm_id` is not in the account's schema, so no conversation wrote it and this command has no
-      // business deleting it. The two the schema DOES define are gone.
-      expect(put?.body).toEqual({ custom_attributes: { crm_id: "CRM-9" } });
+      expect(
+        cw.calls.filter(
+          (c) =>
+            c.method === "PUT" && c.path.endsWith(`/contacts/${CONTACT_CW_ID}`),
+        ),
+      ).toEqual([]);
+
+      // What the command DOES own on the contact: our own column, written only by our own tool.
+      const contact = await suDb.contact.findFirstOrThrow({
+        where: { tenantId, chatwootContactId: CONTACT_CW_ID },
+        select: { voiceReply: true },
+      });
+      expect(contact.voiceReply).toBeNull();
 
       // And the card's attributes, which have no such tension: the card belongs to this conversation.
       const card = cw.calls.find(

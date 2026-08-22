@@ -1194,42 +1194,20 @@ async function maybeConsumeCommandOrGate(params: {
         }
       });
     }
-    // The third scope, and the one that is a decision rather than an oversight. Contact attributes
-    // OUTLIVE the conversation by design and may carry values no conversation wrote (a CRM id, an
-    // integration's field), so a wholesale clear would let a /reset typed in a test conversation
-    // wipe state from a real contact. Only the keys the account DEFINES as contact attributes are
-    // dropped — the same set `set_custom_attribute` enumerates for the model.
+    // The contact's Chatwoot attributes are deliberately NOT cleared, and the acknowledgement below
+    // says why without having to: it promises the attributes of THIS CONVERSATION. Contact
+    // attributes outlive the conversation, are shared with every other conversation of every other
+    // agent on the account, and nothing records who wrote one — the definitions are account-wide, so
+    // the narrowest set this command could name still includes an operator's CRM field and an
+    // integration's column. Deleting those is not undoable, and the cost of keeping them is that the
+    // agent may not re-ask something it already knows.
     //
-    // The honest limit, because nothing records provenance: this is "keys the agent is allowed to
-    // write", not "keys the agent wrote". A defined key an operator filled in by hand falls with the
-    // rest. Anything outside the schema survives, which is where the real risk lived.
-    if (ctx.conv.contactId !== null && client) {
-      const contactDbId = ctx.conv.contactId;
-      await step(
-        "clear contact attributes",
-        "atributos do contato",
-        async () => {
-          const chatwootContactId = await runScopedOn(
-            base,
-            sysCtx(tenantId),
-            (db) =>
-              db.contact.findUnique({
-                where: { id: contactDbId },
-                select: { chatwootContactId: true },
-              }),
-          );
-          if (!chatwootContactId?.chatwootContactId) return;
-          const keys = (await client.listCustomAttributeDefinitions())
-            .filter((d) => d.model === "contact_attribute")
-            .map((d) => d.key);
-          if (keys.length === 0) return;
-          await client.clearContactCustomAttributeKeys(
-            chatwootContactId.chatwootContactId,
-            keys,
-          );
-        },
-      );
-    }
+    // `voiceReply` above is the contrast that draws the line: it is OUR column, written only by our
+    // own tool, so its provenance is total and clearing it is this command's business.
+    //
+    // NOTE: the agent still reads those attributes into its prompt after a reset, so a test run can
+    // start over and skip a question it already has an answer for. Wanting them cleared is
+    // legitimate; doing it safely needs provenance the schema does not carry today.
     // Cancel any pending inactivity follow-up: a reset is an explicit "start over", so a queued
     // proactive nudge from the prior episode is moot.
     await step("cancel follow-up", "follow-up pendente", () =>
