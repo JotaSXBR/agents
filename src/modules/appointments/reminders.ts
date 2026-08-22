@@ -148,6 +148,39 @@ export async function cancelAppointmentReminders(
   });
 }
 
+// Every appointment this conversation booked, cancelled and tombstoned in one go. /reset is the
+// caller: the reminders are keyed by EVENT (`reminder:<eventId>:<offset>`), so a command that only
+// knows the thread cannot reach them by dedupe key — but the rows carry the thread in their payload,
+// which is the same lookup `loadAppointmentContext` already uses per turn.
+//
+// ALL rows, not just PENDING ones: `cancelAppointmentReminders` tombstones fired rows too, and a
+// fired reminder whose start is still ahead is exactly what keeps the appointment block in the
+// prompt after the operator was told the conversation was cleared.
+//
+// The calendar event itself is deliberately NOT touched. Deleting a real booking is not what the
+// operator asked for by typing /reset, and it is not undoable.
+export async function cancelThreadAppointmentReminders(
+  tenantId: bigint,
+  threadId: string,
+  base: PrismaClient = basePrisma,
+): Promise<number> {
+  const eventIds = await runScopedOn(base, sysCtx(tenantId), async (db) => {
+    const rows = await db.$queryRaw<Array<{ event_id: string | null }>>`
+      SELECT DISTINCT payload->>'eventId' AS event_id
+        FROM scheduler_jobs
+       WHERE tenant_id = ${tenantId}
+         AND kind = 'APPOINTMENT_REMINDER'
+         AND payload->>'threadId' = ${threadId}`;
+    return rows
+      .map((r) => r.event_id)
+      .filter((id): id is string => typeof id === "string" && id !== "");
+  });
+  for (const eventId of eventIds) {
+    await cancelAppointmentReminders(tenantId, eventId, base);
+  }
+  return eventIds.length;
+}
+
 // True while this conversation (by thread) has at least one LIVE appointment — a queued reminder row
 // (PENDING/CLAIMED) or an already-fired one whose start is still ahead, tombstones excluded: the shared
 // projectAppointmentEvents predicate, via loadAppointmentContext. The follow-up handler uses it to

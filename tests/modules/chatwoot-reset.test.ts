@@ -35,6 +35,7 @@ const ADMIN_TOKEN = "ADMIN-TOKEN";
 const CONV_ID = 42;
 const INBOX_ID = 7;
 const KANBAN_TASK_ID = 55;
+const CONTACT_CW_ID = 808;
 
 interface CwCall {
   method: string;
@@ -81,6 +82,48 @@ function fakeChatwoot(failing: RegExp | null = null): FakeChatwoot {
     ) {
       return jsonResponse({ id: CONV_ID, kanban_task: { id: KANBAN_TASK_ID } });
     }
+    // The account's attribute schema. `crm_id` is deliberately absent from it: it is the key an
+    // integration owns, and the one a wholesale clear would destroy.
+    if (
+      method === "GET" &&
+      url.pathname.endsWith("/custom_attribute_definitions")
+    ) {
+      return jsonResponse([
+        {
+          attribute_key: "orcamento",
+          attribute_model: "contact_attribute",
+          attribute_display_name: "Orçamento",
+          attribute_display_type: "text",
+        },
+        {
+          attribute_key: "qualificado",
+          attribute_model: "contact_attribute",
+          attribute_display_name: "Qualificado",
+          attribute_display_type: "text",
+        },
+        {
+          attribute_key: "produto",
+          attribute_model: "conversation_attribute",
+          attribute_display_name: "Produto",
+          attribute_display_type: "text",
+        },
+      ]);
+    }
+    if (
+      method === "GET" &&
+      url.pathname.endsWith(`/contacts/${CONTACT_CW_ID}`)
+    ) {
+      return jsonResponse({
+        payload: {
+          id: CONTACT_CW_ID,
+          custom_attributes: {
+            orcamento: "5000",
+            qualificado: "sim",
+            crm_id: "CRM-9",
+          },
+        },
+      });
+    }
     return jsonResponse({ id: 1 });
   }) as typeof fetch;
   return { calls, impl };
@@ -118,7 +161,13 @@ const originalFetch = globalThis.fetch;
 
 // Drives one incoming message through the receiver and the processor, exactly as a live delivery
 // would. Defaults to the /reset this suite is named for.
-async function sendReset(content = "/reset", convId = CONV_ID): Promise<void> {
+async function sendReset(
+  content = "/reset",
+  convId = CONV_ID,
+  // The conversation as CHATWOOT has it when the command arrives. Defaults to the bot-owned shape;
+  // the handoff case sends the one a human is holding, which is the state the command has to undo.
+  live: { status?: string; assigneeType?: string | null } = {},
+): Promise<void> {
   deliverySeq += 1;
   const nowSeconds = Math.floor(Date.now() / 1000);
   const body = JSON.stringify({
@@ -130,9 +179,15 @@ async function sendReset(content = "/reset", convId = CONV_ID): Promise<void> {
     conversation: {
       id: convId,
       inbox_id: INBOX_ID,
-      status: "pending",
+      status: live.status ?? "pending",
       contact_inbox: { id: 301 },
-      meta: { assignee_type: null, assignee: null },
+      meta:
+        (live.assigneeType ?? null) === null
+          ? { assignee_type: null, assignee: null }
+          : {
+              assignee_type: live.assigneeType,
+              assignee: { id: 77, type: live.assigneeType },
+            },
     },
   });
   const r = await receiveChatwootWebhook({
@@ -213,12 +268,16 @@ describe.skipIf(!dbUp)(
           name: "Atendente",
         },
       });
+      const contact = await suDb.contact.create({
+        data: { tenantId, chatwootContactId: CONTACT_CW_ID, name: "Cliente" },
+      });
       // Test mode must already be ACTIVE for this conversation, or /reset defers to the silence gate.
       await suDb.conversation.create({
         data: {
           tenantId,
           chatwootInstanceId: instanceId,
           inboxId: inbox.id,
+          contactId: contact.id,
           chatwootConversationId: CONV_ID,
           contactInboxId: 301,
           status: "pending",
@@ -535,6 +594,223 @@ describe.skipIf(!dbUp)(
       } finally {
         await suDb.tenant.delete({ where: { id: other.id } }).catch(() => {});
       }
+    });
+
+    // The one survivor that makes every other one moot. `shouldBotHandle` needs BOTH
+    // `status === "pending"` and `assignee_type !== "User"`, and /reset used to touch neither: the
+    // canonical test loop (activate with /teste, let the agent hand off, resolve, start over) ended
+    // with a conversation that announces itself as active and then never answers. The only thing
+    // that fixed it was "Devolver para IA" in the console, which is behind a login the client
+    // running the test usually does not have.
+    test("a conversation a human took over is returned to the agent", async () => {
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      await sendReset("/reset", CONV_ID, {
+        status: "open",
+        assigneeType: "User",
+      });
+
+      // Unassign BEFORE pending, which is the order returnConversationToAgent documents: the two
+      // cannot be one toggle_status call.
+      const owned = cw.calls.filter(
+        (c) =>
+          c.method === "POST" &&
+          (c.path.endsWith(`/conversations/${CONV_ID}/assignments`) ||
+            c.path.endsWith(`/conversations/${CONV_ID}/toggle_status`)),
+      );
+      expect(owned.map((c) => [c.path.split("/").pop(), c.body])).toEqual([
+        ["assignments", { assignee_id: 0 }],
+        ["toggle_status", { status: "pending" }],
+      ]);
+      // Admin token on both: the bot cannot reassign a conversation away from a human, and the
+      // audit should show the operator rather than the persona.
+      expect(owned.every((c) => c.token === ADMIN_TOKEN)).toBe(true);
+
+      // And the mirror agrees, so the very next delivery passes the gate instead of waiting for a
+      // Chatwoot event that may never come.
+      const conv = await suDb.conversation.findFirstOrThrow({
+        where: { tenantId, chatwootConversationId: CONV_ID },
+        select: { status: true, assigneeType: true, assigneeId: true },
+      });
+      expect(conv).toEqual({
+        status: "pending",
+        assigneeType: null,
+        assigneeId: null,
+      });
+    });
+
+    // The other half of the same rule: asked with `shouldBotHandle` so an ordinary reset does not
+    // spend two admin calls undoing nothing. Without this the condition is unobservable — making the
+    // return unconditional passes every other test in this file.
+    test("a reset on a bot-owned conversation does not touch the assignment", async () => {
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      await sendReset();
+
+      expect(
+        cw.calls.filter(
+          (c) =>
+            c.path.endsWith(`/conversations/${CONV_ID}/assignments`) ||
+            c.path.endsWith(`/conversations/${CONV_ID}/toggle_status`),
+        ),
+      ).toEqual([]);
+    });
+
+    // The redirect gate's anchors, which /reset ignored while clearing the three notice watermarks
+    // right next to them. Same shape, same purpose, opposite treatment: once the redirect has fired,
+    // `redirectCount` is at its cap and the cooldown anchor is set, so the operator who resets to run
+    // the funnel again gets a conversation that will never redirect.
+    test("the redirect watermarks are cleared, so the funnel can be run again", async () => {
+      await suDb.conversation.updateMany({
+        where: { tenantId, chatwootConversationId: CONV_ID },
+        data: {
+          redirectSentAt: new Date(),
+          redirectCount: 3,
+          redirectLinkedAt: new Date(),
+          redirectClosedAt: new Date(),
+          lastError: "boom",
+          lastErrorAt: new Date(),
+          failureNoticeSentAt: new Date(),
+        },
+      });
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      await sendReset();
+
+      const conv = await suDb.conversation.findFirstOrThrow({
+        where: { tenantId, chatwootConversationId: CONV_ID },
+        select: {
+          redirectSentAt: true,
+          redirectCount: true,
+          redirectLinkedAt: true,
+          redirectClosedAt: true,
+          lastError: true,
+          lastErrorAt: true,
+          failureNoticeSentAt: true,
+        },
+      });
+      expect(conv).toEqual({
+        redirectSentAt: null,
+        // The count is a counter, not a timestamp: back to zero, not to null.
+        redirectCount: 0,
+        redirectLinkedAt: null,
+        redirectClosedAt: null,
+        // And the previous run's failure goes with it. `failureNoticeSentAt` is the coalescing
+        // anchor for "a human has to take over", so after a reset a fresh failure has to be able to
+        // announce itself again — the same reasoning that already clears testNoticeSentAt.
+        lastError: null,
+        lastErrorAt: null,
+        failureNoticeSentAt: null,
+      });
+    });
+
+    // Jobs the episode armed. /reset already cancels FOLLOWUP and MEMORY_COMPACT; these two carry
+    // exactly the same argument and were left running.
+    test("the jobs the episode armed are cancelled with it", async () => {
+      const threadId = `${tenantId}:${instanceId}:${CONV_ID}`;
+      await suDb.schedulerJob.createMany({
+        data: [
+          {
+            tenantId,
+            kind: "REDIRECT_FOLLOWUP",
+            dedupeKey: `redirect-followup:${threadId}`,
+            runAt: new Date(Date.now() + 3_600_000),
+            payload: { widgetThreadId: threadId },
+          },
+          {
+            tenantId,
+            kind: "APPOINTMENT_REMINDER",
+            dedupeKey: "reminder:evt-198:60",
+            runAt: new Date(Date.now() + 3_600_000),
+            payload: { threadId, eventId: "evt-198", calendarId: "c" },
+          },
+        ],
+      });
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      await sendReset();
+
+      const jobs = await suDb.schedulerJob.findMany({
+        where: {
+          tenantId,
+          kind: { in: ["REDIRECT_FOLLOWUP", "APPOINTMENT_REMINDER"] },
+        },
+        select: { kind: true, status: true, payload: true },
+        orderBy: { kind: "asc" },
+      });
+      expect(jobs.map((j) => [j.kind, j.status])).toEqual([
+        ["APPOINTMENT_REMINDER", "DONE"],
+        ["REDIRECT_FOLLOWUP", "DONE"],
+      ]);
+      // Cancelling alone is not enough for the reminder: `loadAppointmentContext` re-reads these
+      // rows on EVERY turn and cannot tell a cancelled job from a fired one, so without the
+      // tombstone the appointment block stays in the prompt after the reset.
+      const reminder = jobs.find((j) => j.kind === "APPOINTMENT_REMINDER");
+      expect(
+        (reminder?.payload as { cancelledAt?: string })?.cancelledAt,
+      ).toBeString();
+      await suDb.schedulerJob.deleteMany({ where: { tenantId } });
+    });
+
+    // The third scope. `set_custom_attribute` writes to conversation, contact and card, and /reset
+    // cleared one — so after a reset the agent still knew the budget and the qualification answers
+    // it had collected in the run that was just wiped, and did not ask again.
+    test("the contact keeps what the agent does not own, and loses what it does", async () => {
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      await sendReset();
+
+      const put = cw.calls.find(
+        (c) =>
+          c.method === "PUT" && c.path.endsWith(`/contacts/${CONTACT_CW_ID}`),
+      );
+      // `crm_id` is not in the account's schema, so no conversation wrote it and this command has no
+      // business deleting it. The two the schema DOES define are gone.
+      expect(put?.body).toEqual({ custom_attributes: { crm_id: "CRM-9" } });
+
+      // And the card's attributes, which have no such tension: the card belongs to this conversation.
+      const card = cw.calls.find(
+        (c) =>
+          c.method === "PATCH" &&
+          c.path.endsWith(`/kanban/tasks/${KANBAN_TASK_ID}`) &&
+          (c.body as { task?: { custom_attributes?: unknown } })?.task
+            ?.custom_attributes !== undefined,
+      );
+      expect(card?.body).toEqual({ task: { custom_attributes: {} } });
+    });
+
+    // The instruction that was wrong exactly where the operator needed it. /teste lifts the
+    // test-mode silence and nothing else, so on a conversation a human is holding it activates and
+    // the agent still says nothing — and the notice told them to send /teste.
+    test("the acknowledgement stops telling the operator to send a command that will not help", async () => {
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      await sendReset("/teste", CONV_ID, {
+        status: "open",
+        assigneeType: "User",
+      });
+      // The acknowledgement lands as a PRIVATE note here, not a public message: `postPublicMessage`
+      // withholds anything the bot no longer owns, which is right for the agent's own output and
+      // would silently drop the one sentence explaining the silence.
+      const ack = ackCalls(cw.calls)
+        .map((c) => (c.body as { content?: string })?.content ?? "")
+        .join(" ");
+      expect(ack).toContain("atribuída a um humano");
+      expect(ack).toContain("/reset");
+      expect(
+        ackCalls(cw.calls).every(
+          (c) => (c.body as { private?: boolean })?.private === true,
+        ),
+      ).toBe(true);
+
+      const cw2 = fakeChatwoot();
+      globalThis.fetch = cw2.impl;
+      await sendReset("/teste");
+      const ack2 = ackCalls(cw2.calls)
+        .map((c) => (c.body as { content?: string })?.content ?? "")
+        .join(" ");
+      // Bot-owned: unchanged, and it must NOT name a command with nothing to undo.
+      expect(ack2).toBe("🧪 Modo teste ativado para esta conversa.");
     });
 
     test("a partial reset is not announced as a full one", async () => {
