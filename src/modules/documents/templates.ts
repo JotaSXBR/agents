@@ -91,16 +91,26 @@ export async function documentTemplateWriteProblem(
   ctx: TenantContext,
   input: { name?: unknown; slug?: string },
   base: PrismaClient = basePrisma,
-  excludeId?: bigint,
+  opts: { deriveSlugFromName: boolean; excludeId?: bigint } = {
+    deriveSlugFromName: true,
+  },
 ): Promise<string | null> {
+  const { deriveSlugFromName, excludeId } = opts;
   let name: string | undefined;
   if (input.name !== undefined) {
     const parsed = templateNameSchema.safeParse(input.name);
     if (!parsed.success) return "name: must be between 1 and 120 characters.";
     name = parsed.data;
   }
+  // Only CREATE derives a slug from the name; a rename keeps the slug it already has, because the
+  // slug is a tool name an agent may already be granted. Deriving here on an update would refuse a
+  // perfectly good rename over a slug the write was never going to use — and only on the dry run,
+  // which is the worst place to disagree with the apply.
   const slug =
-    input.slug ?? (name !== undefined ? slugifyTemplateName(name) : undefined);
+    input.slug ??
+    (deriveSlugFromName && name !== undefined
+      ? slugifyTemplateName(name)
+      : undefined);
   if (slug === undefined) return null;
   const problem = slugProblem(slug);
   if (problem) return `slug: ${problem}.`;

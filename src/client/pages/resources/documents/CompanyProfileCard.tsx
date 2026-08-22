@@ -37,8 +37,18 @@ export function CompanyProfileCard({
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // Marks the `company` change that came from a logo write, so the draft effect below can skip it.
+  const logoOnlyRef = useRef(false);
+
   useEffect(() => {
     if (!company) return;
+    // A logo upload or removal returns the whole company block, and reinitialising the draft from it
+    // would discard the text the operator has typed and not yet saved — losing their edits because
+    // they changed the picture. Only the logo state (below) reacts to that write.
+    if (logoOnlyRef.current) {
+      logoOnlyRef.current = false;
+      return;
+    }
     setDraft(
       Object.fromEntries(FIELDS.map((f) => [f, company[f] ?? ""])) as Record<
         string,
@@ -101,6 +111,15 @@ export function CompanyProfileCard({
     }
   }
 
+  // The logo routes answer with the WHOLE company block, and handing that to `onChanged` replaces
+  // the `company` prop — which re-runs the draft effect and overwrites the text fields the operator
+  // has been typing but not yet saved. Their edits would vanish because they changed the logo. The
+  // logo half is applied on its own, and the draft is left alone.
+  function applyLogoOnly(next: CompanyProfile) {
+    logoOnlyRef.current = true;
+    onChanged(next);
+  }
+
   async function upload(file: File) {
     const { data, error } = await api.api.v1[
       "tenant-settings"
@@ -115,12 +134,12 @@ export function CompanyProfileCard({
       );
       return;
     }
-    onChanged(data.company);
+    applyLogoOnly(data.company);
   }
 
   async function removeLogo() {
     const { data } = await api.api.v1["tenant-settings"].company.logo.delete();
-    if (data) onChanged(data.company);
+    if (data) applyLogoOnly(data.company);
   }
 
   return (

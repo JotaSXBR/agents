@@ -1846,6 +1846,12 @@ function AgentEditor() {
           else navigate("/resources/knowledge");
           break;
         }
+        // The panel rather than a modal, unlike tools and MCP above: a document template's editor
+        // opens from its own row and needs the loaded template, which this page does not carry.
+        // Without an arm here the Review action only dismissed the warning and went nowhere.
+        case "document":
+          navigate("/resources/documents");
+          break;
       }
     }
     const key = `${w.code}:${JSON.stringify(w.params ?? {})}`;

@@ -603,6 +603,18 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
       },
     });
     srcAgentId = agent.id;
+    const offTpl = await createDocumentTemplate(
+      srcCtx(),
+      {
+        name: "Desativado",
+        slug: "desativado",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+        enabled: false,
+      },
+      appDb,
+    );
     await suDb.agentToolSelection.createMany({
       data: [
         {
@@ -641,6 +653,14 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
           agentId: srcAgentId,
           source: "DOCUMENT",
           documentTemplateId: BigInt(tpl.id),
+          enabledTools: [],
+          knowledgeBaseIds: [],
+        },
+        {
+          tenantId: srcTenant,
+          agentId: srcAgentId,
+          source: "DOCUMENT",
+          documentTemplateId: BigInt(offTpl.id),
           enabledTools: [],
           knowledgeBaseIds: [],
         },
@@ -691,6 +711,12 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
       c?.documentTemplates?.find((tpl) => tpl.slug === "orcamento")?.blocks
         ?.length,
     ).toBeGreaterThan(0);
+    // A template the operator turned OFF is off for a reason: omitted from the bundle, the import
+    // recreates it with the column default and the destination agent can issue a document the
+    // source instance had deliberately made unavailable.
+    expect(
+      c?.documentTemplates?.find((tpl) => tpl.slug === "desativado")?.enabled,
+    ).toBe(false);
     // Business hours are bundled so the import can recreate them.
     expect(c?.businessHours?.some((h) => h.name === "Comercial")).toBe(true);
     expect(
@@ -770,6 +796,7 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
     });
     expect(grants.map((g) => g.source).sort()).toEqual([
       "DOCUMENT",
+      "DOCUMENT",
       "HTTP",
       "INTEGRATION",
       "MCP",
@@ -783,6 +810,12 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
       select: { id: true, numberPrefix: true },
     });
     expect(dstTemplate?.numberPrefix).toBe("ORC-");
+    // …and the disabled one arrives disabled.
+    const dstOff = await suDb.documentTemplate.findFirst({
+      where: { tenantId: dstTenant, slug: "desativado" },
+      select: { enabled: true },
+    });
+    expect(dstOff?.enabled).toBe(false);
     const docGrant = await suDb.agentToolSelection.findFirst({
       where: { agentId: BigInt(agent.id), source: "DOCUMENT" },
       select: { documentTemplateId: true },

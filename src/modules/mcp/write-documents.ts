@@ -102,14 +102,24 @@ export async function documentTemplateCreate(
       `unknown starter "${args.starter}" — use document_starters_list to see the available ones`,
     );
   }
+  // `!== undefined` rather than `??` on the two NULLABLE overrides: both are advertised as accepting
+  // null, and `??` reads an explicit null as "not supplied" and puts the starter's value back — so a
+  // caller asking for a template with no description or no number prefix would get the starter's,
+  // with nothing saying their argument was ignored.
   const input = {
     name: args.name ?? starter?.name ?? "",
     slug: args.slug,
-    description: args.description ?? starter?.description ?? null,
+    description:
+      args.description !== undefined
+        ? args.description
+        : (starter?.description ?? null),
     blocks: args.blocks ?? starter?.blocks ?? [],
     fields: args.fields ?? starter?.fields ?? [],
     style: args.style ?? starter?.style,
-    numberPrefix: args.number_prefix ?? starter?.numberPrefix ?? null,
+    numberPrefix:
+      args.number_prefix !== undefined
+        ? args.number_prefix
+        : (starter?.numberPrefix ?? null),
     enabled: args.enabled,
   };
   if (!input.name) return err("name is required");
@@ -200,7 +210,10 @@ export async function documentTemplateUpdate(
     if (args.dry_run !== false) {
       // Same question as on create, with this template excluded from the uniqueness check: renaming
       // a slug to the one it already has is not a collision.
-      const problem = await documentTemplateWriteProblem(ctx, patch, base, id);
+      const problem = await documentTemplateWriteProblem(ctx, patch, base, {
+        deriveSlugFromName: false,
+        excludeId: id,
+      });
       if (problem) return err(problem);
       // Rendered, not just diffed: a block change that diffs as "blocks: 6 → 7" says nothing about
       // whether the seventh renders. Failing here is the point — the error names the block.

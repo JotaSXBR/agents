@@ -242,6 +242,44 @@ describe.skipIf(!dbUp)("MCP document writes", () => {
     expect(after?.style.font).not.toBe("mono");
   });
 
+  // Both are advertised as nullable overrides, and `??` reads an explicit null as "not supplied" —
+  // so a caller asking for a starter WITHOUT its description or its number prefix silently got them
+  // back, with nothing saying the argument was ignored.
+  test("an explicit null override is not filled back in from the starter", async () => {
+    const r = await documentTemplateCreate(
+      principal({ tenantId }),
+      {
+        starter: "quote",
+        name: "Sem prefixo",
+        slug: "sem_prefixo",
+        description: null,
+        number_prefix: null,
+        dry_run: false,
+      },
+      { base: appDb },
+    );
+    expect(r.ok).toBe(true);
+    const saved = (await listDocumentTemplates(ctx(), appDb)).find(
+      (t) => t.slug === "sem_prefixo",
+    );
+    expect(saved?.numberPrefix).toBeNull();
+    expect(saved?.description).toBeNull();
+  });
+
+  // A rename keeps the slug it already has, so a dry run must not judge a slug the write will never
+  // use: deriving one from the new name could refuse a perfectly good rename — and only on the dry
+  // run, which is the worst possible place to disagree with the apply.
+  test("a name-only dry run does not judge a slug derived from the name", async () => {
+    const [tpl] = await listDocumentTemplates(ctx(), appDb);
+    const r = await documentTemplateUpdate(
+      principal({ tenantId }),
+      // Slugifies to "sem_prefixo", which the test above just took.
+      { document_template_id: tpl?.id as string, name: "Sem prefixo" },
+      { base: appDb },
+    );
+    expect(r.ok).toBe(true);
+  });
+
   // A dry run that renders a beautiful document and then answers "valid" for input the apply
   // refuses is worse than no dry run at all: the caller acts on it, and the failure arrives on the
   // write it was told was safe.
@@ -297,7 +335,8 @@ describe.skipIf(!dbUp)("MCP document writes", () => {
   });
 
   test("delete dry-run says what survives the deletion", async () => {
-    const [tpl] = await listDocumentTemplates(ctx(), appDb);
+    const before = await listDocumentTemplates(ctx(), appDb);
+    const [tpl] = before;
     const r = await documentTemplateDelete(
       principal({ tenantId }),
       { document_template_id: tpl?.id as string },
@@ -308,7 +347,9 @@ describe.skipIf(!dbUp)("MCP document writes", () => {
       const data = r.data as { preview: { note: string } };
       expect(data.preview.note).toContain("frozen copy");
     }
-    expect(await listDocumentTemplates(ctx(), appDb)).toHaveLength(1);
+    expect(await listDocumentTemplates(ctx(), appDb)).toHaveLength(
+      before.length,
+    );
   });
 
   // The tenant fence: a template belonging to tenant A is not addressable from tenant B's token,

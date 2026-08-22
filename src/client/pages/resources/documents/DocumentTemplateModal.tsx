@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Button,
   FormField,
   Input,
   Modal,
+  ModalCancelButton,
   type ModalController,
   Select,
   SwitchField,
   Textarea,
+  useOnModalOpen,
   useToast,
 } from "@/client/components";
 import { api } from "@/client/lib/api";
@@ -55,24 +57,50 @@ export function DocumentTemplateModal({
   const [style, setStyle] = useState<Style | null>(null);
   const [texts, setTexts] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+  const baselineRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    if (!template) return;
-    setName(template.name);
-    setDescription(template.description ?? "");
-    setNumberPrefix(template.numberPrefix ?? "");
-    setEnabled(template.enabled);
-    setStyle({ ...template.style });
-    setTexts(
-      Object.fromEntries(
-        template.blocks
-          .filter((b): b is Block & { type: "text"; text: string } =>
-            Boolean(b && b.type === "text"),
-          )
-          .map((b) => [b.id, b.text]),
-      ),
+  // On OPEN, not on payload identity. The controller retains its payload after close (Radix needs it
+  // for the exit animation), so an operator who cancels and reopens the same template gets an effect
+  // that does not re-run and a form still holding the values they discarded — which the next Save
+  // would then persist. `useOnModalOpen` fires on every false→true transition, which is the event
+  // this reset belongs to (docs/modals.md).
+  useOnModalOpen(modal, () => {
+    const tpl = modal.payload?.template;
+    if (!tpl) return;
+    const initialTexts = Object.fromEntries(
+      tpl.blocks
+        .filter((b): b is Block & { type: "text"; text: string } =>
+          Boolean(b && b.type === "text"),
+        )
+        .map((b) => [b.id, b.text]),
     );
-  }, [template]);
+    setName(tpl.name);
+    setDescription(tpl.description ?? "");
+    setNumberPrefix(tpl.numberPrefix ?? "");
+    setEnabled(tpl.enabled);
+    setStyle({ ...tpl.style });
+    setTexts(initialTexts);
+    baselineRef.current = JSON.stringify({
+      name: tpl.name,
+      description: tpl.description ?? "",
+      numberPrefix: tpl.numberPrefix ?? "",
+      enabled: tpl.enabled,
+      style: { ...tpl.style },
+      texts: initialTexts,
+    });
+  });
+
+  // Null until the first open, so a form nobody has seen is never "dirty".
+  const isDirty =
+    baselineRef.current !== null &&
+    JSON.stringify({
+      name,
+      description,
+      numberPrefix,
+      enabled,
+      style,
+      texts,
+    }) !== baselineRef.current;
 
   // The blocks as edited: only the text of `text` blocks differs from what was loaded.
   const blocks = useMemo(() => {
@@ -122,6 +150,9 @@ export function DocumentTemplateModal({
         return;
       }
       showToast(t("common.saved", "Saved."), "success");
+      // Programmatic close after a successful save: nothing is dirty any more, so it correctly
+      // bypasses the guard. The footer's Cancel is the user-driven path and goes through it.
+      baselineRef.current = null;
       modal.close();
       onSaved();
     } finally {
@@ -135,12 +166,14 @@ export function DocumentTemplateModal({
     <Modal
       modal={modal}
       size="xl"
+      unsavedChanges={isDirty}
       title={t("documents.editTitle", "Edit document template")}
       footer={
         <div className="flex justify-end gap-2">
-          <Button variant="secondary" onClick={() => modal.close()}>
-            {t("common.cancel", "Cancel")}
-          </Button>
+          {/* Not modal.close(): that is the PROGRAMMATIC path and bypasses the unsaved-changes
+              guard by design. A footer Cancel is user-driven, so it funnels through the same guard
+              as Esc and the X (docs/modals.md). */}
+          <ModalCancelButton disabled={saving} />
           <Button onClick={save} loading={saving}>
             {t("common.save", "Save")}
           </Button>

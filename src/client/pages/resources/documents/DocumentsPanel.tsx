@@ -1,5 +1,5 @@
 import { FileText, Link2, Plus, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   type AgentRef,
@@ -112,16 +112,27 @@ export function DocumentsPanel() {
     return data ? [...data.references.agents] : null;
   }
 
+  // A session token per modal open. The lookup is slow enough for an operator to close one template
+  // and open another before it returns, and an unconditional assignment then shows template A's
+  // agents under template B's name — in the DELETE dialog that is a wrong warning about what the
+  // deletion breaks, which is the one place the operator is relying on it (docs/modals.md).
+  const refsSession = useRef(0);
+  const deleteSession = useRef(0);
+
   async function openRefs(tpl: DocumentTemplate) {
+    const session = ++refsSession.current;
     setRefs(null);
     refsModal.open({ name: tpl.name });
-    setRefs(await loadRefs(tpl.id));
+    const loaded = await loadRefs(tpl.id);
+    if (session === refsSession.current) setRefs(loaded);
   }
 
   async function askDelete(tpl: DocumentTemplate) {
+    const session = ++deleteSession.current;
     setDeleteRefs(null);
     deleteModal.open({ id: tpl.id, name: tpl.name });
-    setDeleteRefs(await loadRefs(tpl.id));
+    const loaded = await loadRefs(tpl.id);
+    if (session === deleteSession.current) setDeleteRefs(loaded);
   }
 
   async function confirmDelete() {
@@ -145,12 +156,18 @@ export function DocumentsPanel() {
   }
 
   // A blob URL rather than a link to the endpoint. The PDF route is tenant-scoped, and for a
-  // SUPER_ADMIN the tenant lives ONLY in the X-Tenant-Id header — which `window.open` cannot send, so
-  // the tab would land on "a target tenant is required" instead of the document. Same fix the logo
-  // and the preview already use.
+  // SUPER_ADMIN the tenant lives ONLY in the X-Tenant-Id header — which a plain navigation cannot
+  // send, so the tab would land on "a target tenant is required" instead of the document. Same fix
+  // the logo and the preview already use.
+  //
+  // The tab is opened SYNCHRONOUSLY, inside the click, and pointed at the blob afterwards. Opening
+  // it after the await spends the browser's transient user activation on a fetch, and the popup
+  // blocker then swallows the call: the button downloads the bytes and appears to do nothing.
   async function openPdf(doc: IssuedDocument) {
+    const tab = window.open("", "_blank", "noopener");
     const res = await mediaFetch(`/api/v1/documents/${doc.id}/pdf`);
     if (!res.ok) {
+      tab?.close();
       showToast(
         t("documents.openPdfError", "Could not open the PDF."),
         "error",
@@ -158,7 +175,13 @@ export function DocumentsPanel() {
       return;
     }
     const url = URL.createObjectURL(await res.blob());
-    window.open(url, "_blank", "noopener");
+    if (tab) {
+      tab.location.href = url;
+    } else {
+      // Blocked anyway (a browser that refuses even the synchronous open). Falling back to a
+      // same-tab navigation is better than a button that silently does nothing.
+      window.location.href = url;
+    }
     // The tab has the bytes by the time it paints; holding the handle any longer leaks it for as
     // long as the console stays open.
     setTimeout(() => URL.revokeObjectURL(url), 60_000);

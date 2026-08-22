@@ -154,6 +154,9 @@ const exportedDocumentTemplateSchema = z.object({
   fields: z.array(z.unknown()),
   style: z.record(z.string(), z.unknown()).optional(),
   numberPrefix: z.string().nullable().optional(),
+  // Optional so a bundle from before this field still imports; absent means enabled, which is the
+  // column default and what every such bundle described.
+  enabled: z.boolean().optional(),
 });
 // One source document of a knowledge base. Only the extracted TEXT travels (content); the destination
 // re-chunks + re-embeds. `sourceType` is a plain string (matches the DB column) so a future source kind
@@ -672,6 +675,10 @@ export async function exportAgent(
           fields: (r.fields ?? []) as unknown[],
           style: (r.style ?? {}) as Record<string, unknown>,
           numberPrefix: r.numberPrefix,
+          // A template the operator turned OFF is off for a reason. Omitted, the import recreates it
+          // with the column default — enabled — and the destination agent can issue a document the
+          // source instance had deliberately made unavailable.
+          enabled: r.enabled,
         })),
         knowledgeBases: kbRows.map((r) => ({
           name: r.name,
@@ -1345,6 +1352,7 @@ async function createMissingComponents(
           tpl.style,
         ) as unknown as Prisma.InputJsonValue,
         numberPrefix: tpl.numberPrefix ?? null,
+        enabled: tpl.enabled ?? true,
       },
     });
   }
