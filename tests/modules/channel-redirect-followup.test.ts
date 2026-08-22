@@ -658,6 +658,27 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
     expect(widget.redirectClosedAt).toBeNull();
   });
 
+  // The window the CLAIM itself opens: it is a write, so the answer taken before it predates it. The
+  // rendezvous is the closing's own fence read — the retire lands right after it answers, which is
+  // exactly where the claim sits.
+  test("a retire during the claim stops the closing and frees the anchor", async () => {
+    const job = await claimed("closing");
+    const s = stubClient();
+    await redirectFollowUpHandler(job, racingDb(retireNow, 3), {
+      ...deps(),
+      makeClient: s.makeClient,
+    });
+
+    expect(s.sent).toEqual([]);
+    expect(s.resolved).toEqual([]);
+    // Released: an anchor left set on a closing nobody delivered is a funnel that can never close.
+    const widget = await suDb.conversation.findFirstOrThrow({
+      where: { tenantId, chatwootConversationId: WIDGET_CONV },
+      select: { redirectClosedAt: true },
+    });
+    expect(widget.redirectClosedAt).toBeNull();
+  });
+
   // The control: the same stage, un-retired, does reach the wire — otherwise the assertion above
   // would pass on a stage that never does anything.
   test("an un-retired WhatsApp stage does escalate", async () => {

@@ -1671,6 +1671,44 @@ describe.skipIf(!dbUp)(
       await suDb.agent.delete({ where: { id: otherAgentId } });
     });
 
+    // And what happens when the inbox's persona has no bot at all. It cannot answer anywhere — every
+    // bot-token call goes out empty and comes back 401 — so reading "no id" as "this route is ours"
+    // let a command on ANOTHER persona's route unassign that working bot and hand the conversation to
+    // one that cannot speak.
+    test("an inbox with no bot of its own authorizes no route", async () => {
+      const { token: otherToken, agentId: otherAgentId } =
+        await seedOtherPersonaHoldingIt();
+      const ourBot = await suDb.chatwootAgentBot.findFirstOrThrow({
+        where: { tenantId, chatwootAgentBotId: 9 },
+        select: { id: true, agentId: true, webhookRouteTokenHash: true },
+      });
+      await suDb.chatwootAgentBot.delete({ where: { id: ourBot.id } });
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      try {
+        await sendReset("/reset", CONV_ID, {
+          status: "pending",
+          silentMeta: true,
+          routeToken: otherToken,
+        });
+        expect(cw.calls).toEqual([]);
+      } finally {
+        await suDb.chatwootAgentBot.create({
+          data: {
+            tenantId,
+            chatwootInstanceId: instanceId,
+            agentId: ourBot.agentId,
+            chatwootAgentBotId: 9,
+            accessToken: encryptJson(BOT_TOKEN),
+            webhookSecret: encryptJson(SECRET),
+            webhookRouteTokenHash: ourBot.webhookRouteTokenHash,
+            name: "Atendente",
+          },
+        });
+        await suDb.agent.delete({ where: { id: otherAgentId } });
+      }
+    });
+
     // The other half: the inbox's own route DOES run it, on the very conversation the other bot
     // holds. Without this the fence above could be passing by refusing every route.
     test("the inbox's own route runs the command on a conversation another bot holds", async () => {

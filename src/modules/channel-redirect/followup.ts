@@ -713,6 +713,39 @@ export async function deliverRedirectClosing(
   });
   if (!won) return "already-closed";
 
+  // NOTE: Asked once more, because the claim is a write and the answer above it predates it. Nothing
+  // has reached anybody yet, so this is the last point where the episode can still end without a
+  // goodbye — and the anchor goes back with it, since an anchor set on a closing nobody delivered is
+  // a funnel that can never close again.
+  //
+  // The release is CAS'd on the exact instant this claim wrote, so it cannot clear an anchor another
+  // trigger won afterwards. A release that fails leaves the anchor set, which is precisely what not
+  // releasing at all would do — it can only improve on doing nothing.
+  //
+  // Deliberately NOT asked again between the two channel deliveries below: once the first goodbye
+  // has left, the closing has happened, and stopping halfway leaves the episode half-closed rather
+  // than clean.
+  if (p.stillWanted && !(await p.stillWanted())) {
+    await runScopedOn(base, sysCtx(p.tenantId), (db) =>
+      db.conversation.updateMany({
+        where: {
+          tenantId: p.tenantId,
+          chatwootInstanceId: p.instanceId,
+          chatwootConversationId: p.widgetConversationId,
+          redirectClosedAt: now,
+        },
+        data: { redirectClosedAt: null },
+      }),
+    ).catch((err) => {
+      logger.warn(
+        "channel-redirect: could not release the closing watermark (widget conv=%d): %s",
+        p.widgetConversationId,
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+    return "already-closed";
+  }
+
   // Chat (website widget): post the goodbye + resolve. Skipped on the resolve-path, where the chat is
   // already being resolved by the trigger. A web widget has no 24h window → proactiveSendMode → freeform.
   if (p.closeChat) {

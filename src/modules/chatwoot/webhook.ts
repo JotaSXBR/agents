@@ -812,17 +812,23 @@ async function maybeConsumeCommandOrGate(params: {
   // THIS inbox: it is that agent's memory being cleared and that agent the conversation goes back
   // to. The other route consumes the delivery and does nothing — returning false there would hand
   // "/reset" to its own agent as ordinary customer text.
-  const commandRoute = async (): Promise<"ours" | "another-bot"> => {
+  // Fails CLOSED on an unresolvable identity, on either side. An inbox whose agent has no
+  // ChatwootAgentBot row cannot answer anywhere — every bot-token call it makes goes out with an
+  // empty token and comes back 401 (issue #79) — so treating "we have no id" as "this route is ours"
+  // let a command arriving on ANOTHER persona's route unassign that working bot and hand the
+  // conversation to one that cannot speak. The same for a delivery whose own route bot is unknown:
+  // an unattributed route is not evidence that this is the right one.
+  const commandBelongsHere = async (): Promise<boolean> => {
     const ourBotId = (await persona())?.chatwootAgentBotId ?? null;
-    return ourBotId === null ||
-      params.agentBotId === null ||
+    return (
+      ourBotId !== null &&
+      params.agentBotId !== null &&
       params.agentBotId === ourBotId
-      ? "ours"
-      : "another-bot";
+    );
   };
-  if (command !== null && commandActive && (await commandRoute()) !== "ours") {
+  if (command !== null && commandActive && !(await commandBelongsHere())) {
     logger.info(
-      "chatwoot: command delivered on another bot's route, leaving it to the inbox's persona (conv=%s)",
+      "chatwoot: command not for this route, leaving it to the inbox's persona (conv=%s)",
       String(conversationId),
     );
     return true;
