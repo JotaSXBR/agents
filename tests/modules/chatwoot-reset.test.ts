@@ -1689,54 +1689,50 @@ describe.skipIf(!dbUp)(
       }
     });
 
-    // The ladder takes the same cutoff, and it needs it more: re-arming on every customer message IS
-    // the redirect's cancel-on-reply, so a lead who replies while the command runs re-arms the very
-    // ladder the command is about to retire.
-    test("a ladder re-armed while the reset runs survives it", async () => {
-      await withRedirectPair(async (_convId, widgetThread) => {
-        await suDb.schedulerJob.create({
-          data: {
-            tenantId,
-            kind: "REDIRECT_FOLLOWUP",
-            dedupeKey: `redirect-followup:${widgetThread}`,
-            runAt: new Date(Date.now() + 3_600_000),
-            payload: { stage: "chat", widgetThreadId: widgetThread },
-          },
-        });
-        const cw = fakeChatwoot();
-        const inner = cw.impl;
-        let rearmed = false;
-        globalThis.fetch = (async (input, init) => {
-          if (!rearmed && String(input).includes("/kanban/tasks/")) {
-            rearmed = true;
-            // What armRedirectChatFollowUp does on a reply: the same row, rewritten.
-            await suDb.schedulerJob.updateMany({
-              where: {
-                tenantId,
-                kind: "REDIRECT_FOLLOWUP",
-                dedupeKey: `redirect-followup:${widgetThread}`,
-              },
-              data: { runAt: new Date(Date.now() + 7_200_000) },
-            });
-          }
-          return inner(input, init);
-        }) as typeof fetch;
-        try {
-          await sendReset();
-
-          expect(rearmed).toBe(true);
-          const job = await suDb.schedulerJob.findFirstOrThrow({
-            where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
-            select: { status: true, payload: true },
-          });
-          expect(job.status).toBe("PENDING");
-          expect(
-            (job.payload as { cancelledAt?: string })?.cancelledAt,
-          ).toBeUndefined();
-        } finally {
-          globalThis.fetch = originalFetch;
-        }
+    // The cutoff reads the IMMUTABLE column. `updated_at` is the scheduler's own bookkeeping — a
+    // CLAIM stamps it — so a reminder armed long before the command but picked up by a worker while
+    // it runs would read as newly armed and be spared: exactly the in-flight reminder the tombstone
+    // exists to stop, walking away from the reset that was supposed to retire it.
+    test("a reminder claimed mid-reset is still work the command was asked about", async () => {
+      const threadId = `${tenantId}:${instanceId}:${CONV_ID}`;
+      await suDb.schedulerJob.create({
+        data: {
+          tenantId,
+          kind: "APPOINTMENT_REMINDER",
+          dedupeKey: "reminder:evt-claimed:60",
+          runAt: new Date(Date.now() + 3_600_000),
+          payload: { threadId, eventId: "evt-claimed", calendarId: "c" },
+        },
       });
+      const cw = fakeChatwoot();
+      const inner = cw.impl;
+      let claimed = false;
+      globalThis.fetch = (async (input, init) => {
+        if (!claimed && String(input).includes("/kanban/tasks/")) {
+          claimed = true;
+          // What claimWhere does to the row: status moves and `updated_at` goes with it.
+          await suDb.schedulerJob.updateMany({
+            where: { tenantId, dedupeKey: "reminder:evt-claimed:60" },
+            data: { status: "CLAIMED" },
+          });
+        }
+        return inner(input, init);
+      }) as typeof fetch;
+      try {
+        await sendReset();
+
+        expect(claimed).toBe(true);
+        const row = await suDb.schedulerJob.findFirstOrThrow({
+          where: { tenantId, dedupeKey: "reminder:evt-claimed:60" },
+          select: { payload: true },
+        });
+        expect(
+          (row.payload as { cancelledAt?: string })?.cancelledAt,
+        ).toBeString();
+      } finally {
+        globalThis.fetch = originalFetch;
+        await suDb.schedulerJob.deleteMany({ where: { tenantId } });
+      }
     });
 
     // And the opposite fence on the reminders. They are keyed `reminder:<eventId>:<offset>`, so the

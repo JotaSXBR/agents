@@ -397,7 +397,8 @@ describe.skipIf(!dbUp)("a reminder retired while claimed", () => {
       kind: "APPOINTMENT_REMINDER",
       payload: row.payload as Record<string, unknown>,
       attempts: 0,
-      claimSeq: 0,
+      // From the ROW: a cancel bumps the token, so a literal would read as superseded later.
+      claimSeq: row.claimSeq,
     };
     return job;
   };
@@ -450,6 +451,34 @@ describe.skipIf(!dbUp)("a reminder retired while claimed", () => {
 
     // Asked twice, and the second is the one that saw it.
     expect(reads).toBe(2);
+    expect(s.sent).toEqual([]);
+  });
+
+  // A reschedule re-arms this same key and replaces the payload, wiping the stamp — so the stamp
+  // alone would let a run that was already retired come back because the customer rebooked.
+  test("a rebooking does not revive the run the reset stopped", async () => {
+    const job = await armed("reminder:evt-4:60");
+    await cancelThreadAppointmentReminders(tenantId, threadId, appDb);
+    await suDb.schedulerJob.updateMany({
+      where: {
+        tenantId,
+        kind: "APPOINTMENT_REMINDER",
+        dedupeKey: "reminder:evt-4:60",
+      },
+      data: {
+        status: "PENDING",
+        payload: { threadId, eventId: "evt-4", calendarId: "c" },
+      },
+    });
+    const s = stubClient();
+
+    await appointmentReminderHandler(job, appDb, {
+      makeModel: () => new FakeListChatModel({ responses: ["Lembrete!"] }),
+      makeClient: s.makeClient,
+      checkpointer: new MemorySaver(),
+      persistUsage: async () => {},
+    });
+
     expect(s.sent).toEqual([]);
   });
 

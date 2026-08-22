@@ -1379,7 +1379,6 @@ async function maybeConsumeCommandOrGate(params: {
           tenantId,
           chatwootThreadId(tenantId, instanceId, ladderConversationId),
           base,
-          askedAt,
         ),
     );
     // NOTE: Both sides of the pair, for the same reason the ladder is cancelled by the widget's key: in a

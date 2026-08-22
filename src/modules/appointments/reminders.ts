@@ -174,13 +174,16 @@ export async function cancelThreadAppointmentReminders(
   tenantId: bigint,
   threadId: string,
   base: PrismaClient = basePrisma,
-  // NOTE: Only rows last written at or before this instant. /reset is the caller and it is not atomic
-  // with the conversation: a customer message arriving during the cleanup runs a turn, and that turn
-  // can BOOK something. Retiring unconditionally then cancels reminders for an appointment made
-  // after the command was typed — and since the command also clears `lastInboundAt`, nothing re-arms
-  // them, so a real booking silently loses its reminders. A re-arm rewrites the row (enqueueJob
-  // upserts), which moves `updated_at` past the cutoff, so re-armed work is spared for the same
-  // reason a newer takeover is: it happened after the command was asked.
+  // NOTE: Only rows CREATED at or before this instant. /reset is the caller and it is not atomic with
+  // the conversation: a customer message arriving during the cleanup runs a turn, and that turn can
+  // BOOK something. Retiring unconditionally then cancels reminders for an appointment made after
+  // the command was typed — and since the command also clears `lastInboundAt`, nothing re-arms them,
+  // so a real booking silently loses its reminders. A new booking is new rows (the key carries the
+  // event id), so the cutoff spares exactly it.
+  //
+  // `created_at` and never `updated_at`: the scheduler stamps the latter when it CLAIMS a row, so a
+  // reminder armed long before the command but picked up during it would read as new and be spared —
+  // the worst direction, since that is precisely the in-flight reminder the tombstone exists to stop.
   armedBefore?: Date,
 ): Promise<number> {
   return runScopedOn(base, sysCtx(tenantId), async (db) => {
@@ -188,13 +191,14 @@ export async function cancelThreadAppointmentReminders(
     const cutoff = armedBefore ?? new Date(8_640_000_000_000_000);
     return db.$executeRaw`
       UPDATE scheduler_jobs
-         SET status = CASE WHEN status = 'PENDING' THEN 'DONE' ELSE status END,
+         SET status = 'DONE',
              payload = payload || ${stamp}::jsonb,
+             claim_seq = claim_seq + 1,
              updated_at = now()
        WHERE tenant_id = ${tenantId}
          AND kind = 'APPOINTMENT_REMINDER'
          AND payload->>'threadId' = ${threadId}
-         AND updated_at <= ${cutoff}`;
+         AND created_at <= ${cutoff}`;
   });
 }
 
@@ -342,7 +346,7 @@ export async function appointmentReminderHandler(
     const row = await runScopedOn(base, sysCtx(tenantId), (db) =>
       db.schedulerJob.findUnique({
         where: { id: job.id },
-        select: { payload: true },
+        select: { payload: true, claimSeq: true },
       }),
     ).catch((err) => {
       logger.warn(
@@ -353,8 +357,13 @@ export async function appointmentReminderHandler(
       return null;
     });
     if (!row) return false;
+    // Stamp OR token, for the reason the redirect ladder reads both: a reschedule re-arms this same
+    // key and replaces the payload wholesale, wiping `cancelledAt` — and a run that was retired
+    // before that must not come back to life because someone rebooked. The retire bumps the token,
+    // which the rewrite does not restore.
     const stamped =
-      (row.payload as { cancelledAt?: unknown } | null)?.cancelledAt != null;
+      (row.payload as { cancelledAt?: unknown } | null)?.cancelledAt != null ||
+      row.claimSeq !== job.claimSeq;
     if (stamped) {
       logger.info(
         "appointment reminder: retired while claimed, not sending (job=%s)",

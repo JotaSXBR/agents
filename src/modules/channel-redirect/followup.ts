@@ -134,6 +134,11 @@ export async function resolveRedirectEpisode(
 // pushed into cancelPendingJob: that primitive has eight callers across four modules, and each of
 // them would need its own handler-side fence to make the change mean anything.
 //
+// NO arming cutoff here, unlike the appointment reminders: this ladder lives on ONE permanent row
+// per widget thread, so "created before the command" is true of every ladder that exists and a
+// re-arm does not move it. A cutoff on it would buy nothing and could only fail in the direction
+// that leaves a claimed closing running — the one that messages and resolves both conversations.
+//
 // DONE even for a row the worker is holding, and that pairs with the bump rather than duplicating it.
 // Bumping alone leaves a CLAIMED row nobody can finish — the in-flight worker's complete, reschedule
 // and fail all CAS on the old token and no-op, while no claim can pick it up again because it is
@@ -154,15 +159,9 @@ export async function retireRedirectFollowUp(
   tenantId: bigint,
   widgetThreadId: string,
   base: PrismaClient = basePrisma,
-  // NOTE: Only a row last written at or before this instant — the same cutoff appointment reminders
-  // take, for the same reason. /reset is not atomic with the conversation, and a turn running
-  // alongside it re-arms this ladder on every customer message (that re-arm IS the cancel-on-reply).
-  // A ladder armed after the command was typed belongs to the episode that started after it.
-  armedBefore?: Date,
 ): Promise<number> {
   return runScopedOn(base, sysCtx(tenantId), async (db) => {
     const stamp = JSON.stringify({ cancelledAt: new Date().toISOString() });
-    const cutoff = armedBefore ?? new Date(8_640_000_000_000_000);
     return db.$executeRaw`
       UPDATE scheduler_jobs
          SET status = 'DONE',
@@ -171,8 +170,7 @@ export async function retireRedirectFollowUp(
              updated_at = now()
        WHERE tenant_id = ${tenantId}
          AND kind = 'REDIRECT_FOLLOWUP'
-         AND dedupe_key = ${followUpDedupeKey(widgetThreadId)}
-         AND updated_at <= ${cutoff}`;
+         AND dedupe_key = ${followUpDedupeKey(widgetThreadId)}`;
   });
 }
 
@@ -449,7 +447,7 @@ export async function redirectFollowUpHandler(
     const row = await runScopedOn(base, sysCtx(job.tenantId), (db) =>
       db.schedulerJob.findUnique({
         where: { id: job.id },
-        select: { payload: true },
+        select: { payload: true, claimSeq: true },
       }),
     ).catch((err) => {
       logger.warn(
@@ -459,15 +457,23 @@ export async function redirectFollowUpHandler(
       );
       return null;
     });
-    const stamped =
-      (row?.payload as { cancelledAt?: unknown } | null)?.cancelledAt != null;
-    if (stamped) {
+    if (!row) return false;
+    // The stamp is the direct answer, and the TOKEN is the durable one. A re-arm replaces the
+    // payload wholesale (enqueueJob upserts), which wipes `cancelledAt` — so a lead replying after
+    // the retire would make this run "wanted" again and let its stale stage close both
+    // conversations, even though the scheduler will reject whatever it writes at the end. The token
+    // survives that rewrite, and a token that moved says the same thing in one word: this run was
+    // superseded.
+    const superseded =
+      (row.payload as { cancelledAt?: unknown } | null)?.cancelledAt != null ||
+      row.claimSeq !== job.claimSeq;
+    if (superseded) {
       logger.info(
         "channel-redirect: ladder retired while claimed, standing down (job=%s)",
         String(job.id),
       );
     }
-    return stamped;
+    return superseded;
   };
   if (await retired()) return { outcome: "done" };
   const parsed = parseThreadId(payload.widgetThreadId);

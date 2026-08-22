@@ -469,14 +469,16 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
       },
       update: { status: "CLAIMED", payload },
     });
-    // The snapshot the worker holds: captured at claim time, before any stamp.
+    // The snapshot the worker holds: captured at claim time, before any stamp. The token comes from
+    // the ROW, never a literal — a retire in an earlier test bumps it, and a hardcoded 0 would then
+    // read as superseded and make every later ladder stand down for the wrong reason.
     return {
       id: row.id,
       tenantId,
       kind: "REDIRECT_FOLLOWUP",
       payload,
       attempts: 0,
-      claimSeq: 0,
+      claimSeq: row.claimSeq,
     };
   };
 
@@ -540,6 +542,36 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
       select: { payload: true },
     });
     expect((row.payload as { cancelledAt?: string })?.cancelledAt).toBeString();
+  });
+
+  // A re-arm after the retire wipes the stamp — enqueueJob replaces the payload wholesale — so the
+  // stamp alone would let this run come back to life because the lead replied. The claim token
+  // survives that rewrite, and a token that moved says the same thing: superseded.
+  test("a re-arm after the retire does not revive the run it stopped", async () => {
+    const job = await claimed("closing");
+    await retireRedirectFollowUp(tenantId, widgetThread, appDb);
+    // What a reply does: same row, fresh payload, no cancelledAt.
+    await suDb.schedulerJob.updateMany({
+      where: {
+        tenantId,
+        kind: "REDIRECT_FOLLOWUP",
+        dedupeKey: `redirect-followup:${widgetThread}`,
+      },
+      data: {
+        status: "PENDING",
+        payload: { stage: "chat", widgetThreadId: widgetThread },
+      },
+    });
+    const s = stubClient();
+
+    await redirectFollowUpHandler(job, appDb, {
+      ...deps(),
+      makeClient: s.makeClient,
+    });
+
+    // The stale run stays down: nothing sent, nothing resolved.
+    expect(s.sent).toEqual([]);
+    expect(s.resolved).toEqual([]);
   });
 
   // The last boundary the handler does not own: its RETURN. Whatever it decides, the worker is what
