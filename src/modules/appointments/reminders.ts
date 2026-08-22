@@ -10,6 +10,7 @@ import {
   type ClaimedJob,
   cancelPendingJobsByPrefix,
   enqueueJob,
+  jobRetired,
 } from "@/modules/scheduler/service";
 import { type JobResult, registerJobHandler } from "@/modules/scheduler/worker";
 import { ensureFreshGoogleAccessToken } from "@/modules/vault/google-oauth";
@@ -340,36 +341,7 @@ export async function appointmentReminderHandler(
   // Re-read rather than trusted from `job.payload`: that snapshot is from claim time, which is
   // exactly the moment before the stamp lands. A read that fails does NOT suppress the reminder —
   // an unknown answer must not silently drop a customer-facing message that was legitimately armed.
-  const retired = async (): Promise<boolean> => {
-    const row = await runScopedOn(base, sysCtx(tenantId), (db) =>
-      db.schedulerJob.findUnique({
-        where: { id: job.id },
-        select: { payload: true, claimSeq: true },
-      }),
-    ).catch((err) => {
-      logger.warn(
-        "appointment reminder: could not re-read the cancellation stamp (job=%s): %s",
-        String(job.id),
-        err instanceof Error ? err.message : String(err),
-      );
-      return null;
-    });
-    if (!row) return false;
-    // Stamp OR token, for the reason the redirect ladder reads both: a reschedule re-arms this same
-    // key and replaces the payload wholesale, wiping `cancelledAt` — and a run that was retired
-    // before that must not come back to life because someone rebooked. The retire bumps the token,
-    // which the rewrite does not restore.
-    const stamped =
-      (row.payload as { cancelledAt?: unknown } | null)?.cancelledAt != null ||
-      row.claimSeq !== job.claimSeq;
-    if (stamped) {
-      logger.info(
-        "appointment reminder: retired while claimed, not sending (job=%s)",
-        String(job.id),
-      );
-    }
-    return stamped;
-  };
+  const retired = (): Promise<boolean> => jobRetired(job, base);
 
   // NOTE: Asked TWICE, and the two calls buy different things. Here it saves the Google round trip, which
   // holds this handler for up to ten seconds. After it — see below — is where the window actually

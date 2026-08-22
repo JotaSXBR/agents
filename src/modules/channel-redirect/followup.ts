@@ -5,7 +5,12 @@ import { type AgentNudge, parseThreadId, runAgentNudge } from "@/graph/nudge";
 import type { RuntimeDeps } from "@/graph/runtime";
 import { runScopedOn, type TenantContext } from "@/lib/tenancy";
 import { loadAgentBot, loadChatwootClient } from "@/modules/chatwoot/instance";
-import { type ClaimedJob, enqueueJob } from "@/modules/scheduler/service";
+import {
+  type ClaimedJob,
+  enqueueJob,
+  jobRetired,
+  retireJobsByDedupeKey,
+} from "@/modules/scheduler/service";
 import { type JobResult, registerJobHandler } from "@/modules/scheduler/worker";
 import {
   buildTemplatePayload,
@@ -160,18 +165,12 @@ export async function retireRedirectFollowUp(
   widgetThreadId: string,
   base: PrismaClient = basePrisma,
 ): Promise<number> {
-  return runScopedOn(base, sysCtx(tenantId), async (db) => {
-    const stamp = JSON.stringify({ cancelledAt: new Date().toISOString() });
-    return db.$executeRaw`
-      UPDATE scheduler_jobs
-         SET status = 'DONE',
-             payload = payload || ${stamp}::jsonb,
-             claim_seq = claim_seq + 1,
-             updated_at = now()
-       WHERE tenant_id = ${tenantId}
-         AND kind = 'REDIRECT_FOLLOWUP'
-         AND dedupe_key = ${followUpDedupeKey(widgetThreadId)}`;
-  });
+  return retireJobsByDedupeKey(
+    tenantId,
+    "REDIRECT_FOLLOWUP",
+    followUpDedupeKey(widgetThreadId),
+    base,
+  );
 }
 
 export type RedirectFollowUpStage = "chat" | "whatsapp" | "closing";
@@ -443,38 +442,7 @@ export async function redirectFollowUpHandler(
   //
   // A read that fails does NOT retire the job: an unknown answer must not silently drop work that
   // was legitimately armed.
-  const retired = async (): Promise<boolean> => {
-    const row = await runScopedOn(base, sysCtx(job.tenantId), (db) =>
-      db.schedulerJob.findUnique({
-        where: { id: job.id },
-        select: { payload: true, claimSeq: true },
-      }),
-    ).catch((err) => {
-      logger.warn(
-        "channel-redirect: could not re-read the cancellation stamp (job=%s): %s",
-        String(job.id),
-        err instanceof Error ? err.message : String(err),
-      );
-      return null;
-    });
-    if (!row) return false;
-    // The stamp is the direct answer, and the TOKEN is the durable one. A re-arm replaces the
-    // payload wholesale (enqueueJob upserts), which wipes `cancelledAt` — so a lead replying after
-    // the retire would make this run "wanted" again and let its stale stage close both
-    // conversations, even though the scheduler will reject whatever it writes at the end. The token
-    // survives that rewrite, and a token that moved says the same thing in one word: this run was
-    // superseded.
-    const superseded =
-      (row.payload as { cancelledAt?: unknown } | null)?.cancelledAt != null ||
-      row.claimSeq !== job.claimSeq;
-    if (superseded) {
-      logger.info(
-        "channel-redirect: ladder retired while claimed, standing down (job=%s)",
-        String(job.id),
-      );
-    }
-    return superseded;
-  };
+  const retired = (): Promise<boolean> => jobRetired(job, base);
   if (await retired()) return { outcome: "done" };
   const parsed = parseThreadId(payload.widgetThreadId);
   if (!parsed || parsed.tenantId !== job.tenantId) return { outcome: "done" };

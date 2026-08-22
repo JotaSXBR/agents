@@ -17,7 +17,10 @@ import {
   followUpHandler,
   registerFollowUpHandlers,
 } from "@/modules/followups/handlers";
-import type { ClaimedJob } from "@/modules/scheduler/service";
+import {
+  type ClaimedJob,
+  retireJobsByDedupeKey,
+} from "@/modules/scheduler/service";
 import { getJobHandler } from "@/modules/scheduler/worker";
 import { seedChatwootInstance } from "../utils/chatwoot";
 
@@ -451,6 +454,45 @@ describe.skipIf(!dbUp)("follow-up em conversa resolvida — guardrails", () => {
     expect(after.status).toBe("resolved");
     // Sem stamp: nada aconteceu; um episódio futuro real (cliente volta) decide sozinho.
     expect(after.lastFollowUpAt).toBeNull();
+  });
+
+  // (6) O portão ao vivo pergunta POSSE, e /reset devolve a posse. Um follow-up já reivindicado
+  // passou pela primeira sondagem e está dentro da chamada do modelo; o operador reseta, a conversa
+  // volta para a IA, e a segunda sondagem encontra tudo em ordem — postando um nudge do episódio que
+  // acabou de ser apagado. A lápide é a pergunta que a devolução não consegue responder que sim.
+  test("(6) um follow-up aposentado enquanto rodava não posta, mesmo com a posse devolvida", async () => {
+    const CONV = 4340;
+    await seedConversation(CONV, inboxAId, {
+      lastEventAt: new Date(Date.now() - 2 * HOUR),
+      lastInboundAt: new Date(Date.now() - 2 * HOUR),
+    });
+    const dedupeKey = `followup:${threadOf(CONV)}`;
+    const row = await suDb.schedulerJob.create({
+      data: {
+        tenantId,
+        kind: "FOLLOWUP",
+        dedupeKey,
+        runAt: new Date(),
+        // Reivindicado: o estado em que um cancel não alcança a linha.
+        status: "CLAIMED",
+        payload: { threadId: threadOf(CONV) },
+      },
+      select: { id: true, claimSeq: true },
+    });
+    // O que o /reset faz com ela, e o que a execução em voo segura.
+    await retireJobsByDedupeKey(tenantId, "FOLLOWUP", dedupeKey, suDb);
+    // Chatwoot diz que a conversa é da IA — que é exatamente o que a devolução deixa para trás.
+    const s = stubClient(() => ({ id: CONV, status: "pending", meta: {} }));
+
+    const result = await followUpHandler(
+      { ...jobFor(CONV), id: row.id, claimSeq: row.claimSeq },
+      appDb,
+      handlerDeps(s),
+    );
+
+    expect(result).toEqual({ outcome: "done" });
+    expect(s.sent).toEqual([]);
+    expect(s.notes).toEqual([]);
   });
 
   // O reconcile escreve status e assignee a partir de um snapshot REST que também traz a versão da

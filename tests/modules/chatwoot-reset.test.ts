@@ -1865,6 +1865,42 @@ describe.skipIf(!dbUp)(
       }
     });
 
+    // The inactivity follow-up was on a CANCEL, which reaches PENDING rows only — so the one row that
+    // can still post at the customer, the claimed one already inside its model call, was the one it
+    // could not touch. Worse, the hand-back below answers "yes, the bot owns it" to that run's second
+    // ownership probe, so the nudge lands right after the acknowledgement.
+    test("a follow-up already claimed is tombstoned too", async () => {
+      const dedupeKey = `followup:${tenantId}:${instanceId}:${CONV_ID}`;
+      await suDb.schedulerJob.create({
+        data: {
+          tenantId,
+          kind: "FOLLOWUP",
+          dedupeKey,
+          runAt: new Date(),
+          status: "CLAIMED",
+          payload: { threadId: `${tenantId}:${instanceId}:${CONV_ID}` },
+        },
+      });
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl as typeof fetch;
+      try {
+        await sendReset();
+
+        const row = await suDb.schedulerJob.findFirstOrThrow({
+          where: { tenantId, kind: "FOLLOWUP", dedupeKey },
+          select: { payload: true, claimSeq: true },
+        });
+        expect(
+          (row.payload as { cancelledAt?: string })?.cancelledAt,
+        ).toBeString();
+        // The token moved too, so a sweep re-arming this key cannot bring the stopped run back.
+        expect(row.claimSeq).toBe(1);
+      } finally {
+        globalThis.fetch = originalFetch;
+        await suDb.schedulerJob.deleteMany({ where: { tenantId } });
+      }
+    });
+
     // No status filter on the retirement, and that is deliberate: a row a worker has ALREADY claimed
     // is precisely the in-flight reminder the tombstone exists to stop. Only the stamp reaches it —
     // the handler re-reads it mid-run — so a retirement that skipped CLAIMED rows would let the one

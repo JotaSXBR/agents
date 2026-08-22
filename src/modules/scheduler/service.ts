@@ -1,4 +1,5 @@
 import { Prisma, type PrismaClient } from "@/../generated/prisma/client";
+import logger from "@/api/lib/logger";
 import basePrisma from "@/api/lib/prisma";
 import { asSuperAdminOn, runScopedOn, type TenantContext } from "@/lib/tenancy";
 import { kindsInLane, type SchedulerLane } from "@/modules/scheduler/lanes";
@@ -112,6 +113,80 @@ export async function enqueueJob(params: EnqueueParams): Promise<bigint> {
     });
     return row.id;
   });
+}
+
+// Retire jobs the way a CANCEL cannot: `cancelPendingJob` reaches PENDING rows only, and the row that
+// matters most to a command like /reset is the CLAIMED one — a handler already running, on its way to
+// posting at the customer. This leaves a tombstone the running handler can SEE (via `jobRetired`)
+// instead of a status change it will never look at.
+//
+// Two marks, because neither survives alone. `cancelledAt` is the direct answer, and a re-arm wipes
+// it: `enqueueJob`'s upsert replaces the payload wholesale, so a customer who books again would make
+// the retired run "wanted" once more. `claim_seq` survives that rewrite, and a token that moved says
+// the same thing in one word — this run was superseded. The bump also fences whatever the run writes
+// at the end, since completeJob/rescheduleJob/failJob all CAS on the token the claim handed out.
+//
+// One atomic statement, never read-modify-write, so a concurrent re-arm's payload is stamped or
+// replaced whole. UNCONDITIONAL by design: a caller that cannot afford to retire work armed after it
+// asked runs this BEFORE its slow steps, so that re-arm lands afterwards and revives its own row.
+// Returns the number of rows retired.
+export async function retireJobsByDedupeKey(
+  tenantId: bigint,
+  kind: SchedulerJobKind,
+  dedupeKey: string,
+  base: PrismaClient = basePrisma,
+): Promise<number> {
+  return runScopedOn(base, sysCtx(tenantId), async (db) => {
+    const stamp = JSON.stringify({ cancelledAt: new Date().toISOString() });
+    return db.$executeRaw`
+      UPDATE scheduler_jobs
+         SET status = 'DONE',
+             payload = payload || ${stamp}::jsonb,
+             claim_seq = claim_seq + 1,
+             updated_at = now()
+       WHERE tenant_id = ${tenantId}
+         AND kind = ${kind}::"SchedulerJobKind"
+         AND dedupe_key = ${dedupeKey}`;
+  });
+}
+
+// The other half of the tombstone, for the handler holding the claim: has this run been superseded
+// while it worked? Re-READ rather than trusted from `job.payload`, because that snapshot is from
+// claim time, which is exactly the moment before a stamp would land.
+//
+// Unreadable is NOT retired. An unknown must not silently drop a customer-facing message that was
+// legitimately armed — the caller asks this to withhold work, so the uncertain answer is the one that
+// lets it proceed and be fenced by the CAS at the end.
+export async function jobRetired(
+  job: ClaimedJob,
+  base: PrismaClient = basePrisma,
+): Promise<boolean> {
+  const row = await runScopedOn(base, sysCtx(job.tenantId), (db) =>
+    db.schedulerJob.findUnique({
+      where: { id: job.id },
+      select: { payload: true, claimSeq: true },
+    }),
+  ).catch((err: unknown) => {
+    logger.warn(
+      "scheduler: could not re-read the retirement of a claimed job (kind=%s job=%s): %s",
+      job.kind,
+      String(job.id),
+      err instanceof Error ? err.message : String(err),
+    );
+    return null;
+  });
+  if (!row) return false;
+  const retired =
+    (row.payload as { cancelledAt?: unknown } | null)?.cancelledAt != null ||
+    row.claimSeq !== job.claimSeq;
+  if (retired) {
+    logger.info(
+      "scheduler: claimed job retired, standing down (kind=%s job=%s)",
+      job.kind,
+      String(job.id),
+    );
+  }
+  return retired;
 }
 
 // A customer reply (or opt-out) makes a pending proactive job moot: CAS-cancel the live PENDING

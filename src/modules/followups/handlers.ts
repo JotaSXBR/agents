@@ -14,7 +14,11 @@ import {
 } from "@/modules/business-hours/hours";
 import { readChannelRedirectConfig } from "@/modules/channel-redirect/service";
 import { isFollowUpLive } from "@/modules/followups/eligibility";
-import { type ClaimedJob, enqueueJob } from "@/modules/scheduler/service";
+import {
+  type ClaimedJob,
+  enqueueJob,
+  jobRetired,
+} from "@/modules/scheduler/service";
 import { type JobResult, registerJobHandler } from "@/modules/scheduler/worker";
 import {
   type FollowUpStep,
@@ -430,6 +434,12 @@ export async function followUpHandler(
     // be stale forever (a lost resolve webhook has no reconciliation), and following up a resolved
     // conversation was the community-reported incident this gate exists for.
     requireLiveBotOwnership: true,
+    // NOTE: And the live gate is not enough on its own, because it asks about OWNERSHIP and /reset can
+    // give ownership back. A follow-up already inside the model call has passed the first probe; the
+    // operator resets, which returns the conversation to the agent, and the second probe then finds
+    // it bot-owned again and posts a nudge from the episode that was just erased. The tombstone is
+    // the question the hand-back cannot answer yes to.
+    stillWanted: async () => !(await jobRetired(job, base)),
     base,
     deps,
   });

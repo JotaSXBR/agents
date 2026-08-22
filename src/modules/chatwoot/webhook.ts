@@ -59,7 +59,10 @@ import { advanceHandledWatermark } from "@/modules/debounce/watermark";
 import { armCompaction } from "@/modules/memory/compact";
 import { clearContactMemory } from "@/modules/memory/reset";
 import { readMemoryConfig } from "@/modules/memory/settings";
-import { cancelPendingJob } from "@/modules/scheduler/service";
+import {
+  cancelPendingJob,
+  retireJobsByDedupeKey,
+} from "@/modules/scheduler/service";
 import {
   resolveSttConfig,
   transcribeInboundAudio,
@@ -1231,15 +1234,29 @@ async function maybeConsumeCommandOrGate(params: {
     // conversation it also resolves. With the stamp landing here, anything in flight stands down, and
     // whatever it may already have written is cleared by the steps below rather than after them.
     //
-    // NOTE: These are the two per-conversation job kinds left running. FOLLOWUP and MEMORY_COMPACT are
-    // cancelled below and carry the same argument, but they are cancels the conversation can re-arm
-    // harmlessly; a reminder from a test booking would fire AT the customer, referring to an episode
-    // the operator believes is erased.
+    // NOTE: All three per-conversation job kinds that can still post AT the customer. MEMORY_COMPACT is
+    // cancelled further down and is the one genuine exception: it writes memory rather than messages,
+    // and the advisory lock the clear takes is what serializes it.
+    //
+    // The inactivity follow-up was on `cancelPendingJob` and that was not enough, for the reason this
+    // whole block exists: a cancel reaches PENDING rows only. A follow-up already CLAIMED has passed
+    // its pre-send ownership probe and is inside the model call, and its second probe — the one that
+    // catches a takeover mid-run — asks whether the bot owns the conversation. The hand-back below
+    // ANSWERS YES, so a nudge from the episode the operator just erased lands right after the
+    // acknowledgement, carrying its labels and resolve with it.
     //
     // The ladder is retired by the key that ARMED it, which is the WIDGET side's thread — not this
     // conversation's, unless this conversation is the widget one. Its stages message and resolve both
     // sides of the pair, so a /reset on the entry conversation (the side the funnel is re-run from)
     // was cancelling a key that had never been enqueued.
+    await step("cancel follow-up", "follow-up pendente", () =>
+      retireJobsByDedupeKey(
+        tenantId,
+        "FOLLOWUP",
+        `followup:${chatwootThreadId(tenantId, instanceId, conversationId)}`,
+        base,
+      ),
+    );
     await step(
       "cancel redirect follow-up",
       "follow-up de redirecionamento",
@@ -1400,16 +1417,6 @@ async function maybeConsumeCommandOrGate(params: {
     // NOTE: the agent still reads those attributes into its prompt after a reset, so a test run can
     // start over and skip a question it already has an answer for. Wanting them cleared is
     // legitimate; doing it safely needs provenance the schema does not carry today.
-    // Cancel any pending inactivity follow-up: a reset is an explicit "start over", so a queued
-    // proactive nudge from the prior episode is moot.
-    await step("cancel follow-up", "follow-up pendente", () =>
-      cancelPendingJob(
-        tenantId,
-        "FOLLOWUP",
-        `followup:${chatwootThreadId(tenantId, instanceId, conversationId)}`,
-        base,
-      ),
-    );
     // Clear the follow-up watermarks so the sweep does not immediately re-arm a follow-up: a reset is
     // a clean slate, so no proactive nudge should fire until the CUSTOMER sends a genuine message
     // again (which re-anchors lastInboundAt). Also clear the one-shot notice watermarks (test-mode +
