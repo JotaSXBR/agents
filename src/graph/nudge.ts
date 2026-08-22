@@ -639,6 +639,9 @@ export async function runAgentNudge(
       if (sendModeNow() !== "freeform") return await noteOutsideWindow();
       const line2 = screenedText(await screenOutput(line), line);
       if (line2 === null) return "silent";
+      // NOTE: Asked again for the same reason the window below is: the screening is a model call, and
+      // both answers above it are spent by the time it returns. The reply branch does exactly this.
+      if (!(await stillWanted())) return "silent";
       if (sendModeNow() !== "freeform") return await noteOutsideWindow();
       await client.sendMessage(conversationId, line2);
       logger.info(

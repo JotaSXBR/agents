@@ -886,6 +886,70 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
     expect(outcome).toBe("silent");
   });
 
+  // And the window inside the handoff path: the closing line is screened by the guardrail before it
+  // goes out, which is a model call, so the answer taken before it is spent by the time it returns.
+  // The rendezvous is the judge's own call, the same one the reply branch uses.
+  test("a job retired while the handoff line is screened does not send it", async () => {
+    await withGuardrails(
+      {
+        enabled: true,
+        provider: "openai",
+        model: GUARD_MODEL,
+        input: { enabled: false },
+        output: {
+          enabled: true,
+          action: "template",
+          checks: {
+            toxicity: true,
+            unsafeContent: false,
+            competitorMentions: false,
+            promptAdherence: false,
+          },
+          templateMessage: "TEMPLATE-NUDGE",
+        },
+      },
+      async () => {
+        await seedConv(9984, null);
+        const s = stub();
+        let wanted = true;
+        await runAgentNudge({
+          tenantId,
+          threadId: `${tenantId}:${instanceId}:9984`,
+          nudge: { source: "followup", kind: "inactivity", step: 1 },
+          postActions: { assignLabels: ["follow-up"], resolve: true },
+          stillWanted: async () => wanted,
+          base: appDb,
+          deps: {
+            makeModel: ((cfg: { model: string }) =>
+              cfg.model === GUARD_MODEL
+                ? guardrailModel(async () => {
+                    // The retire lands here, inside the judge's own call: between the answer taken
+                    // before the screening and the send that follows it.
+                    wanted = false;
+                    return {
+                      content: JSON.stringify({
+                        violated: false,
+                        categories: [],
+                        rationale: "",
+                        suggestedReply: null,
+                      }),
+                    };
+                  })
+                : new HandoffThenReplyModel(
+                    "",
+                    "Um humano vai te atender.",
+                  )) as never,
+            makeClient: s.makeClient,
+            checkpointer: new MemorySaver(),
+            persistUsage: async () => {},
+          },
+        });
+        expect(wanted).toBe(false);
+        expect(s.messages).toEqual([]);
+      },
+    );
+  });
+
   // The episode has to leave a trace the operator can read. A handed-off follow-up that posted a
   // line and then logged nothing would be invisible on the Logs page, which is the one place the
   // operator goes to find out why the bot went quiet on a conversation.
