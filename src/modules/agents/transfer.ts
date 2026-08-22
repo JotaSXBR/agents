@@ -33,7 +33,7 @@ import {
 } from "@/modules/agents/credential-paths";
 import { clampOversizedTextInPlace } from "@/modules/agents/text-caps";
 import { parseDocumentStyle } from "@/modules/documents/blocks";
-import { parseTemplateContent } from "@/modules/documents/validate";
+import { parseAuthoredTemplate } from "@/modules/documents/validate";
 import { normalizeSettingsForStorage } from "@/modules/images/settings";
 import { isKnownCatalogType } from "@/modules/integrations/catalog";
 import { assertNoSecrets } from "@/modules/n8n-export/n8n";
@@ -1316,7 +1316,7 @@ async function createMissingComponents(
     // Re-validated on the way IN, never trusted as exported: a template written by a newer build can
     // carry a block this one does not know how to render, and a warning that names the reason is a
     // better import than a document that renders wrong in front of a customer.
-    const content = parseTemplateContent(tpl.blocks, tpl.fields, tpl.style);
+    const content = parseAuthoredTemplate(tpl.blocks, tpl.fields, tpl.style);
     if (!content.ok) {
       warnings.push({
         code: "documentTemplateInvalid",

@@ -2,9 +2,12 @@ import { type ZodError, z } from "zod";
 import {
   type DocumentBlock,
   type DocumentField,
+  type DocumentStyle,
   documentBlockSchema,
   documentFieldSchema,
+  documentStyleSchema,
   MAX_BLOCKS_PER_DOCUMENT,
+  MAX_FIELDS_PER_DOCUMENT,
   MAX_LINE_ITEMS,
   parseDocumentStyle,
 } from "./blocks";
@@ -98,12 +101,128 @@ function textsIn(block: DocumentBlock): string[] {
   }
 }
 
-// The style is taken as well as the blocks, and it is REQUIRED rather than optional, because the
-// footer is rendered through the same token resolver the block texts are: a typo there resolves to a
-// blank on the last line of every page of a document the customer keeps. Making it optional would
-// mean the check is only as good as each caller remembering to opt in, and the invariant this file
-// exists for — an unresolvable token is refused when it is WRITTEN, never at render — is not one a
-// caller should be able to skip by leaving an argument out.
+// ── two questions, deliberately answered differently ──
+//
+// Reading a STORED row is tolerant: a template written by a newer build has to keep rendering, so a
+// property this version does not know is dropped rather than fatal, and an unusable style falls back
+// to defaults instead of taking the console down. That is `parseTemplateContent`.
+//
+// Reading an AUTHORED template is strict: what the operator wrote either takes effect or comes back
+// refused BY NAME. That is `parseAuthoredTemplate`, and it is the one every write goes through — the
+// console, the REST route, the MCP write, and an imported bundle, which is authored content arriving
+// from outside. Anything less makes the transport's permissiveness pointless: the whole reason the
+// route accepts an undeclared shape is so the SERVICE can say what is wrong with it.
+//
+// The style is taken as well as the blocks because the footer is rendered through the same token
+// resolver the block texts are: a typo there resolves to a blank on the last line of every page of a
+// document the customer keeps. It is a required argument, not an optional one — a check worth having
+// is not one each caller can skip by leaving an argument out.
+
+// Zod strips what it does not know, which is exactly right for a stored row and exactly wrong for a
+// write. Rather than keep a second, strict copy of every schema in blocks.ts — which would have to
+// be kept in step with the first one forever, and would still miss the nested rows — the write path
+// compares what came back against what it was given and names the first key that did not survive.
+// One mechanism, and it reaches every level: block, nested meta row, field, style.
+function droppedKey(
+  input: unknown,
+  parsed: unknown,
+  path: string,
+): string | null {
+  if (Array.isArray(input) && Array.isArray(parsed)) {
+    for (let i = 0; i < input.length && i < parsed.length; i++) {
+      const found = droppedKey(input[i], parsed[i], `${path}[${i}]`);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (!isPlainObject(input) || !isPlainObject(parsed)) return null;
+  for (const key of Object.keys(input)) {
+    // `undefined` is how an absent optional arrives over JSON round-trips; it was never a value.
+    if (input[key] === undefined) continue;
+    if (!(key in parsed)) return path ? `${path}.${key}` : key;
+    const found = droppedKey(
+      input[key],
+      parsed[key],
+      path ? `${path}.${key}` : key,
+    );
+    if (found) return found;
+  }
+  return null;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+export interface ParsedAuthoredTemplate {
+  blocks: DocumentBlock[];
+  fields: DocumentField[];
+  style: DocumentStyle;
+}
+
+export type AuthoredTemplateParse =
+  | { ok: true; content: ParsedAuthoredTemplate }
+  | { ok: false; reason: string };
+
+export function parseAuthoredTemplate(
+  rawBlocks: unknown,
+  rawFields: unknown,
+  rawStyle: unknown,
+): AuthoredTemplateParse {
+  const blocksIn = rawBlocks ?? [];
+  const fieldsIn = rawFields ?? [];
+  const styleIn = rawStyle ?? {};
+
+  const shared = parseTemplateContent(blocksIn, fieldsIn, styleIn);
+  if (!shared.ok) return shared;
+
+  for (const [label, input, parsed] of [
+    ["blocks", blocksIn, shared.content.blocks],
+    ["fields", fieldsIn, shared.content.fields],
+  ] as const) {
+    const dropped = droppedKey(input, parsed, "");
+    if (dropped) {
+      return {
+        ok: false,
+        reason: `${label}: "${dropped}" is not a property this version understands, so it would be stored and never take effect. Check the spelling against document_template_schema, or remove it.`,
+      };
+    }
+  }
+
+  if (
+    fieldsIn &&
+    Array.isArray(fieldsIn) &&
+    fieldsIn.length > MAX_FIELDS_PER_DOCUMENT
+  ) {
+    return {
+      ok: false,
+      reason: `fields: at most ${MAX_FIELDS_PER_DOCUMENT} per document, got ${fieldsIn.length} — the declared fields become the agent's tool schema, published on every turn.`,
+    };
+  }
+
+  // The style, strictly: the tolerant reader answers ANY invalid value by returning every default,
+  // so an operator who mistyped one colour would have their font, margin and currency silently
+  // replaced too — and be told it saved.
+  const styleParsed = documentStyleSchema.partial().safeParse(styleIn);
+  if (!styleParsed.success) {
+    return { ok: false, reason: `style: ${issues(styleParsed.error)}` };
+  }
+  const droppedInStyle = droppedKey(styleIn, styleParsed.data, "");
+  if (droppedInStyle) {
+    return {
+      ok: false,
+      reason: `style: "${droppedInStyle}" is not a style property, so it would be stored and never take effect. Check the spelling against document_template_schema, or remove it.`,
+    };
+  }
+
+  return {
+    ok: true,
+    // Clamped, not refused: baseFontSize is a SIZE, and sizes are clamped by contract
+    // (docs/mcp.md). The clamp changes a value, never a key, so it survives the check above.
+    content: { ...shared.content, style: parseDocumentStyle(styleIn) },
+  };
+}
+
 export function parseTemplateContent(
   rawBlocks: unknown,
   rawFields: unknown,
@@ -304,6 +423,17 @@ export function parseDocumentValues(
         };
       }
       continue;
+    }
+    // An empty list is PRESENT, so it clears the check above and the array parser finds nothing to
+    // object to — which would let an agent issue a numbered quote with no rows and a total of zero
+    // in front of a customer, with every gate reporting success. Required means the document ends up
+    // with the thing. An optional list stays free to be empty: nothing was promised, and the block
+    // renders empty.
+    if (field.required && Array.isArray(value) && value.length === 0) {
+      return {
+        ok: false,
+        reason: `values: "${field.name}" (${field.label}) is required, so it needs at least one item.`,
+      };
     }
     const problem = valueProblem(field, value);
     if (problem) {

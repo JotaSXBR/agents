@@ -20,6 +20,7 @@ import { renderDocumentPdf } from "./render";
 import { sampleValues } from "./sample";
 import {
   type DocumentValues,
+  parseAuthoredTemplate,
   parseDocumentValues,
   parseTemplateContent,
 } from "./validate";
@@ -164,6 +165,10 @@ function parseTemplateName(value: unknown): string {
   return parsed.data;
 }
 
+// Every write goes through the AUTHORING gate, never the tolerant reader: what the operator wrote
+// either takes effect or comes back named. The style comes back out of it too, so the value that was
+// validated is the value that gets stored — validating one and saving another is the shape of bug
+// this whole split exists to prevent.
 function validated(input: {
   blocks: unknown;
   fields: unknown;
@@ -171,8 +176,9 @@ function validated(input: {
 }): {
   blocks: DocumentBlock[];
   fields: DocumentField[];
+  style: DocumentStyle;
 } {
-  const parsed = parseTemplateContent(input.blocks, input.fields, input.style);
+  const parsed = parseAuthoredTemplate(input.blocks, input.fields, input.style);
   if (!parsed.ok) {
     throw new AppError(parsed.reason, 400, "errors.invalidDocumentTemplate");
   }
@@ -222,7 +228,7 @@ export async function createDocumentTemplate(
     fields: input.fields ?? [],
     style: input.style,
   });
-  const style = parseDocumentStyle(input.style);
+  const style = content.style;
   if (ctx.tenantId === null) throw new AppError("tenant required", 400);
   const tenantId = ctx.tenantId;
   const row = await runScopedOn(base, ctx, (db) =>
@@ -269,11 +275,6 @@ export async function updateDocumentTemplate(
   if (patch.description !== undefined) data.description = patch.description;
   if (patch.numberPrefix !== undefined) data.numberPrefix = patch.numberPrefix;
   if (patch.enabled !== undefined) data.enabled = patch.enabled;
-  if (patch.style !== undefined) {
-    data.style = parseDocumentStyle(
-      patch.style,
-    ) as unknown as Prisma.InputJsonValue;
-  }
   // NOTE: blocks, fields and style are validated TOGETHER even when only one was sent, because the
   // rules are about the relationship between them — a block pointing at a field, a token in a block
   // or in the footer naming one. Validating only the patched part would accept a template whose
@@ -291,6 +292,9 @@ export async function updateDocumentTemplate(
     });
     data.blocks = content.blocks as unknown as Prisma.InputJsonValue;
     data.fields = content.fields as unknown as Prisma.InputJsonValue;
+    if (patch.style !== undefined) {
+      data.style = content.style as unknown as Prisma.InputJsonValue;
+    }
   }
   const row = await runScopedOn(base, ctx, (db) =>
     db.documentTemplate
@@ -408,7 +412,7 @@ export async function previewDocumentTemplate(
     fields: input.fields ?? saved?.fields ?? [],
     style: input.style ?? saved?.style,
   });
-  const style = parseDocumentStyle(input.style ?? saved?.style);
+  const style = content.style;
   const now = input.now ?? new Date();
   const values = callerValues(content.fields, input.values, now);
   const { company, logo } = await readRenderContext(ctx, base);

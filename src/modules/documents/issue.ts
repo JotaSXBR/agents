@@ -377,6 +377,24 @@ async function assignNumber(
   templateId: bigint,
   documentId: bigint,
 ): Promise<number | null> {
+  // The DOCUMENT row is claimed first, and that order is the whole point. A row exists unnumbered
+  // for a moment by design — the counter is bumped after the insert, so a lost idempotency race
+  // consumes no number — and in that window a second caller re-reads it, sees no number, and heals
+  // it at the same time as the first. Without this lock both take a number from the counter, one
+  // update is discarded, and the caller whose update lost goes on to render a document with NO
+  // number and write it over the winner's PDF: the customer's link then serves a quote with a blank
+  // where its identity should be.
+  //
+  // Locked before the template row by BOTH paths, so the order is consistent and cannot deadlock.
+  // Scoped by RLS like every other statement in this transaction, and the id is one we inserted.
+  const claimed = await db.$queryRaw<{ number: number | null }[]>`
+    SELECT "number" FROM "issued_documents" WHERE "id" = ${documentId} FOR UPDATE
+  `;
+  if (claimed.length === 0) return null;
+  const already = claimed[0]?.number ?? null;
+  // Someone numbered it while we waited for the lock. Their number is the document's number.
+  if (already !== null) return already;
+
   const rows = await db.$queryRaw<{ last_number: number }[]>`
     UPDATE "document_templates"
     SET "last_number" = "last_number" + 1
@@ -385,11 +403,11 @@ async function assignNumber(
   `;
   const next = rows[0]?.last_number;
   if (next === undefined) return null;
-  const res = await db.issuedDocument.updateMany({
-    where: { id: documentId, number: null },
+  await db.issuedDocument.update({
+    where: { id: documentId },
     data: { number: next },
   });
-  return res.count === 1 ? next : null;
+  return next;
 }
 
 async function readStoredBytes(dir: string, key: string): Promise<ArrayBuffer> {

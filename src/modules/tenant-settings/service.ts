@@ -169,20 +169,35 @@ export async function getTenantSettings(
   });
 }
 
-async function writeBlock(
+// Read, merge and write in ONE transaction, with the tenant row locked.
+//
+// Every settings block lives in a single JSON column, so this is a read-modify-write of a value
+// several writers share — the two halves of the company profile most visibly, since the console
+// edits its text fields and uploads its logo through different routes. Reading in one transaction
+// and writing in another lets two writers each merge into the value they read and the later commit
+// discard the earlier one: a profile save that erases the logo which finished uploading a moment
+// before, with both requests answering success.
+//
+// The merge runs INSIDE the lock and is handed the raw settings, so what it merges into is what is
+// about to be written and never a snapshot from before someone else's write.
+async function patchBlock<
+  T extends EmbeddingSettings | LangfuseSettings | CompanySettings,
+>(
   ctx: TenantContext,
   base: PrismaClient,
   key: "embedding" | "langfuse" | "company",
-  value: EmbeddingSettings | LangfuseSettings | CompanySettings,
-): Promise<void> {
+  merge: (raw: Record<string, unknown>) => T,
+): Promise<T> {
   const tenantId = requireTenantId(ctx);
-  await runScopedOn(base, ctx, async (db) => {
+  return runScopedOn(base, ctx, async (db) => {
+    await db.$queryRaw`SELECT 1 FROM "tenants" WHERE "id" = ${tenantId} FOR UPDATE`;
     const raw = await readRawSettings(db, tenantId);
-    const next = { ...raw, [key]: value };
+    const value = merge(raw);
     await db.tenant.update({
       where: { id: tenantId },
-      data: { settings: next as Prisma.InputJsonValue },
+      data: { settings: { ...raw, [key]: value } as Prisma.InputJsonValue },
     });
+    return value;
   });
 }
 
@@ -191,23 +206,20 @@ export async function updateEmbeddingSettings(
   patch: Partial<EmbeddingSettings>,
   base: PrismaClient = basePrisma,
 ): Promise<EmbeddingSettings> {
-  const tenantId = requireTenantId(ctx);
-  const current = await runScopedOn(base, ctx, (db) =>
-    readEmbeddingSettings(db, tenantId),
-  );
-  // LOCKED to EMBEDDING_DEFAULTS (OpenAI + text-embedding-3-small) until the flexible-embeddings
-  // feature ships (configurable dimension + provider registry). Only the
-  // credential is honored; provider/model/baseURL from the patch are ignored. Unlocking = restore
-  // the `{ ...current, ...patch }` merge.
-  const merged = embeddingSettingsSchema.parse({
-    ...EMBEDDING_DEFAULTS,
-    credentialRef:
-      patch.credentialRef !== undefined
-        ? patch.credentialRef
-        : current.credentialRef,
+  return patchBlock(ctx, base, "embedding", (raw) => {
+    const current = parseEmbeddingSettings(raw);
+    // LOCKED to EMBEDDING_DEFAULTS (OpenAI + text-embedding-3-small) until the flexible-embeddings
+    // feature ships (configurable dimension + provider registry). Only the
+    // credential is honored; provider/model/baseURL from the patch are ignored. Unlocking = restore
+    // the `{ ...current, ...patch }` merge.
+    return embeddingSettingsSchema.parse({
+      ...EMBEDDING_DEFAULTS,
+      credentialRef:
+        patch.credentialRef !== undefined
+          ? patch.credentialRef
+          : current.credentialRef,
+    });
   });
-  await writeBlock(ctx, base, "embedding", merged);
-  return merged;
 }
 
 export interface LangfuseUpdateInput {
@@ -258,14 +270,15 @@ export async function updateLangfuse(
     }
   }
 
-  const merged = langfuseSettingsSchema.parse({
-    enabled: input.enabled ?? current.enabled,
-    credentialRef,
-    sendContent: input.sendContent ?? current.sendContent,
-    debug: input.debug ?? current.debug,
+  return patchBlock(ctx, base, "langfuse", (raw) => {
+    const live = parseLangfuseSettings(raw);
+    return langfuseSettingsSchema.parse({
+      enabled: input.enabled ?? live.enabled,
+      credentialRef,
+      sendContent: input.sendContent ?? live.sendContent,
+      debug: input.debug ?? live.debug,
+    });
   });
-  await writeBlock(ctx, base, "langfuse", merged);
-  return merged;
 }
 
 export type CompanyUpdateInput = Partial<
@@ -280,13 +293,9 @@ export async function updateCompanySettings(
   patch: CompanyUpdateInput,
   base: PrismaClient = basePrisma,
 ): Promise<CompanySettings> {
-  const tenantId = requireTenantId(ctx);
-  const current = await runScopedOn(base, ctx, (db) =>
-    readCompanySettings(db, tenantId),
+  return patchBlock(ctx, base, "company", (raw) =>
+    companySettingsSchema.parse({ ...parseCompanySettings(raw), ...patch }),
   );
-  const merged = companySettingsSchema.parse({ ...current, ...patch });
-  await writeBlock(ctx, base, "company", merged);
-  return merged;
 }
 
 // Written only by the logo upload/clear path, after the bytes are on disk (or gone from it). The
@@ -297,17 +306,14 @@ export async function setCompanyLogoKey(
   base: PrismaClient = basePrisma,
   now: number = Date.now(),
 ): Promise<CompanySettings> {
-  const tenantId = requireTenantId(ctx);
-  const current = await runScopedOn(base, ctx, (db) =>
-    readCompanySettings(db, tenantId),
-  );
-  const merged = companySettingsSchema.parse({
-    ...current,
-    logoKey,
-    // Strictly increasing even if two writes land in the same millisecond, which is what a cache
-    // buster has to be to mean anything.
-    logoVersion: Math.max(now, current.logoVersion + 1),
+  return patchBlock(ctx, base, "company", (raw) => {
+    const current = parseCompanySettings(raw);
+    return companySettingsSchema.parse({
+      ...current,
+      logoKey,
+      // Strictly increasing even if two writes land in the same millisecond, which is what a cache
+      // buster has to be to mean anything.
+      logoVersion: Math.max(now, current.logoVersion + 1),
+    });
   });
-  await writeBlock(ctx, base, "company", merged);
-  return merged;
 }

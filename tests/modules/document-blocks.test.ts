@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
   DOCUMENT_STYLE_DEFAULTS,
+  documentAuthoringSchema,
   MAX_BLOCKS_PER_DOCUMENT,
+  MAX_FIELDS_PER_DOCUMENT,
   MAX_LINE_ITEMS,
   parseDocumentStyle,
 } from "@/modules/documents/blocks";
 import {
+  parseAuthoredTemplate,
   parseDocumentValues,
   parseTemplateContent,
 } from "@/modules/documents/validate";
@@ -28,6 +31,108 @@ const FIELDS = [
 function blocks(...extra: unknown[]): unknown[] {
   return [{ id: "h", type: "header", title: "Orçamento" }, ...extra];
 }
+
+// ── the authoring gate ──
+//
+// Two questions, deliberately answered differently. Reading a STORED row has to be tolerant: a row
+// written by a newer build must still render, so an unknown key is dropped rather than fatal.
+// Reading an AUTHORED template has to be strict: what the operator wrote either takes effect or is
+// refused by name, because the alternative is a template that silently differs from the one they
+// submitted and nothing anywhere says so.
+describe("parseAuthoredTemplate (writes) vs parseTemplateContent (stored rows)", () => {
+  test("names a misspelled block property instead of dropping it", () => {
+    const bad = [{ id: "t", type: "text", text: "Olá", alignn: "center" }];
+    const authored = parseAuthoredTemplate(bad, FIELDS, {});
+    expect(authored.ok).toBe(false);
+    expect(authored.ok === false && authored.reason).toContain("alignn");
+    // …and the stored reader still takes it, minus the key it does not know.
+    const stored = parseTemplateContent(bad, FIELDS, {});
+    expect(stored.ok).toBe(true);
+  });
+
+  test("names a misspelled key nested inside a block", () => {
+    const r = parseAuthoredTemplate(
+      [
+        {
+          id: "h",
+          type: "header",
+          meta: [{ label: "Cliente", value: "{{cliente}}", bold: true }],
+        },
+      ],
+      FIELDS,
+      {},
+    );
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.reason).toContain("bold");
+  });
+
+  test("names a misspelled field property", () => {
+    const r = parseAuthoredTemplate(
+      blocks(),
+      [{ name: "cliente", label: "Cliente", type: "text", requred: true }],
+      {},
+    );
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.reason).toContain("requred");
+  });
+
+  // The tolerant reader answers an invalid style by returning EVERY default, so a write that named
+  // one bad colour would be saved with the operator's font, margin and currency thrown away too —
+  // and reported as a success.
+  test("refuses an invalid style value rather than resetting the whole style", () => {
+    const r = parseAuthoredTemplate(blocks(), FIELDS, {
+      font: "serif",
+      accentColor: "red",
+    });
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.reason).toContain("accentColor");
+    // The stored reader keeps its tolerance: a row like that still renders, on defaults.
+    expect(
+      parseTemplateContent(blocks(), FIELDS, {
+        font: "serif",
+        accentColor: "red",
+      }).ok,
+    ).toBe(true);
+  });
+
+  test("names a misspelled style property", () => {
+    const r = parseAuthoredTemplate(blocks(), FIELDS, { fontt: "serif" });
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.reason).toContain("fontt");
+  });
+
+  // baseFontSize is CLAMPED, not refused (docs/mcp.md: "type and choice, never size"), and the clamp
+  // changes a value rather than dropping a key — so it must survive the strict pass.
+  test("still clamps the base font size instead of refusing it", () => {
+    const r = parseAuthoredTemplate(blocks(), FIELDS, { baseFontSize: 400 });
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.content.style.baseFontSize).toBe(14);
+  });
+
+  test("accepts a well-formed template and returns the parsed style", () => {
+    const r = parseAuthoredTemplate(blocks(), FIELDS, { font: "mono" });
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.content.style.font).toBe("mono");
+  });
+
+  // The declared fields become the agent's tool schema, published on every turn. Unbounded, a single
+  // write turns every turn of every granted agent into a payload the provider may refuse outright.
+  test("refuses more declared fields than the ceiling", () => {
+    const many = Array.from(
+      { length: MAX_FIELDS_PER_DOCUMENT + 1 },
+      (_, i) => ({
+        name: `campo_${i}`,
+        label: `Campo ${i}`,
+        type: "text",
+      }),
+    );
+    const r = parseAuthoredTemplate([], many, {});
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.reason).toContain(
+      String(MAX_FIELDS_PER_DOCUMENT),
+    );
+  });
+});
 
 describe("parseTemplateContent", () => {
   test("accepts a template whose tokens all resolve", () => {
@@ -303,6 +408,27 @@ describe("parseDocumentValues", () => {
     expect(bad.ok).toBe(false);
   });
 
+  // "Required" has to mean the document ends up with the thing. An empty list is present, so it
+  // clears the missing-value check, and the array parser has nothing to object to — leaving an agent
+  // able to issue a numbered quote with no rows and a total of zero, in front of a customer, with
+  // every gate reporting success.
+  test("refuses an empty list for a required lineItems field", () => {
+    const r = parseDocumentValues(
+      [
+        { name: "itens", label: "Itens", type: "lineItems", required: true },
+      ] as never,
+      { itens: [] },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.reason).toContain("itens");
+    // An OPTIONAL list is different: nothing was promised, and the block simply renders empty.
+    const optional = parseDocumentValues(
+      [{ name: "extras", label: "Extras", type: "lineItems" }] as never,
+      { extras: [] },
+    );
+    expect(optional.ok).toBe(true);
+  });
+
   test("refuses more line items than the ceiling", () => {
     const r = parseDocumentValues(FIELDS as never, {
       cliente: "Ana",
@@ -339,5 +465,34 @@ describe("parseDocumentStyle", () => {
       DOCUMENT_STYLE_DEFAULTS,
     );
     expect(parseDocumentStyle(null)).toEqual(DOCUMENT_STYLE_DEFAULTS);
+  });
+});
+
+// The contract a client authors against and the gate a write passes through have to be the same
+// statement. Zod strips an unknown key; the write refuses it by name (see the authoring gate above),
+// so a schema published without `additionalProperties: false` would promise a permissiveness no
+// write honours — and the client would be refused by a document it had every reason to trust.
+describe("documentAuthoringSchema", () => {
+  test("publishes every object as closed, nested rows included", () => {
+    const schema = documentAuthoringSchema();
+    const open: string[] = [];
+    const walk = (node: unknown, path: string) => {
+      if (Array.isArray(node)) {
+        node.forEach((n, i) => {
+          walk(n, `${path}[${i}]`);
+        });
+        return;
+      }
+      if (typeof node !== "object" || node === null) return;
+      const obj = node as Record<string, unknown>;
+      if ("properties" in obj && obj.additionalProperties !== false) {
+        open.push(path);
+      }
+      for (const [k, v] of Object.entries(obj)) walk(v, `${path}.${k}`);
+    };
+    walk(schema, "");
+    expect(open).toEqual([]);
+    // …and it does reach inside a block, not just the top of one.
+    expect(JSON.stringify(schema.blocks)).toContain("additionalProperties");
   });
 });

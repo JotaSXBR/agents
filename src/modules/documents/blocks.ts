@@ -199,6 +199,11 @@ export function parseDocumentStyle(value: unknown): DocumentStyle {
 // render, never during it.
 export const MAX_BLOCKS_PER_DOCUMENT = 60;
 export const MAX_LINE_ITEMS = 100;
+// The declared fields BECOME the agent's tool schema, and that schema is published on every turn of
+// every agent granted the template. Unbounded, one write makes every turn carry a payload the
+// provider may refuse outright — so this ceiling is not about our own memory, it is about what the
+// model is handed. Well above any real document: the bundled starters declare four to six.
+export const MAX_FIELDS_PER_DOCUMENT = 40;
 
 // The authoring contract, generated FROM the schemas above so it cannot drift from what the
 // validator enforces. Served on demand (the `document_template_schema` MCP tool, and the console's
@@ -207,8 +212,26 @@ export const MAX_LINE_ITEMS = 100;
 // authoring a template needs it.
 export function documentAuthoringSchema(): Record<string, unknown> {
   return {
-    blocks: z.toJSONSchema(documentBlockSchema),
-    fields: z.toJSONSchema(documentFieldSchema),
-    style: z.toJSONSchema(documentStyleSchema),
+    blocks: closed(z.toJSONSchema(documentBlockSchema)),
+    fields: closed(z.toJSONSchema(documentFieldSchema)),
+    style: closed(z.toJSONSchema(documentStyleSchema)),
   };
+}
+
+// The published contract has to say what the WRITE actually enforces. Zod's own schemas strip an
+// unknown key (right for reading a stored row, see validate.ts), but a write refuses it by name — so
+// a schema published without this would promise a permissiveness no write honours, and a client
+// would be told its property is unsupported by a document it had every reason to trust.
+//
+// Derived by walking the generated schema rather than by keeping a second set of Zod objects: there
+// is one vocabulary, and a copy of it is a copy that goes stale.
+function closed(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(closed);
+  if (typeof node !== "object" || node === null) return node;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+    out[k] = closed(v);
+  }
+  if ("properties" in out) out.additionalProperties = false;
+  return out;
 }

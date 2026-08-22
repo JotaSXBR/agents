@@ -73,6 +73,26 @@ TTF: a face resolves from a path that differs between the dev tree and the conta
 goes into is global and does not deduplicate, and the built-ins cover Latin-1, which is what PT-BR
 needs. A bundled family is purely additive later.
 
+### Authoring is strict; storage is tolerant
+
+Two questions, deliberately answered differently. Reading a **stored** row is tolerant: a template
+written by a newer build must keep rendering, so a property this version does not know is dropped
+rather than fatal, and an unusable style falls back to defaults instead of taking the console down.
+Reading an **authored** template is strict: what the operator wrote either takes effect or comes back
+refused by name. Every write goes through the strict gate — console, REST, MCP, and an imported
+bundle, which is authored content arriving from outside.
+
+Without that split the transport's permissiveness buys nothing: the whole reason the route accepts an
+undeclared shape (`t.Record`, see below) is so the **service** can say what is wrong with it, and a
+schema that silently strips `alignn` saves a template that differs from the one that was submitted
+with nothing anywhere reporting it. The strict pass compares what came back against what was given
+rather than keeping a second copy of every schema — one vocabulary, and a copy of it goes stale — and
+`document_template_schema` publishes `additionalProperties: false` so the contract a client authors
+against says what the write enforces.
+
+Sizes stay clamped rather than refused (`baseFontSize`), because a clamp changes a value and never a
+key: "type and choice, never size" (`docs/mcp.md`).
+
 `footerText` goes through the **same token resolver** the block texts do, and it prints on every
 page, so its tokens are validated with them: a template is refused as a whole, style included. That
 is also why a patch touching only the style is re-validated — the names a footer may use are declared
@@ -101,6 +121,13 @@ benign — into `current transaction is aborted` and a 500 for whoever arrived s
 The number comes from `UPDATE document_templates SET last_number = last_number + 1 … RETURNING`, so
 the row lock makes it atomic. It is bumped AFTER the insert, so losing a race on the key does not
 consume one. Monotonic, not gapless.
+
+That last property is also why the **document row is claimed first**, with `SELECT … FOR UPDATE`,
+before the counter is touched: a row exists unnumbered for a moment by design, and in that window a
+second caller re-reads it, sees no number and heals it at the same time as the first. Unclaimed, both
+take a number, one update is discarded, and the caller that lost renders a document with **no number
+at all** over the winner's PDF — the customer's link then serves a quote with a blank where its
+identity should be.
 
 **Revocation ends the document, including through the key.** The idempotency key is derived from the
 values, so an agent asked to send the same quote again lands on the row the operator voided; the

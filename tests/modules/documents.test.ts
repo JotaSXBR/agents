@@ -3,7 +3,7 @@ import { rm } from "node:fs/promises";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/../generated/prisma/client";
 import { AppError } from "@/lib/errors";
-import type { TenantContext } from "@/lib/tenancy";
+import { runScopedOn, type TenantContext } from "@/lib/tenancy";
 import {
   getIssuedDocumentPdf,
   issueDocument,
@@ -19,6 +19,7 @@ import {
   updateDocumentTemplate,
 } from "@/modules/documents/templates";
 import {
+  readCompanySettings,
   setCompanyLogoKey,
   updateCompanySettings,
 } from "@/modules/tenant-settings/service";
@@ -739,5 +740,83 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     ).catch((e: unknown) => e);
     expect(patchFailed).toBeInstanceOf(AppError);
     expect((patchFailed as AppError).statusCode).toBe(400);
+  });
+
+  // ── two callers healing the same unnumbered row ──
+  //
+  // A document exists unnumbered for a moment by design: the counter is bumped AFTER the insert so a
+  // lost idempotency race consumes no number. In that window the loser of such a race re-reads the
+  // row, sees `number: null`, and heals it — at the same time as the winner. Without a claim on the
+  // document row, both take a number from the counter, one update is discarded, and the caller whose
+  // update lost renders a document with NO number at all and writes it over the winner's PDF: the
+  // customer's link then serves a quote with a blank where its identity should be.
+  test("two callers healing the same unnumbered document agree on one number", async () => {
+    const key = `unnumbered-${process.pid}`;
+    const seed = await issueDocument({
+      tenantId: tenantA,
+      templateId,
+      idempotencyKey: key,
+      values: VALUES,
+      base: appDb,
+      storageDir: DIR,
+    });
+    // Back to the state the window leaves behind, and to what a crash between the two statements
+    // leaves behind too.
+    await suDb.issuedDocument.update({
+      where: { id: BigInt(seed.id) },
+      data: { number: null, status: "PENDING", pdfStorageKey: null },
+    });
+    const before = await suDb.documentTemplate.findUnique({
+      where: { id: templateId },
+      select: { lastNumber: true },
+    });
+
+    const [a, b] = await Promise.all([
+      issueDocument({
+        tenantId: tenantA,
+        templateId,
+        idempotencyKey: key,
+        values: VALUES,
+        base: appDb,
+        storageDir: DIR,
+      }),
+      issueDocument({
+        tenantId: tenantA,
+        templateId,
+        idempotencyKey: key,
+        values: VALUES,
+        base: appDb,
+        storageDir: DIR,
+      }),
+    ]);
+    expect(a.number).toBe(b.number);
+    expect(a.number).toMatch(/^ORC-\d{4}$/);
+    const after = await suDb.documentTemplate.findUnique({
+      where: { id: templateId },
+      select: { lastNumber: true },
+    });
+    // One number consumed, not two: the claim is what makes the second caller read the first's
+    // answer instead of taking one of its own.
+    expect(after?.lastNumber).toBe((before?.lastNumber ?? 0) + 1);
+  });
+
+  // Two settings writers, one JSON column. The console edits the profile text through one route and
+  // uploads the logo through another, so an operator who saves the form while the upload is still in
+  // flight has both in flight at once. Read in one transaction and written in another, each merges
+  // into the value it read and the later commit discards the other: the profile save erases the logo
+  // that had just finished, and both requests answer success.
+  test("a profile save and a logo write do not discard each other", async () => {
+    await updateCompanySettings(ctx(tenantB), { name: "Antes" }, appDb);
+    const [profile, logo] = await Promise.all([
+      updateCompanySettings(ctx(tenantB), { name: "Depois" }, appDb),
+      setCompanyLogoKey(ctx(tenantB), `${tenantB}-logo.png`, appDb),
+    ]);
+    expect([profile.name, logo.name]).toContain("Depois");
+    const settled = await runScopedOn(appDb, ctx(tenantB), (db) =>
+      readCompanySettings(db, tenantB),
+    );
+    // Both survive: whichever committed second merged into the other's result, not into a stale read.
+    expect(settled.name).toBe("Depois");
+    expect(settled.logoKey).toBe(`${tenantB}-logo.png`);
   });
 });
