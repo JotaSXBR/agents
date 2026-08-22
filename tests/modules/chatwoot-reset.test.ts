@@ -837,6 +837,7 @@ describe.skipIf(!dbUp)(
     // test in this file, so the config cannot leak.
     const withRedirectPair = async (
       run: (widgetConvId: number, widgetThread: string) => Promise<void>,
+      enabled = true,
     ): Promise<void> => {
       const mine = await suDb.conversation.findFirstOrThrow({
         where: { tenantId, chatwootConversationId: CONV_ID },
@@ -857,7 +858,7 @@ describe.skipIf(!dbUp)(
         data: {
           settings: {
             channelRedirect: {
-              enabled: true,
+              enabled,
               entryInboxId: INBOX_ID,
               widgetInboxId: WIDGET_INBOX_ID,
             },
@@ -1010,6 +1011,42 @@ describe.skipIf(!dbUp)(
           ["reminder:evt-widget:60", "DONE", true],
         ]);
       });
+    });
+
+    // A funnel that is switched off has no episode, even with its inboxes still configured. The
+    // command acts on the pair — it cancels the sibling's ladder and its appointment reminders — and
+    // that is scheduled work belonging to another conversation. With the redirect off the two are
+    // not a pair, they are two conversations of the same contact.
+    test("a disabled funnel has no pair to reach", async () => {
+      await withRedirectPair(async (_convId, widgetThread) => {
+        await suDb.conversation.updateMany({
+          where: { tenantId, chatwootConversationId: 44 },
+          data: { redirectClosedAt: new Date() },
+        });
+        await suDb.schedulerJob.create({
+          data: {
+            tenantId,
+            kind: "REDIRECT_FOLLOWUP",
+            dedupeKey: `redirect-followup:${widgetThread}`,
+            runAt: new Date(Date.now() + 3_600_000),
+            payload: { stage: "chat", widgetThreadId: widgetThread },
+          },
+        });
+        const cw = fakeChatwoot();
+        globalThis.fetch = cw.impl;
+        await sendReset();
+
+        const job = await suDb.schedulerJob.findFirstOrThrow({
+          where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
+          select: { status: true },
+        });
+        expect(job.status).toBe("PENDING");
+        const widget = await suDb.conversation.findFirstOrThrow({
+          where: { tenantId, chatwootConversationId: 44 },
+          select: { redirectClosedAt: true },
+        });
+        expect(widget.redirectClosedAt).not.toBeNull();
+      }, false);
     });
 
     // The fence on the widening. Contact ids are account-wide and a tenant can run several agents on

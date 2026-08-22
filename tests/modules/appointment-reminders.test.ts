@@ -1,6 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { FakeListChatModel } from "@langchain/core/utils/testing";
+import { MemorySaver } from "@langchain/langgraph";
+import { PrismaPg } from "@prisma/adapter-pg";
+import { PrismaClient } from "@/../generated/prisma/client";
+import { encryptJson } from "@/api/lib/crypto";
 import { DATA_FENCE, renderNudge } from "@/graph/nudge";
 import {
+  appointmentReminderHandler,
+  cancelThreadAppointmentReminders,
   computeReminderJobs,
   enqueueAppointmentReminders,
   reminderNudge,
@@ -10,7 +17,9 @@ import {
   normalizeOffsets,
   readAppointmentReminderConfig,
 } from "@/modules/appointments/settings";
-import type { enqueueJob } from "@/modules/scheduler/service";
+import type { ChatwootClient } from "@/modules/chatwoot/client";
+import type { ClaimedJob, enqueueJob } from "@/modules/scheduler/service";
+import { seedChatwootInstance } from "../utils/chatwoot";
 
 describe("normalizeOffsets", () => {
   test("keeps valid hours, sorted descending", () => {
@@ -239,5 +248,189 @@ describe("enqueueAppointmentReminders", () => {
       summary: "Consulta – Ana",
       calendarLabel: "Agenda Dra. Ana",
     });
+  });
+});
+
+// ── The claimed-job fence, DB-backed. ──────────────────────────────────────────────────────────
+//
+// Cancelling a scheduler job reaches PENDING rows only, so a reminder the worker had already picked
+// up survives every cancellation and fires at the customer about an appointment the operator was
+// told had been cleared. The tombstone is what an in-flight handler can see: the cancel stamps
+// `cancelledAt` on EVERY matching row, claimed ones included. This is the half that reads it.
+
+const appUrl = process.env.TEST_APP_DATABASE_URL;
+const suUrl = process.env.MIGRATION_DATABASE_URL;
+let dbUp = false;
+let su: PrismaClient | undefined;
+let app: PrismaClient | undefined;
+if (appUrl && suUrl) {
+  try {
+    su = new PrismaClient({
+      adapter: new PrismaPg({ connectionString: suUrl }),
+    });
+    await su.$queryRaw`SELECT 1`;
+    app = new PrismaClient({
+      adapter: new PrismaPg({ connectionString: appUrl }),
+    });
+    await app.$queryRaw`SELECT 1`;
+    dbUp = true;
+  } catch {
+    dbUp = false;
+  }
+}
+const appDb = app as PrismaClient;
+const suDb = su as PrismaClient;
+
+describe.skipIf(!dbUp)("a reminder retired while claimed", () => {
+  let tenantId = 0n;
+  let instanceId = 0n;
+  const CONV_ID = 4242;
+  let threadId = "";
+
+  const stubClient = () => {
+    const sent: Array<[number, string]> = [];
+    const client = {
+      getConversation: async (c: number) => ({
+        id: c,
+        status: "pending",
+        meta: {},
+      }),
+      sendMessage: async (c: number, t: string) => {
+        sent.push([c, t]);
+        return {};
+      },
+      sendPrivateNote: async () => ({}),
+      getConversationLabels: async () => [],
+      setConversationLabels: async () => ({}),
+      toggleStatus: async () => ({}),
+    } as unknown as ChatwootClient;
+    return { sent, makeClient: async () => client };
+  };
+
+  beforeAll(async () => {
+    const t = await suDb.tenant.create({
+      data: { name: "REM", slug: `rem-${process.pid}` },
+    });
+    tenantId = t.id;
+    const inst = await seedChatwootInstance(suDb, {
+      tenantId,
+      accountId: 9,
+      baseUrl: "https://chat.example.com",
+      adminToken: encryptJson("ADMIN"),
+    });
+    instanceId = inst.id;
+    threadId = `${tenantId}:${instanceId}:${CONV_ID}`;
+    const llmKey = await suDb.vaultEntry.create({
+      data: { tenantId, name: "llm-key", secret: encryptJson("sk-test") },
+      select: { id: true },
+    });
+    const agent = await suDb.agent.create({
+      data: {
+        tenantId,
+        name: "Atendente",
+        systemPrompt: "Você é prestativa.",
+        modelConfig: {
+          provider: "openai",
+          model: "gpt-4o-mini",
+          credentialRef: `vault:${llmKey.id}`,
+        },
+      },
+    });
+    await suDb.chatwootAgentBot.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        agentId: agent.id,
+        chatwootAgentBotId: 9,
+        accessToken: encryptJson("BOT"),
+        webhookSecret: encryptJson("S"),
+        webhookRouteTokenHash: `rem-route-${process.pid}`,
+        name: "Atendente",
+      },
+    });
+    const inbox = await suDb.inbox.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        chatwootInboxId: 91,
+        name: "Suporte",
+        agentId: agent.id,
+      },
+    });
+    await suDb.conversation.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        inboxId: inbox.id,
+        chatwootConversationId: CONV_ID,
+        status: "pending",
+        threadId,
+        lastEventAt: new Date(),
+        lastInboundAt: new Date(),
+      },
+    });
+  });
+
+  afterAll(async () => {
+    if (!dbUp) return;
+    await suDb.tenant.delete({ where: { id: tenantId } }).catch(() => {});
+  });
+
+  const armed = async (dedupeKey: string) => {
+    const row = await suDb.schedulerJob.create({
+      data: {
+        tenantId,
+        kind: "APPOINTMENT_REMINDER",
+        dedupeKey,
+        status: "CLAIMED",
+        runAt: new Date(),
+        // No credentialRef: the Google check is skipped, so nothing but the fence stands between
+        // the claim and the customer.
+        payload: { threadId, eventId: "evt-1", calendarId: "primary" },
+      },
+    });
+    // The payload the worker is holding — captured at claim time, which is exactly the moment
+    // before the stamp lands.
+    const job: ClaimedJob = {
+      id: row.id,
+      tenantId,
+      kind: "APPOINTMENT_REMINDER",
+      payload: row.payload as Record<string, unknown>,
+      attempts: 0,
+      claimSeq: 0,
+    };
+    return job;
+  };
+
+  test("is not sent, even though the worker still holds the pre-cancel payload", async () => {
+    const job = await armed("reminder:evt-1:60");
+    await cancelThreadAppointmentReminders(tenantId, threadId, appDb);
+    const s = stubClient();
+
+    const result = await appointmentReminderHandler(job, appDb, {
+      makeModel: () => new FakeListChatModel({ responses: ["Lembrete!"] }),
+      makeClient: s.makeClient,
+      checkpointer: new MemorySaver(),
+      persistUsage: async () => {},
+    });
+
+    expect(result).toEqual({ outcome: "done" });
+    expect(s.sent).toEqual([]);
+  });
+
+  test("an un-cancelled one still reaches the customer", async () => {
+    const job = await armed("reminder:evt-2:60");
+    const s = stubClient();
+
+    await appointmentReminderHandler(job, appDb, {
+      makeModel: () => new FakeListChatModel({ responses: ["Lembrete!"] }),
+      makeClient: s.makeClient,
+      checkpointer: new MemorySaver(),
+      persistUsage: async () => {},
+    });
+
+    // The negative above is only worth something next to this: without it, a fence that suppressed
+    // EVERY reminder would pass.
+    expect(s.sent.map(([c]) => c)).toEqual([CONV_ID]);
   });
 });

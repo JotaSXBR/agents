@@ -73,9 +73,21 @@ export async function resolveRedirectEpisode(
   cfg: ChannelRedirectConfig,
   base: PrismaClient = basePrisma,
 ): Promise<RedirectEpisode> {
-  const sides = [cfg.entryInboxId, cfg.widgetInboxId].filter(
-    (id): id is number => id !== null,
-  );
+  // A funnel that is switched off has no episode, even when its inbox ids are still configured. The
+  // caller acts on the pair — it cancels the sibling's ladder and its appointment reminders — and
+  // that is scheduled work belonging to another conversation: with the redirect off, the two are not
+  // a pair, they are two conversations of the same contact.
+  //
+  // An earlier round dropped this check to heal a stuck `redirectClosedAt` on a funnel someone had
+  // turned off. That reasoning covered the anchors alone, and it does not survive the heavier
+  // consumers added since. It also loses nothing: with the redirect off nothing tries to close
+  // anything, so the stale anchor is inert, and a /reset after re-enabling clears it — which is the
+  // moment it starts to matter.
+  const sides = cfg.enabled
+    ? [cfg.entryInboxId, cfg.widgetInboxId].filter(
+        (id): id is number => id !== null,
+      )
+    : [];
   if (sides.length === 0)
     return { entryConversationId: null, widgetConversationId: null };
   return runScopedOn(base, sysCtx(tenantId), async (db) => {

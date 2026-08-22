@@ -318,6 +318,40 @@ export async function appointmentReminderHandler(
   const askConfirmation = p.askConfirmation === true;
   const tenantId = job.tenantId;
 
+  // Was this reminder retired while it sat claimed? `cancelPendingJob` and its prefix sibling reach
+  // PENDING rows only, so a row the worker had already picked up survives every cancellation — and
+  // the reminder then fires at the customer about an appointment the operator was told had been
+  // cleared. The tombstone is the fence: `cancelThreadAppointmentReminders` (and the per-event
+  // cancel) stamp `cancelledAt` on EVERY row of the match, claimed ones included, precisely so an
+  // in-flight handler has something to see. The handler is the half that was missing.
+  //
+  // Re-read rather than trusted from `job.payload`: that snapshot is from claim time, which is
+  // exactly the moment before the stamp lands. A read that fails does NOT suppress the reminder —
+  // an unknown answer must not silently drop a customer-facing message that was legitimately armed.
+  const retired = await runScopedOn(base, sysCtx(tenantId), (db) =>
+    db.schedulerJob.findUnique({
+      where: { id: job.id },
+      select: { payload: true },
+    }),
+  ).catch((err) => {
+    logger.warn(
+      "appointment reminder: could not re-read the cancellation stamp (job=%s): %s",
+      String(job.id),
+      err instanceof Error ? err.message : String(err),
+    );
+    return null;
+  });
+  if (
+    retired &&
+    (retired.payload as { cancelledAt?: unknown } | null)?.cancelledAt != null
+  ) {
+    logger.info(
+      "appointment reminder: retired while claimed, not sending (job=%s)",
+      String(job.id),
+    );
+    return { outcome: "done" };
+  }
+
   // Verify the event before nudging: skip if it was cancelled / deleted / already started (e.g. edited
   // directly in Google). A transient lookup failure (undefined) falls through to nudging anyway.
   // Summary preference: live Google value > the snapshot enriched into the payload > generic.
