@@ -152,6 +152,18 @@ customer are a property of the TURN, not of what the file is. Each entry carries
 queued it (for the flow line) and its **kind** (for the quota): reading one field for both questions
 is how a document would land in the image budget.
 
+The **output guardrail sees what the model wrote on the document**, not only the reply and the
+captions: a field value and a line-item description are model-written text the customer reads, and
+they reach them as a numbered PDF they keep. Operator-authored block text is not screened — that
+would be moderating the operator, not the model. A trip drops the whole queue, so a document whose
+values violate is never sent.
+
+A document that was issued and then not delivered — a turn taken over, superseded, or blocked — is
+**left as it is**, not revoked. The idempotency key is derived from the values, so the next turn's
+identical call returns that same row and delivers it; revoking would turn a recoverable state into a
+permanent refusal. The cost is that "Recently issued" lists a document nobody received yet, which is
+a reporting gap and not a delivery one.
+
 At most one document per turn, and the slot is **reserved before the await**, the way `send_image`
 reserves a download. One model response's tool calls run under `Promise.all`, so a check that only
 reads the queue is read by every call in the batch while the queue is still empty: all of them pass,

@@ -819,4 +819,98 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     expect(settled.name).toBe("Depois");
     expect(settled.logoKey).toBe(`${tenantB}-logo.png`);
   });
+
+  // Revocation has to win every race it is in, and this is the one it could lose: the render happens
+  // OUTSIDE any transaction (it is CPU-bound), so an operator can void the document while its PDF is
+  // being drawn. Without revocation in the CAS the row would flip to READY afterwards and its bytes
+  // would be handed to the agent for delivery — a voided document reaching the customer anyway.
+  test("a revocation landing mid-render stops the bytes", async () => {
+    const key = `revoke-midrender-${process.pid}`;
+    let revokedDuringRender = false;
+    let tenantReads = 0;
+    // The company profile is read TWICE in one issuance: once to freeze it into the snapshot, before
+    // the row exists, and once at render time, after the row exists and before the CAS. The second
+    // read is the window this test is about — revoking on the first would land before there is
+    // anything to revoke.
+    const racing = appDb.$extends({
+      query: {
+        tenant: {
+          async findUnique({ args, query }) {
+            const out = await query(args);
+            tenantReads++;
+            if (tenantReads === 2 && !revokedDuringRender) {
+              revokedDuringRender = true;
+              await suDb.issuedDocument.updateMany({
+                where: { tenantId: tenantA, idempotencyKey: key },
+                data: { revoked: true },
+              });
+            }
+            return out;
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+
+    await expect(
+      issueDocument({
+        tenantId: tenantA,
+        templateId,
+        idempotencyKey: key,
+        values: VALUES,
+        withBytes: true,
+        base: racing,
+        storageDir: DIR,
+      }),
+    ).rejects.toThrow(/revoked/);
+    expect(revokedDuringRender).toBe(true);
+    const row = await suDb.issuedDocument.findFirst({
+      where: { tenantId: tenantA, idempotencyKey: key },
+      select: { status: true },
+    });
+    // Still PENDING: the CAS refused to promote a document that had been voided under it.
+    expect(row?.status).toBe("PENDING");
+  });
+
+  // The counter lives on the template, and the template can be deleted between the insert and the
+  // numbering (the FK nulls templateId by design — documents outlive their template). Rendering
+  // anyway would hand the customer a document with a blank where its number belongs.
+  test("refuses to render a document it could not number", async () => {
+    const starter = documentStarter("receipt", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const tpl = await createDocumentTemplate(
+      ctx(tenantA),
+      {
+        name: "Recibo efêmero",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+      },
+      appDb,
+    );
+    const key = `unnumberable-${process.pid}`;
+    const doc = await issueDocument({
+      tenantId: tenantA,
+      templateId: BigInt(tpl.id),
+      idempotencyKey: key,
+      values: { cliente: "Ana", valor: 100, referencia: "serviço" },
+      base: appDb,
+      storageDir: DIR,
+    });
+    // Back to the state the window leaves behind, then take the template away.
+    await suDb.issuedDocument.update({
+      where: { id: BigInt(doc.id) },
+      data: { number: null, status: "PENDING", pdfStorageKey: null },
+    });
+    await deleteDocumentTemplate(ctx(tenantA), BigInt(tpl.id), appDb);
+    await expect(
+      issueDocument({
+        tenantId: tenantA,
+        templateId: BigInt(tpl.id),
+        idempotencyKey: key,
+        values: { cliente: "Ana", valor: 100, referencia: "serviço" },
+        base: appDb,
+        storageDir: DIR,
+      }),
+    ).rejects.toThrow(/numbered/);
+  });
 });

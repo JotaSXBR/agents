@@ -33,6 +33,7 @@ import {
 } from "@/modules/agents/credential-paths";
 import { clampOversizedTextInPlace } from "@/modules/agents/text-caps";
 import { parseDocumentStyle } from "@/modules/documents/blocks";
+import { slugProblem } from "@/modules/documents/templates";
 import { parseAuthoredTemplate } from "@/modules/documents/validate";
 import { normalizeSettingsForStorage } from "@/modules/images/settings";
 import { isKnownCatalogType } from "@/modules/integrations/catalog";
@@ -1316,7 +1317,15 @@ async function createMissingComponents(
     // Re-validated on the way IN, never trusted as exported: a template written by a newer build can
     // carry a block this one does not know how to render, and a warning that names the reason is a
     // better import than a document that renders wrong in front of a customer.
-    const content = parseAuthoredTemplate(tpl.blocks, tpl.fields, tpl.style);
+    //
+    // The SLUG goes through the same gate as a hand-written one. A bundle is user-supplied, and the
+    // slug becomes a tool name: one reading `image` produces `send_image`, which the assembly then
+    // drops as a duplicate of the built-in — the operator would see a granted template whose tool
+    // never appears, with nothing anywhere saying why.
+    const slugFault = slugProblem(tpl.slug);
+    const content = slugFault
+      ? ({ ok: false, reason: `slug: ${slugFault}.` } as const)
+      : parseAuthoredTemplate(tpl.blocks, tpl.fields, tpl.style);
     if (!content.ok) {
       warnings.push({
         code: "documentTemplateInvalid",

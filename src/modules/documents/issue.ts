@@ -303,6 +303,18 @@ async function finish(
     );
     if (healed !== null) row = { ...row, number: healed };
   }
+  if (row.number === null) {
+    // The counter lives on the TEMPLATE, and the template can be deleted between the insert and the
+    // numbering — the FK nulls templateId by design, because documents outlive the template they
+    // came from. Rendering anyway would put a document with a blank where its number belongs in
+    // front of a customer, and the number is how the document identifies itself. Refused instead;
+    // the row stays PENDING, so nothing was half-delivered and nothing claims to be a document.
+    throw new AppError(
+      "this document could not be numbered",
+      409,
+      "errors.documentNotNumbered",
+    );
+  }
   const numberLabel = formatDocumentNumber(row.number, row.numberPrefix);
   const fileName = documentFileName(row.title, numberLabel);
 
@@ -343,12 +355,33 @@ async function finish(
   const key = storageKey(tenantId, row.id);
   // Bun.write creates parent directories. The path is derived from numeric ids only.
   await Bun.write(`${dir}/${key}`, buffer);
-  await runScopedOn(base, ctx, (db) =>
+  // `revoked: false` in the CAS, not only PENDING: an operator can revoke while this render is
+  // running, and without it the row would be flipped to READY and its bytes handed back for
+  // delivery — revocation losing to a race it should always win.
+  const finished = await runScopedOn(base, ctx, (db) =>
     db.issuedDocument.updateMany({
-      where: { id: row.id, status: "PENDING" },
+      where: { id: row.id, status: "PENDING", revoked: false },
       data: { status: "READY", pdfStorageKey: key },
     }),
   );
+  if (finished.count === 0) {
+    // Two ways to get here, and only one of them is a problem: another caller finished the same
+    // render (their bytes come from the same frozen snapshot, so ours are interchangeable), or it
+    // was revoked. Re-read to tell them apart rather than guess.
+    const now = await runScopedOn(base, ctx, (db) =>
+      db.issuedDocument.findUnique({
+        where: { id: row.id },
+        select: { revoked: true },
+      }),
+    );
+    if (now?.revoked) {
+      throw new AppError(
+        "this document was revoked",
+        409,
+        "errors.documentRevoked",
+      );
+    }
+  }
   return {
     id: String(row.id),
     number: numberLabel,

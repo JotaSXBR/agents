@@ -3,7 +3,7 @@ import type { Prisma, PrismaClient } from "@/../generated/prisma/client";
 import basePrisma from "@/api/lib/prisma";
 import { NATIVE_TOOL_NAMES } from "@/graph/tools/catalog";
 import { AppError, ConflictError, NotFoundError } from "@/lib/errors";
-import { runScopedOn, type TenantContext } from "@/lib/tenancy";
+import { runScopedOn, type ScopedDb, type TenantContext } from "@/lib/tenancy";
 import {
   type CompanySettings,
   readCompanySettings,
@@ -52,7 +52,7 @@ export function documentToolName(slug: string): string {
 // A slug whose tool name would collide with a native tool is refused HERE, when it is written,
 // because the collision only shows up later as an agent that has two tools with one name and no way
 // for the operator to tell which one the model called.
-function slugProblem(slug: string): string | null {
+export function slugProblem(slug: string): string | null {
   if (!/^[a-z][a-z0-9_]*$/.test(slug)) {
     return "the slug must start with a letter and contain only lowercase letters, digits and underscores";
   }
@@ -78,6 +78,41 @@ function slugConflict(slug: string): (e: unknown) => never {
     }
     throw e;
   };
+}
+
+// Everything a write is refused for that is NOT about the document's content: the name, the slug's
+// shape, and the slug already being taken in this tenant. Separated because a DRY RUN has to reach
+// the same answer as the apply — a preview that renders the document and then reports "valid" for a
+// blank name or a slug that collides is worse than no preview, because the caller acts on it.
+//
+// The database's unique index stays the authority on a slug taken concurrently (slugConflict); this
+// is the check that can run without writing anything.
+export async function documentTemplateWriteProblem(
+  ctx: TenantContext,
+  input: { name?: unknown; slug?: string },
+  base: PrismaClient = basePrisma,
+  excludeId?: bigint,
+): Promise<string | null> {
+  let name: string | undefined;
+  if (input.name !== undefined) {
+    const parsed = templateNameSchema.safeParse(input.name);
+    if (!parsed.success) return "name: must be between 1 and 120 characters.";
+    name = parsed.data;
+  }
+  const slug =
+    input.slug ?? (name !== undefined ? slugifyTemplateName(name) : undefined);
+  if (slug === undefined) return null;
+  const problem = slugProblem(slug);
+  if (problem) return `slug: ${problem}.`;
+  const taken = await runScopedOn(base, ctx, (db) =>
+    db.documentTemplate.findFirst({
+      where: { slug, ...(excludeId ? { id: { not: excludeId } } : {}) },
+      select: { id: true },
+    }),
+  );
+  return taken
+    ? `a document template with the slug "${slug}" already exists`
+    : null;
 }
 
 export interface DocumentTemplateDto {
@@ -258,7 +293,47 @@ export async function updateDocumentTemplate(
   patch: Partial<DocumentTemplateInput>,
   base: PrismaClient = basePrisma,
 ): Promise<DocumentTemplateDto> {
-  const current = await getDocumentTemplate(ctx, id, base);
+  // Read, validate and write under ONE lock on the template row.
+  //
+  // A patch that touches any of blocks/fields/style is validated against the OTHER two as they stand
+  // — that is the rule below — and then writes all of them back. Two clients patching different
+  // parts therefore each merge into the snapshot they read, and the later write silently replaces
+  // the earlier one: a text edit acknowledged with a 200 and then overwritten by a style edit
+  // carrying the pre-edit blocks. The lock is what makes the second request read the first's result
+  // instead of a snapshot from before it.
+  //
+  // NO LOCAL FAILURE MEASURED: a test issuing both patches under Promise.all could not reach the
+  // interleaving on this stack — the two transactions serialised, and the test passed with the lock
+  // removed, three runs out of three. It was deleted rather than kept as a proof of nothing. The
+  // interleaving that this guards is between API REPLICAS, which is the deployed topology and which
+  // no single-process test reaches; the same guard on the settings blob (patchBlock) IS covered,
+  // because a test there does fail without it.
+  return runScopedOn(base, ctx, async (db) => {
+    await db.$queryRaw`SELECT 1 FROM "document_templates" WHERE "id" = ${id} FOR UPDATE`;
+    const found = await db.documentTemplate.findUnique({
+      where: { id },
+      select: SELECT,
+    });
+    if (!found) {
+      throw new NotFoundError(
+        "document template not found",
+        "errors.documentTemplateNotFound",
+      );
+    }
+    const current = toDto(found);
+    const row = await patched(current, patch, db, id);
+    return toDto(row);
+  });
+}
+
+// The body of the patch, run inside the caller's lock. Split out so the transaction above reads as
+// what it is — read, decide, write, once — rather than as a wall of field handling.
+async function patched(
+  current: DocumentTemplateDto,
+  patch: Partial<DocumentTemplateInput>,
+  db: ScopedDb,
+  id: bigint,
+): Promise<Row> {
   const data: Prisma.DocumentTemplateUpdateInput = {};
   if (patch.name !== undefined) data.name = parseTemplateName(patch.name);
   if (patch.slug !== undefined) {
@@ -296,12 +371,9 @@ export async function updateDocumentTemplate(
       data.style = content.style as unknown as Prisma.InputJsonValue;
     }
   }
-  const row = await runScopedOn(base, ctx, (db) =>
-    db.documentTemplate
-      .update({ where: { id }, data, select: SELECT })
-      .catch(slugConflict(patch.slug ?? current.slug)),
-  );
-  return toDto(row);
+  return db.documentTemplate
+    .update({ where: { id }, data, select: SELECT })
+    .catch(slugConflict(patch.slug ?? current.slug));
 }
 
 export async function deleteDocumentTemplate(

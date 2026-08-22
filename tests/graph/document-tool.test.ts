@@ -6,6 +6,7 @@ import { PrismaClient } from "@/../generated/prisma/client";
 import {
   buildDocumentTools,
   documentToolSchema,
+  screenableValues,
 } from "@/graph/tools/documents";
 import { queuedImages, type TurnState } from "@/graph/tools/native";
 import type { TenantContext } from "@/lib/tenancy";
@@ -32,6 +33,34 @@ function newTurnState(): TurnState {
     attachmentsSeq: 0,
   };
 }
+
+describe("screenableValues", () => {
+  // What the OUTPUT guardrail gets to see. The reply and the captions already ride along because
+  // they are model-written text the customer reads; a quote's field values and line-item
+  // descriptions are that same text, and they reach the customer as a numbered PDF they keep.
+  test("collects the model's strings, including line-item descriptions", () => {
+    const text = screenableValues({
+      cliente: "Ana Ribeiro",
+      observacao: "texto que o modelo escreveu",
+      desconto: 100,
+      validade: "2026-09-05",
+      itens: [
+        { description: "Consultoria", quantity: 2, unitPrice: 450 },
+        { description: "Treinamento", quantity: 1, unitPrice: 100 },
+      ],
+    });
+    expect(text).toContain("Ana Ribeiro");
+    expect(text).toContain("texto que o modelo escreveu");
+    expect(text).toContain("Consultoria");
+    expect(text).toContain("Treinamento");
+    // Numbers carry no policy and cost tokens in a moderation pass.
+    expect(text).not.toContain("450");
+  });
+
+  test("is empty when the model supplied no text at all", () => {
+    expect(screenableValues({ desconto: 10, itens: [] })).toBe("");
+  });
+});
 
 describe("documentToolSchema", () => {
   // The declared fields ARE the tool's argument list. That is what "custom fields the agent fills"
@@ -190,6 +219,8 @@ describe.skipIf(!dbUp)("buildDocumentTools", () => {
     expect(file?.mime).toBe("application/pdf");
     expect(file?.kind).toBe("document");
     expect(file?.tool).toBe("send_orcamento");
+    // Carried so the output guardrail screens what the model put ON the document, not just around it.
+    expect(file?.screenText).toContain("Ana Ribeiro");
     expect(
       Buffer.from(file?.bytes as ArrayBuffer)
         .subarray(0, 5)
@@ -346,7 +377,7 @@ describe.skipIf(!dbUp)("buildDocumentTools", () => {
     const out = String(
       await tool(turnState).invoke({ ...ARGS, cliente: "Revogado" }),
     );
-    expect(out).toMatch(/cancelado/);
+    expect(out).toMatch(/Não é possível enviar esse documento/);
     expect(turnState.pendingAttachments).toHaveLength(0);
   });
 

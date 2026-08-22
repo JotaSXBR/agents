@@ -922,15 +922,18 @@ export async function runLoadedTurn(
     // template / a guardrails-generated safe reply, or suppress the send entirely ("silent"). A
     // suppressed send also discards the deferred resolve intent — resolving a conversation whose
     // goodbye was blocked would strand the customer with no reply and no human.
-    // NOTE: The captions ride along into the screening: they are model-written text the customer
-    // reads, so moderating the reply while a caption goes out unread would be a hole. A trip drops
-    // the queue — the safe reply replaces what the model wrote, images included. This sits ABOVE the
-    // empty-reply branch because a caption is customer-facing text even when the model produced no
-    // final message of its own (skip_reply with an image is a legitimate shape).
-    const captions = turnState.pendingAttachments
-      .map((i) => i.caption?.trim())
-      .filter((c): c is string => !!c);
-    const screened = [reply, ...captions].filter(Boolean).join("\n");
+    // NOTE: Everything the MODEL wrote for the customer rides along into the screening, not just the
+    // reply: a caption, and the values a model put inside a document (its field text and line-item
+    // descriptions). All of it is text the customer reads, so moderating the reply while the rest
+    // goes out unread would be a hole — and the document version of that hole is worse, because it
+    // reaches them as a numbered PDF they keep. A trip drops the queue — the safe reply replaces what
+    // the model wrote, attachments included. This sits ABOVE the empty-reply branch because a caption
+    // is customer-facing text even when the model produced no final message of its own (skip_reply
+    // with an image is a legitimate shape).
+    const modelWritten = turnState.pendingAttachments.flatMap((i) =>
+      [i.caption?.trim(), i.screenText?.trim()].filter((c): c is string => !!c),
+    );
+    const screened = [reply, ...modelWritten].filter(Boolean).join("\n");
     const outGuard = screened ? await runGuardrail("output", screened) : null;
     if (outGuard && guardrailTripped(outGuard)) {
       turnState.pendingAttachments.length = 0;

@@ -13,6 +13,7 @@
     "credentialRequired": "Uma credencial é obrigatória para listar os modelos do provedor.",
     "currentPasswordIncorrect": "Current password is incorrect",
     "documentNotFound": "Documento não encontrado",
+    "documentNotNumbered": "Não foi possível numerar este documento porque o modelo dele não existe mais",
     "documentRevoked": "Este documento foi cancelado e não pode ser emitido novamente",
     "documentTemplateDisabled": "Este modelo de documento está desativado",
     "documentTemplateNotFound": "Modelo de documento não encontrado",

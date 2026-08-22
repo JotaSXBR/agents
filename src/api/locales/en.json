@@ -13,6 +13,7 @@
     "credentialRequired": "A credential is required to list provider models.",
     "currentPasswordIncorrect": "Current password is incorrect",
     "documentNotFound": "Document not found",
+    "documentNotNumbered": "This document could not be numbered because its template no longer exists",
     "documentRevoked": "This document was revoked and cannot be issued again",
     "documentTemplateDisabled": "This document template is disabled",
     "documentTemplateNotFound": "Document template not found",

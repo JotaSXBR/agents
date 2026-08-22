@@ -2577,6 +2577,29 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
           agentId: agent.id,
         },
       });
+      const starter = documentStarter("quote", "pt-BR");
+      if (!starter) throw new Error("no starter");
+      const tpl = await createDocumentTemplate(
+        { tenantId: gTenantId, userId: null, role: "TENANT_ADMIN" },
+        {
+          name: "Orçamento",
+          blocks: starter.blocks,
+          fields: starter.fields,
+          style: starter.style,
+          numberPrefix: "ORC-",
+        },
+        appDb,
+      );
+      await suDb.agentToolSelection.create({
+        data: {
+          tenantId: gTenantId,
+          agentId: agent.id,
+          source: "DOCUMENT",
+          documentTemplateId: BigInt(tpl.id),
+          enabledTools: [],
+          knowledgeBaseIds: [],
+        },
+      });
     });
 
     afterAll(async () => {
@@ -2589,6 +2612,9 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
         "contacts",
         "inboxes",
         "chatwoot_agent_bots",
+        "agent_tool_selections",
+        "issued_documents",
+        "document_templates",
         "agents",
         "vault_entries",
         "chatwoot_instances",
@@ -2732,6 +2758,82 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
       expect(outcome).toBe("posted");
       expect(sent).toEqual([[946, "GEN-OUT-REPLY"]]);
       expect(attachments).toEqual([]);
+    });
+
+    // The same rule, on the surface where getting it wrong costs the most. A caption is a line under
+    // a picture; a document's field values and line-item descriptions are text the model wrote that
+    // the customer keeps as a numbered PDF. Screening the reply while that goes out unread is the
+    // same hole, one degree worse — so the values have to REACH the screening (asserted on what the
+    // guardrail model was actually given, not on the outcome alone, which a wholly unrelated block
+    // would also produce).
+    test("a document's model-written values are screened, and a trip stops the file", async () => {
+      await setGuardrails({
+        enabled: true,
+        provider: "openai",
+        model: GUARD_MODEL,
+        credentialRef: gVaultRef,
+        input: { enabled: false },
+        output: {
+          enabled: true,
+          action: "silent",
+          checks: {
+            toxicity: true,
+            unsafeContent: false,
+            competitorMentions: false,
+            promptAdherence: false,
+          },
+          templateMessage: "TEMPLATE-OUT",
+        },
+      });
+      await seedConv(949);
+      const sent: Array<[number, string]> = [];
+      const notes: Array<[number, string]> = [];
+      const attachments: Array<[number, string]> = [];
+      const screened: string[] = [];
+      const verdict = JSON.stringify({
+        violated: true,
+        categories: ["toxicity"],
+        rationale: "line item",
+      });
+      const dir = `/tmp/fazerai-guard-doc-${process.pid}`;
+      const outcome = await runAgentTurn({
+        tenantId: gTenantId,
+        instanceId: gInstanceId,
+        agentBotId: G_BOT,
+        event: incoming({ conversationId: 949, inboxId: G_INBOX }),
+        base: appDb,
+        deps: {
+          makeModel: (cfg: ResolvedModelConfig): BaseChatModel =>
+            cfg.model === GUARD_MODEL
+              ? guardrailModel(async (messages) => {
+                  screened.push(JSON.stringify(messages));
+                  return { content: verdict };
+                })
+              : (new SendDocumentThenReplyModel(
+                  "Segue o orçamento!",
+                  "send_orcamento",
+                  {
+                    cliente: "Ana Ribeiro",
+                    itens: [
+                      {
+                        description: "DESCRICAO PROIBIDA",
+                        quantity: 1,
+                        unitPrice: 10,
+                      },
+                    ],
+                  },
+                ) as unknown as BaseChatModel),
+          makeClient: guardStub(sent, notes, [], attachments),
+          checkpointer: new MemorySaver(),
+          documentsStorageDir: dir,
+        },
+      });
+      expect(outcome).toBe("blocked");
+      expect(attachments).toEqual([]);
+      expect(sent).toEqual([]);
+      // The value the model put ON the document reached the screening — which is the half that a
+      // "blocked" outcome on its own does not prove.
+      expect(screened.join("\n")).toContain("DESCRICAO PROIBIDA");
     });
 
     // Same rule with no reply to hide behind: when the caption is the ONLY customer-facing text the

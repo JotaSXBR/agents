@@ -5,6 +5,7 @@ import { documentStarter } from "@/modules/documents/starters";
 import {
   createDocumentTemplate,
   deleteDocumentTemplate,
+  documentTemplateWriteProblem,
   getDocumentTemplate,
   previewDocumentTemplate,
   updateDocumentTemplate,
@@ -114,6 +115,11 @@ export async function documentTemplateCreate(
   if (!input.name) return err("name is required");
   try {
     if (args.dry_run !== false) {
+      // Asked BEFORE the render, and asked at all because a dry run that renders a beautiful
+      // document and then reports "valid" for a name or slug the apply will refuse is worse than no
+      // dry run: the caller acts on it.
+      const problem = await documentTemplateWriteProblem(ctx, input, base);
+      if (problem) return err(problem);
       // The dry run RENDERS, so the preview is the document rather than a description of it. That is
       // the whole reason this surface is usable without a visual editor.
       const pdf = await previewDocumentTemplate(
@@ -192,6 +198,10 @@ export async function documentTemplateUpdate(
     const target = `document_template:${id}`;
     const before = projection(current);
     if (args.dry_run !== false) {
+      // Same question as on create, with this template excluded from the uniqueness check: renaming
+      // a slug to the one it already has is not a collision.
+      const problem = await documentTemplateWriteProblem(ctx, patch, base, id);
+      if (problem) return err(problem);
       // Rendered, not just diffed: a block change that diffs as "blocks: 6 → 7" says nothing about
       // whether the seventh renders. Failing here is the point — the error names the block.
       const pdf = await previewDocumentTemplate(

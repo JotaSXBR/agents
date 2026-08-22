@@ -143,6 +143,12 @@ export interface PendingAttachment {
   // other one. Reading one bit for two questions is how the next attachment source lands in the
   // image budget without anyone noticing.
   kind: "image" | "document";
+  // Text the MODEL wrote that is inside the file itself, joined into the output guardrail alongside
+  // the captions. A caption rides along because it is model-written text the customer reads; the
+  // values a model put into a document's fields and line-item descriptions are exactly that too, and
+  // they reach the customer on paper. Operator-authored block text is NOT here: screening a
+  // template the operator wrote is moderating the operator, not the model.
+  screenText?: string;
 }
 
 export interface ToolCtx {

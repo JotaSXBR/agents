@@ -790,6 +790,37 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
     expect(docGrant?.documentTemplateId).toBe(dstTemplate?.id as bigint);
   });
 
+  // A bundle is user-supplied, and a template's slug becomes a TOOL NAME. One reading `image`
+  // produces `send_image`, which the assembly then drops as a duplicate of the built-in: the
+  // operator would see a granted template whose tool never shows up, with nothing saying why. The
+  // import applies the same slug gate a hand-written template passes.
+  test("refuses an imported template whose slug would collide with a built-in", async () => {
+    const exp = await exportAgent(srcCtx(), srcAgentId, appDb, {
+      includeComponents: true,
+    });
+    const tampered = structuredClone(exp);
+    const tpl = tampered.components?.documentTemplates?.find(
+      (t) => t.slug === "orcamento",
+    );
+    if (!tpl) throw new Error("bundle missing the document template");
+    tpl.slug = "image";
+    const { agent, warnings } = await importAgent(dstCtx(), tampered, appDb);
+    expect(warnings.some((w) => w.code === "documentTemplateInvalid")).toBe(
+      true,
+    );
+    expect(
+      await suDb.documentTemplate.count({
+        where: { tenantId: dstTenant, slug: "image" },
+      }),
+    ).toBe(0);
+    await suDb.$executeRawUnsafe(
+      `DELETE FROM agent_tool_selections WHERE agent_id = ${BigInt(agent.id)}`,
+    );
+    await suDb.$executeRawUnsafe(
+      `DELETE FROM agents WHERE id = ${BigInt(agent.id)}`,
+    );
+  });
+
   test("import canonicalizes legacy authoring shapes (JSON-Schema inputSchema, single-brace {var})", async () => {
     const exp = await exportAgent(srcCtx(), srcAgentId, appDb, {
       includeComponents: true,

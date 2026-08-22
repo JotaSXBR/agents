@@ -99,6 +99,27 @@ function idempotencyKey(
   return `doc:${templateId}:${threadId ?? "unbound"}:${hasher.digest("hex").slice(0, 32)}`;
 }
 
+// The text a MODEL wrote into the document, for the output guardrail to screen alongside the reply.
+// Only strings, because that is where policy-bearing text can be: a price or a date carries none, and
+// feeding numbers to a moderation pass costs tokens for nothing. Line-item descriptions are included
+// because a line on a quote is a sentence the customer reads.
+export function screenableValues(input: Record<string, unknown>): string {
+  const out: string[] = [];
+  for (const value of Object.values(input)) {
+    if (typeof value === "string") {
+      out.push(value);
+      continue;
+    }
+    if (!Array.isArray(value)) continue;
+    for (const item of value) {
+      const description = (item as { description?: unknown } | null)
+        ?.description;
+      if (typeof description === "string") out.push(description);
+    }
+  }
+  return out.join("\n");
+}
+
 export function buildDocumentTools(
   selections: DocumentSelection[],
   deps: DocumentToolDeps,
@@ -172,6 +193,7 @@ export function buildDocumentTools(
             order,
             tool: name,
             kind: "document",
+            screenText: screenableValues(input),
           });
           // NOTE: no field values here, and no customer name. This string is the tool's OUTPUT, and
           // ToolFlowLogger stores tool outputs verbatim in `ExecutionLog.detail` — a column that
@@ -184,11 +206,12 @@ export function buildDocumentTools(
           if (e instanceof AppError && e.statusCode === 400) {
             return `Não consegui emitir o documento: ${e.message} Corrija os dados e tente de novo, ou siga a conversa sem prometer o envio.`;
           }
-          // The operator voided this document, and the key that identifies it comes from these very
-          // values — so "try again" would land back on it. No correction exists, and it is a
-          // deliberate decision rather than a failure, so it does not go to the alert channels.
+          // The document cannot be produced and no argument change would alter that: either the
+          // operator voided it (and the key that identifies it comes from these very values, so
+          // "try again" lands back on the same row), or the template it counts from is gone. Both
+          // are decisions someone made, not failures of ours, so neither goes to the alert channels.
           if (e instanceof AppError && e.statusCode === 409) {
-            return "Esse documento foi cancelado e não pode ser reenviado. Siga a conversa sem prometer o envio, ou ofereça encaminhar para um atendente.";
+            return "Não é possível enviar esse documento. Siga a conversa sem prometer o envio, ou ofereça encaminhar para um atendente.";
           }
           throw e;
         } finally {

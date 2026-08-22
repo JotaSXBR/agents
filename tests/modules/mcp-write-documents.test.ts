@@ -242,6 +242,60 @@ describe.skipIf(!dbUp)("MCP document writes", () => {
     expect(after?.style.font).not.toBe("mono");
   });
 
+  // A dry run that renders a beautiful document and then answers "valid" for input the apply
+  // refuses is worse than no dry run at all: the caller acts on it, and the failure arrives on the
+  // write it was told was safe.
+  test("the dry run refuses what the apply would refuse", async () => {
+    const blank = await documentTemplateCreate(
+      principal({ tenantId }),
+      { name: "   ", starter: "quote" },
+      { base: appDb },
+    );
+    expect(blank.ok).toBe(false);
+
+    const builtin = await documentTemplateCreate(
+      principal({ tenantId }),
+      { starter: "quote", name: "Imagem", slug: "image" },
+      { base: appDb },
+    );
+    expect(builtin.ok).toBe(false);
+    if (!builtin.ok) expect(builtin.error).toContain("send_image");
+
+    // The tenant already has "orcamento" from the apply above.
+    const taken = await documentTemplateCreate(
+      principal({ tenantId }),
+      { starter: "quote", name: "Outro orçamento", slug: "orcamento" },
+      { base: appDb },
+    );
+    expect(taken.ok).toBe(false);
+    if (!taken.ok) expect(taken.error).toContain("already exists");
+
+    // The UPDATE dry run asks the same question — it was the half that reported "valid" for a rename
+    // the apply would then refuse.
+    const [tpl] = await listDocumentTemplates(ctx(), appDb);
+    const renamed = await documentTemplateUpdate(
+      principal({ tenantId }),
+      { document_template_id: tpl?.id as string, slug: "image" },
+      { base: appDb },
+    );
+    expect(renamed.ok).toBe(false);
+    if (!renamed.ok) expect(renamed.error).toContain("send_image");
+    const blankRename = await documentTemplateUpdate(
+      principal({ tenantId }),
+      { document_template_id: tpl?.id as string, name: "   " },
+      { base: appDb },
+    );
+    expect(blankRename.ok).toBe(false);
+
+    // …and renaming a template's slug to the one it already has is not a collision.
+    const same = await documentTemplateUpdate(
+      principal({ tenantId }),
+      { document_template_id: tpl?.id as string, slug: tpl?.slug as string },
+      { base: appDb },
+    );
+    expect(same.ok).toBe(true);
+  });
+
   test("delete dry-run says what survives the deletion", async () => {
     const [tpl] = await listDocumentTemplates(ctx(), appDb);
     const r = await documentTemplateDelete(
