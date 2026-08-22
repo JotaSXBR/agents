@@ -134,6 +134,13 @@ export async function resolveRedirectEpisode(
 // pushed into cancelPendingJob: that primitive has eight callers across four modules, and each of
 // them would need its own handler-side fence to make the change mean anything.
 //
+// DONE even for a row the worker is holding, and that pairs with the bump rather than duplicating it.
+// Bumping alone leaves a CLAIMED row nobody can finish — the in-flight worker's complete, reschedule
+// and fail all CAS on the old token and no-op, while no claim can pick it up again because it is
+// still CLAIMED — so it sits wedged until the stale-job sweep records a failure that never happened.
+// Terminal here, superseded there: the handler's writes land on nothing and the row is already
+// finished.
+//
 // The claim token is bumped with it, and that is what makes the fence hold at the LAST boundary the
 // handler does not own: its return value. `completeJob`/`rescheduleJob`/`failJob` all CAS on the
 // token the claim handed out (issue #164), so a stamp landing after the handler's final read still
@@ -152,7 +159,7 @@ export async function retireRedirectFollowUp(
     const stamp = JSON.stringify({ cancelledAt: new Date().toISOString() });
     return db.$executeRaw`
       UPDATE scheduler_jobs
-         SET status = CASE WHEN status = 'PENDING' THEN 'DONE' ELSE status END,
+         SET status = 'DONE',
              payload = payload || ${stamp}::jsonb,
              claim_seq = claim_seq + 1,
              updated_at = now()

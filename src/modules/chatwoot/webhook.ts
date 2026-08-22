@@ -1310,6 +1310,52 @@ async function maybeConsumeCommandOrGate(params: {
         base,
       ),
     );
+    // BEFORE the watermarks, and that ordering is the point. Clearing the anchors first opens a gap
+    // in which a ladder the worker has ALREADY claimed still passes its own fence — nothing has
+    // stamped it yet — and runs to its closing, which re-sets `redirectClosedAt` on the row the
+    // command just cleared, on a conversation it also resolves. Retiring first means anything still
+    // in flight finds the stamp and stands down, and whatever it may already have written is cleared
+    // by the steps below rather than after them.
+    // NOTE: The other two per-conversation job kinds this episode can arm. FOLLOWUP and MEMORY_COMPACT are
+    // already cancelled above; these carry exactly the same argument and were left running, so a
+    // reminder from a test booking would fire at the customer referring to an episode the operator
+    // believes is erased.
+    //
+    // The ladder is cancelled by the key that ARMED it, which is the WIDGET side's thread — not this
+    // conversation's, unless this conversation is the widget one. Its stages message and resolve both
+    // sides of the pair, so a /reset on the entry conversation (the side the funnel is re-run from)
+    // was cancelling a key that had never been enqueued.
+    await step(
+      "cancel redirect follow-up",
+      "follow-up de redirecionamento",
+      () =>
+        retireRedirectFollowUp(
+          tenantId,
+          chatwootThreadId(tenantId, instanceId, ladderConversationId),
+          base,
+        ),
+    );
+    // NOTE: Both sides of the pair, for the same reason the ladder is cancelled by the widget's key: in a
+    // redirect episode the AI does not serve the entry conversation at all — the gate answers there
+    // with a fixed message and no model, and every turn (so every booking) happens in the widget
+    // (docs/channel-redirect.md). A /reset typed on the entry side would therefore cancel reminders
+    // on a thread that never booked anything, and the test appointment would go on nudging the
+    // customer about an episode the operator was told had been erased.
+    for (const convId of redirectSibling === null
+      ? [conversationId]
+      : [conversationId, redirectSibling]) {
+      await step(
+        "cancel appointment reminders",
+        "lembretes de agendamento",
+        () =>
+          cancelThreadAppointmentReminders(
+            tenantId,
+            chatwootThreadId(tenantId, instanceId, convId),
+            base,
+          ),
+      );
+    }
+
     // Clear the follow-up watermarks so the sweep does not immediately re-arm a follow-up: a reset is
     // a clean slate, so no proactive nudge should fire until the CUSTOMER sends a genuine message
     // again (which re-anchors lastInboundAt). Also clear the one-shot notice watermarks (test-mode +
@@ -1371,46 +1417,6 @@ async function maybeConsumeCommandOrGate(params: {
         ),
       );
     }
-    // NOTE: The other two per-conversation job kinds this episode can arm. FOLLOWUP and MEMORY_COMPACT are
-    // already cancelled above; these carry exactly the same argument and were left running, so a
-    // reminder from a test booking would fire at the customer referring to an episode the operator
-    // believes is erased.
-    //
-    // The ladder is cancelled by the key that ARMED it, which is the WIDGET side's thread — not this
-    // conversation's, unless this conversation is the widget one. Its stages message and resolve both
-    // sides of the pair, so a /reset on the entry conversation (the side the funnel is re-run from)
-    // was cancelling a key that had never been enqueued.
-    await step(
-      "cancel redirect follow-up",
-      "follow-up de redirecionamento",
-      () =>
-        retireRedirectFollowUp(
-          tenantId,
-          chatwootThreadId(tenantId, instanceId, ladderConversationId),
-          base,
-        ),
-    );
-    // NOTE: Both sides of the pair, for the same reason the ladder is cancelled by the widget's key: in a
-    // redirect episode the AI does not serve the entry conversation at all — the gate answers there
-    // with a fixed message and no model, and every turn (so every booking) happens in the widget
-    // (docs/channel-redirect.md). A /reset typed on the entry side would therefore cancel reminders
-    // on a thread that never booked anything, and the test appointment would go on nudging the
-    // customer about an episode the operator was told had been erased.
-    for (const convId of redirectSibling === null
-      ? [conversationId]
-      : [conversationId, redirectSibling]) {
-      await step(
-        "cancel appointment reminders",
-        "lembretes de agendamento",
-        () =>
-          cancelThreadAppointmentReminders(
-            tenantId,
-            chatwootThreadId(tenantId, instanceId, convId),
-            base,
-          ),
-      );
-    }
-
     // LAST, and that ordering is the point. The state that decides whether the agent may speak AT
     // ALL — `shouldBotHandle` needs both `status === "pending"` and an assignee that is not a human
     // — is also the state that makes the NEXT delivery actionable. Returned first, a customer

@@ -951,7 +951,7 @@ describe.skipIf(!dbUp)(
     // A ladder the worker had ALREADY picked up. Cancelling reaches PENDING rows only, so the row
     // survives — and this ladder's terminal stage posts a closing on both conversations and resolves
     // them, after the operator was told the episode was cleared. The stamp is what an in-flight
-    // handler can see; the status is deliberately left alone, because the worker still owns the row.
+    // handler can see, and the row goes terminal with it so nothing is left wedged.
     test("a ladder already claimed is tombstoned, not just skipped", async () => {
       await withRedirectPair(async (_convId, widgetThread) => {
         await suDb.schedulerJob.create({
@@ -972,10 +972,64 @@ describe.skipIf(!dbUp)(
           where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
           select: { status: true, payload: true },
         });
-        expect(job.status).toBe("CLAIMED");
+        // Terminal, not left CLAIMED: bumping the claim token alone would leave a row the in-flight
+        // worker can no longer finish and no claim can pick up again, wedged until the stale sweep
+        // records a failure that never happened.
+        expect(job.status).toBe("DONE");
         expect(
           (job.payload as { cancelledAt?: string })?.cancelledAt,
         ).toBeString();
+      });
+    });
+
+    // The jobs are retired BEFORE the anchors are cleared, and this is the gap that ordering closes:
+    // a ladder already claimed passes its own fence while nothing has stamped it, runs to its
+    // closing, and re-sets `redirectClosedAt` on the row the command just cleared — on a
+    // conversation it also resolves.
+    test("the jobs are retired before the anchors they could re-set", async () => {
+      await withRedirectPair(async (_convId, widgetThread) => {
+        await suDb.schedulerJob.create({
+          data: {
+            tenantId,
+            kind: "REDIRECT_FOLLOWUP",
+            dedupeKey: `redirect-followup:${widgetThread}`,
+            status: "CLAIMED",
+            runAt: new Date(),
+            payload: { stage: "closing", widgetThreadId: widgetThread },
+          },
+        });
+        // Observed at the only instant that matters: when the command clears the anchors, is the
+        // job already stamped? Asking afterwards proves nothing — both writes land either way.
+        let stampedByThen: boolean | null = null;
+        const stampedAtClear = () => stampedByThen;
+        const watched = appDb.$extends({
+          query: {
+            $allOperations({ operation, args, query }) {
+              const isAnchorClear =
+                operation === "update" &&
+                Object.hasOwn(
+                  ((args as { data?: object }).data ?? {}) as object,
+                  "redirectClosedAt",
+                );
+              if (!isAnchorClear) return query(args);
+              return (async () => {
+                const row = await suDb.schedulerJob.findFirst({
+                  where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
+                  select: { payload: true },
+                });
+                stampedByThen =
+                  (row?.payload as { cancelledAt?: unknown } | null)
+                    ?.cancelledAt != null;
+                return query(args);
+              })();
+            },
+          },
+        }) as unknown as PrismaClient;
+        const cw = fakeChatwoot();
+        globalThis.fetch = cw.impl;
+        await sendReset("/reset", CONV_ID, { base: watched });
+
+        expect(stampedAtClear()).toBe(true);
       });
     });
 

@@ -564,8 +564,10 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
       where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
       select: { status: true, payload: true },
     });
-    // Still claimed, still tombstoned: the ladder did not come back as PENDING with a clean payload.
-    expect(row.status).toBe("CLAIMED");
+    // Terminal and tombstoned: the ladder did not come back as PENDING with a clean payload, and it
+    // is not left CLAIMED either — a row nobody can finish and nobody can reclaim sits wedged until
+    // the stale-job sweep records a failure that never happened.
+    expect(row.status).toBe("DONE");
     expect((row.payload as { cancelledAt?: string })?.cancelledAt).toBeString();
   });
 
