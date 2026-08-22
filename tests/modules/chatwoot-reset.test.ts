@@ -756,6 +756,133 @@ describe.skipIf(!dbUp)(
       }
     });
 
+    // The takeover the mirror has NOT heard about yet, which is the ordinary case rather than the
+    // exotic one: our row only learns of an assignment when Chatwoot's webhook arrives, and the
+    // cleanup this fence sits behind is a dozen network calls long. Comparing the stale holder
+    // against itself answers "unchanged" and the command unassigns the human who just took over —
+    // the exact harm the fence was added to prevent, hidden by the source it was reading.
+    //
+    // Chatwoot serves the takeover; nothing writes it to the mirror, the way a queued webhook would
+    // not have.
+    // The mirror's own word on who holds it when the command arrives. A `message_created` delivery
+    // does not write the assignee columns — only conversation events do — so a test that declares a
+    // holder only in the webhook payload would leave the two ends of the fence disagreeing before it
+    // even starts, and would be measuring the seed rather than the takeover.
+    const seedHolder = async (assigneeId: number): Promise<void> => {
+      await suDb.conversation.updateMany({
+        where: { tenantId, chatwootConversationId: CONV_ID },
+        data: { status: "open", assigneeType: "User", assigneeId },
+      });
+    };
+
+    const liveHolder = (
+      cw: ReturnType<typeof fakeChatwoot>,
+      holderId: () => number,
+    ): typeof fetch => {
+      const inner = cw.impl;
+      return (async (input, init) => {
+        const url = new URL(String(input));
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (
+          method === "GET" &&
+          url.pathname.endsWith(`/conversations/${CONV_ID}`)
+        ) {
+          // Through the double first, so the call is recorded and the token check still runs.
+          const passthrough = await inner(input, init);
+          if (!passthrough.ok) return passthrough;
+          return jsonResponse({
+            id: CONV_ID,
+            kanban_task: { id: KANBAN_TASK_ID },
+            status: "open",
+            // Ahead of the mirror's stored activity, or the reconcile's freshness guard refuses the
+            // snapshot and the refresh silently buys nothing.
+            last_activity_at: Math.floor(Date.now() / 1000) + 60,
+            meta: {
+              assignee_type: "User",
+              assignee: { id: holderId(), name: "quem atende" },
+            },
+          });
+        }
+        return inner(input, init);
+      }) as typeof fetch;
+    };
+
+    test("a takeover the mirror has not seen yet still blocks the hand-back", async () => {
+      const cw = fakeChatwoot();
+      let tookOver = false;
+      const base = liveHolder(cw, () => (tookOver ? 222 : 111));
+      globalThis.fetch = (async (input, init) => {
+        if (!tookOver && String(input).includes("/kanban/tasks/")) {
+          tookOver = true;
+        }
+        return base(input, init);
+      }) as typeof fetch;
+      try {
+        await seedHolder(111);
+        await sendReset("/reset", CONV_ID, {
+          status: "open",
+          assigneeType: "User",
+          assigneeId: 111,
+        });
+
+        expect(tookOver).toBe(true);
+        expect(
+          cw.calls.filter(
+            (c) =>
+              c.method === "POST" &&
+              (c.path.endsWith(`/conversations/${CONV_ID}/assignments`) ||
+                c.path.endsWith(`/conversations/${CONV_ID}/toggle_status`)),
+          ),
+        ).toEqual([]);
+        // And the refresh is why — the mirror now names the newer holder. Without this the test
+        // would also pass on a GET that simply failed.
+        const conv = await suDb.conversation.findFirstOrThrow({
+          where: { tenantId, chatwootConversationId: CONV_ID },
+          select: { assigneeType: true, assigneeId: true },
+        });
+        expect([conv.assigneeType, conv.assigneeId]).toEqual(["User", 222]);
+      } finally {
+        globalThis.fetch = originalFetch;
+        await suDb.conversation.updateMany({
+          where: { tenantId, chatwootConversationId: CONV_ID },
+          data: { status: "pending", assigneeType: null, assigneeId: null },
+        });
+      }
+    });
+
+    // The control the test above needs: the same live payload with NOBODY taking over still hands
+    // the conversation back. Otherwise "no assignment call" would be satisfied by a refresh that
+    // broke the command outright.
+    test("the same refresh still hands back when the holder has not changed", async () => {
+      const cw = fakeChatwoot();
+      globalThis.fetch = liveHolder(cw, () => 111);
+      try {
+        await seedHolder(111);
+        await sendReset("/reset", CONV_ID, {
+          status: "open",
+          assigneeType: "User",
+          assigneeId: 111,
+        });
+
+        expect(
+          cw.calls
+            .filter(
+              (c) =>
+                c.method === "POST" &&
+                (c.path.endsWith(`/conversations/${CONV_ID}/assignments`) ||
+                  c.path.endsWith(`/conversations/${CONV_ID}/toggle_status`)),
+            )
+            .map((c) => c.path.split("/").pop()),
+        ).toEqual(["toggle_status", "assignments"]);
+      } finally {
+        globalThis.fetch = originalFetch;
+        await suDb.conversation.updateMany({
+          where: { tenantId, chatwootConversationId: CONV_ID },
+          data: { status: "pending", assigneeType: null, assigneeId: null },
+        });
+      }
+    });
+
     // And what an unreadable holder decides: nothing. The command already has an answer — the one it
     // was given when it started — and a transient failure must not be the thing that withdraws it.
     test("an unreadable holder leaves the hand-back on the answer it started with", async () => {

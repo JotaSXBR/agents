@@ -86,8 +86,10 @@ import {
   isNewHumanAgentMessage,
   isNewIncomingMessage,
   normalizeChatwootEvent,
+  parseLiveConversation,
   shouldBotHandle,
 } from "./normalize";
+import { reconcileMirrorFromLive } from "./reconcile";
 import { renderAttendantMessage, renderInboundMessage } from "./render";
 import {
   CHATWOOT_DELIVERY_HEADER,
@@ -1500,6 +1502,45 @@ async function maybeConsumeCommandOrGate(params: {
     // conversation nothing is left to answer. The command still clears everything else — starting the
     // episode over before switching the agent back on is a reasonable thing to want — and says what
     // it did not do.
+    // Everything below decides from the MIRROR, and the mirror lags Chatwoot by one webhook. That is
+    // fine for the rest of the command — it acts on our own state — but the hand-back is the one act
+    // here that reaches a third party, taking a conversation away from whoever holds it. A human who
+    // took over during the cleanup (a dozen network calls long) may not have arrived in the mirror
+    // yet, and then `heldBySameParty` compares a stale holder against itself, answers "unchanged",
+    // and the command unassigns the very takeover the fence exists to protect.
+    //
+    // A REFRESH of the mirror, not a second read beside it: the four fences that follow
+    // (answerBlocker, heldBySameParty, and the ack's own recheck) all read that row, and answering
+    // one of them from a different source is how two fences come to disagree about who holds a
+    // conversation. reconcileMirrorFromLive is also the versioned path — a webhook that landed with
+    // something newer wins instead of being overwritten by this GET — and it is the same probe
+    // `runAgentNudge` runs before ITS irreversible act, for the same reason.
+    //
+    // Best-effort on purpose. Failing to refresh leaves the decision exactly where it stood before
+    // this line, which is where it stood for every round of this PR; it does not warrant telling the
+    // operator the assignment failed, so it is logged rather than collected into `failed`.
+    if (notOursAtStart && client !== null) {
+      try {
+        const live = parseLiveConversation(
+          await client.getConversation(conversationId),
+        );
+        if (live) {
+          await reconcileMirrorFromLive({
+            tenantId,
+            instanceId,
+            conversationId,
+            live,
+            base,
+          });
+        }
+      } catch (err) {
+        logger.warn(
+          "chatwoot: /reset could not refresh the conversation before the hand-back (conv=%s): %s",
+          String(conversationId),
+          errMsg(err),
+        );
+      }
+    }
     const resetBlocker = await answerBlocker();
     if (
       notOursAtStart &&
