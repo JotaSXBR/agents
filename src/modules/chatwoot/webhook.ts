@@ -1045,6 +1045,14 @@ async function maybeConsumeCommandOrGate(params: {
     // `returnConversationToAgent` and not a local unassign+toggle: the ORDER is load-bearing and
     // documented there, the two cannot collapse into one `toggle_status`, and it mirrors the write
     // so the very next delivery passes the gate instead of waiting for a Chatwoot event.
+    //
+    // Asked about the persona bound to THIS INBOX, not about `params.agentBotId`. The latter is the
+    // bot whose webhook route the delivery arrived on, and Chatwoot fans a message out to the
+    // conversation's assigned bot AND the inbox's, so on a conversation assigned to another
+    // persona's bot the two differ — and comparing against the route's bot would answer "still
+    // ours" about a conversation the inbox's agent cannot touch. `persona()` is memoized and the
+    // acknowledgement resolves it anyway, so asking costs nothing.
+    const inboxPersona = await persona();
     if (
       !shouldBotHandle(
         {
@@ -1052,7 +1060,7 @@ async function maybeConsumeCommandOrGate(params: {
           assigneeId: ctx.conv.assigneeId,
           status: ctx.conv.status,
         },
-        { ourAgentBotId: params.agentBotId },
+        { ourAgentBotId: inboxPersona?.chatwootAgentBotId ?? null },
       )
     ) {
       await step("return the conversation to the agent", "atribuição", () =>
@@ -1313,9 +1321,12 @@ async function maybeConsumeCommandOrGate(params: {
       (await postPrivateNote(
         params.botOwns
           ? "🧪 Este agente está em modo teste. Ele não responde automaticamente nesta conversa. Envie /teste para ativar as respostas aqui."
-          : // Same note, minus the instruction that would not work: /teste activates and the agent
-            // still says nothing, with nothing on screen explaining why.
-            "🧪 Este agente está em modo teste e esta conversa está atribuída a um humano, então ele não vai responder. Envie /reset para devolvê-la ao agente e ativar as respostas aqui.",
+          : // This notice fires ONLY while the conversation has never been activated, and `/reset`
+            // needs `testActivatedAt` to run (shouldRunReset) — so pointing at it alone would send
+            // the operator down the same no-op path, and the one-shot watermark would then suppress
+            // any further guidance. Both commands, in the order that works: /teste lifts the
+            // test-mode silence, /reset returns the conversation the human is holding.
+            "🧪 Este agente está em modo teste e esta conversa está atribuída a um humano, então ele não vai responder. Envie /teste para ativar as respostas aqui e, em seguida, /reset para devolver a conversa ao agente.",
       ))
     ) {
       try {

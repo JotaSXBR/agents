@@ -166,7 +166,18 @@ async function sendReset(
   convId = CONV_ID,
   // The conversation as CHATWOOT has it when the command arrives. Defaults to the bot-owned shape;
   // the handoff case sends the one a human is holding, which is the state the command has to undo.
-  live: { status?: string; assigneeType?: string | null } = {},
+  live: {
+    status?: string;
+    assigneeType?: string | null;
+    assigneeId?: number;
+    // The bot whose webhook ROUTE the delivery arrives on. Chatwoot fans a message out to the
+    // conversation's assigned bot AND the inbox's, so these are not always the same persona.
+    routeToken?: string;
+    testActivated?: boolean;
+    // Omit `meta` entirely: the payload then says nothing about ownership and the mirror's stored
+    // trio is what the gate reads, which is how a real degraded event behaves.
+    silentMeta?: boolean;
+  } = {},
 ): Promise<void> {
   deliverySeq += 1;
   const nowSeconds = Math.floor(Date.now() / 1000);
@@ -181,17 +192,22 @@ async function sendReset(
       inbox_id: INBOX_ID,
       status: live.status ?? "pending",
       contact_inbox: { id: 301 },
-      meta:
-        (live.assigneeType ?? null) === null
+      ...(live.silentMeta ? {} : { meta: undefined }),
+      meta: live.silentMeta
+        ? undefined
+        : (live.assigneeType ?? null) === null
           ? { assignee_type: null, assignee: null }
           : {
               assignee_type: live.assigneeType,
-              assignee: { id: 77, type: live.assigneeType },
+              assignee: {
+                id: live.assigneeId ?? 77,
+                type: live.assigneeType,
+              },
             },
     },
   });
   const r = await receiveChatwootWebhook({
-    routeToken,
+    routeToken: live.routeToken ?? routeToken,
     rawBody: body,
     getHeader: (name: string) =>
       ({
@@ -811,6 +827,104 @@ describe.skipIf(!dbUp)(
         .join(" ");
       // Bot-owned: unchanged, and it must NOT name a command with nothing to undo.
       expect(ack2).toBe("🧪 Modo teste ativado para esta conversa.");
+    });
+
+    // Which bot the question is about. Chatwoot fans a message out to the conversation's assigned
+    // bot AND the inbox's, so the delivery can arrive on a ROUTE that belongs to a different persona
+    // than the one bound to this inbox. Asking "is it ours" about the route's bot then answers yes
+    // about a conversation the inbox's agent cannot touch, and /reset leaves it that way.
+    test("ownership is asked about the inbox's persona, not the route the delivery came on", async () => {
+      const { token: otherToken, hash: otherHash } = generateRouteToken();
+      const otherAgent = await suDb.agent.create({
+        data: {
+          tenantId,
+          name: "Outra persona",
+          systemPrompt: "x",
+          mode: "test",
+        },
+      });
+      await suDb.chatwootAgentBot.create({
+        data: {
+          tenantId,
+          chatwootInstanceId: instanceId,
+          agentId: otherAgent.id,
+          chatwootAgentBotId: 77,
+          accessToken: encryptJson(BOT_TOKEN),
+          webhookSecret: encryptJson(SECRET),
+          webhookRouteTokenHash: otherHash,
+          name: "Outra persona",
+        },
+      });
+      // Stored ownership: assigned to bot 77. The delivery below says nothing about the assignee,
+      // so this is what the gate reads — the same fallback a degraded event takes.
+      await suDb.conversation.updateMany({
+        where: { tenantId, chatwootConversationId: CONV_ID },
+        data: { status: "pending", assigneeType: "AgentBot", assigneeId: 77 },
+      });
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      // `pending` on purpose: `shouldBotHandle` rejects any other status BEFORE it compares bot ids,
+      // so an `open` conversation answers "not ours" for a reason that has nothing to do with which
+      // bot is being asked about, and the comparison under test is never reached.
+      //
+      // Assigned to bot 77 and delivered on bot 77's route, while the inbox's persona is bot 9. The
+      // old comparison asked about the route's bot, found it equal to the assignee, and concluded
+      // the conversation was ours — leaving the inbox's agent unable to answer it.
+      await sendReset("/reset", CONV_ID, {
+        status: "pending",
+        silentMeta: true,
+        routeToken: otherToken,
+      });
+
+      expect(
+        cw.calls
+          .filter((c) =>
+            c.path.endsWith(`/conversations/${CONV_ID}/assignments`),
+          )
+          .map((c) => c.body),
+      ).toEqual([{ assignee_id: 0 }]);
+      await suDb.agent.delete({ where: { id: otherAgent.id } });
+    });
+
+    // The notice fires only while the conversation was NEVER activated, and /reset needs
+    // `testActivatedAt` to run at all — so naming /reset alone would send the operator down the same
+    // no-op path, and the one-shot watermark would then suppress any second chance to tell them.
+    test("the un-activated notice names both commands, in the order that works", async () => {
+      await suDb.conversation.create({
+        data: {
+          tenantId,
+          chatwootInstanceId: instanceId,
+          inboxId: (
+            await suDb.inbox.findFirstOrThrow({
+              where: { tenantId, chatwootInboxId: INBOX_ID },
+              select: { id: true },
+            })
+          ).id,
+          chatwootConversationId: 43,
+          contactInboxId: 303,
+          status: "open",
+          threadId: `${tenantId}:${instanceId}:43`,
+          // Never activated: this is the state the notice speaks in.
+          testActivatedAt: null,
+        },
+      });
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      // A /reset typed here: it cannot run (no testActivatedAt) and falls through to the notice,
+      // which is exactly the path whose wording this asserts.
+      await sendReset("/reset", 43, { status: "open", assigneeType: "User" });
+
+      const notes = cw.calls
+        .filter((c) => c.method === "POST" && c.path.endsWith("/messages"))
+        .map((c) => (c.body as { content?: string })?.content ?? "")
+        .join(" ");
+      expect(notes).toContain("/teste");
+      expect(notes).toContain("/reset");
+      // The order matters: /reset before /teste is the no-op the reviewer caught.
+      expect(notes.indexOf("/teste")).toBeLessThan(notes.indexOf("/reset"));
+      await suDb.conversation.deleteMany({
+        where: { tenantId, chatwootConversationId: 43 },
+      });
     });
 
     test("a partial reset is not announced as a full one", async () => {
