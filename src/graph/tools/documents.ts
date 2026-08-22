@@ -123,12 +123,25 @@ export function buildDocumentTools(
         }
         // AT MOST ONE document per turn, across every document tool. The file is ours and small, so
         // the byte budget send_image carries buys nothing here, while two priced documents in one
-        // message is the actual failure mode. Checked twice around the await because one model
-        // response's tool calls run under Promise.all — the second check is the one that holds (no
-        // await between it and the push) and this one only spares the render.
-        if (turnState.pendingAttachments.some((a) => a.kind === "document")) {
+        // message is the actual failure mode.
+        //
+        // The slot is taken BEFORE the await, like send_image's, and for a sharper reason: one model
+        // response's tool calls run under Promise.all, so a check that only reads the QUEUE is read
+        // by every call in the batch while the queue is still empty. All of them would pass, all of
+        // them would issue — a numbered row and a rendered PDF each — and all but one would then be
+        // thrown away, leaving documents on the tenant's list that were never sent and that nobody
+        // can account for.
+        //
+        // Released in `finally`, so a refusal does not burn the turn. The model is told what to fix
+        // and its corrected call arrives in the same turn; on the way out the queue carries the
+        // claim instead.
+        if (
+          turnState.documentsInFlight > 0 ||
+          turnState.pendingAttachments.some((a) => a.kind === "document")
+        ) {
           return "Um documento já vai junto com a sua resposta deste turno. Envie o próximo em outra mensagem.";
         }
+        turnState.documentsInFlight++;
         const order = turnState.attachmentsSeq++;
         try {
           const issued = await issueDocument({
@@ -152,9 +165,6 @@ export function buildDocumentTools(
               "Não consegui gerar o documento agora. Ofereça encaminhar para um atendente.",
             );
           }
-          if (turnState.pendingAttachments.some((a) => a.kind === "document")) {
-            return "Um documento já vai junto com a sua resposta deste turno. Envie o próximo em outra mensagem.";
-          }
           turnState.pendingAttachments.push({
             bytes: issued.bytes,
             mime: "application/pdf",
@@ -175,6 +185,8 @@ export function buildDocumentTools(
             return `Não consegui emitir o documento: ${e.message} Corrija os dados e tente de novo, ou siga a conversa sem prometer o envio.`;
           }
           throw e;
+        } finally {
+          turnState.documentsInFlight--;
         }
       },
       { name, description, schema: documentToolSchema(selection.fields) },

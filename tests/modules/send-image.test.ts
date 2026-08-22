@@ -295,6 +295,7 @@ describe("the send_image tool", () => {
       resolveRequested: false,
       pendingAttachments: [],
       imagesInFlight: 0,
+      documentsInFlight: 0,
       attachmentsSeq: 0,
     };
     const tools = buildNativeTools(
@@ -364,6 +365,7 @@ describe("the send_image tool", () => {
       resolveRequested: false,
       pendingAttachments: [],
       imagesInFlight: 0,
+      documentsInFlight: 0,
       attachmentsSeq: 0,
     };
     const tools = buildNativeTools(
@@ -403,6 +405,7 @@ describe("the send_image tool", () => {
       resolveRequested: false,
       pendingAttachments: [],
       imagesInFlight: 0,
+      documentsInFlight: 0,
       attachmentsSeq: 0,
     };
     const tools = buildNativeTools(
@@ -466,6 +469,7 @@ describe("the send_image tool", () => {
       resolveRequested: false,
       pendingAttachments: [],
       imagesInFlight: 0,
+      documentsInFlight: 0,
       attachmentsSeq: 0,
     };
     const tools = buildNativeTools(
@@ -498,6 +502,7 @@ describe("the send_image tool", () => {
       resolveRequested: false,
       pendingAttachments: [],
       imagesInFlight: 0,
+      documentsInFlight: 0,
       attachmentsSeq: 0,
     };
     // The image the model asked for FIRST is the slow one.
@@ -554,6 +559,7 @@ describe("the send_image tool", () => {
       resolveRequested: false,
       pendingAttachments: [],
       imagesInFlight: 0,
+      documentsInFlight: 0,
       attachmentsSeq: 0,
     };
     const tools = buildNativeTools(
@@ -594,6 +600,7 @@ describe("the send_image tool", () => {
       resolveRequested: false,
       pendingAttachments: [],
       imagesInFlight: 0,
+      documentsInFlight: 0,
       attachmentsSeq: 0,
     };
     const tools = buildNativeTools(
@@ -628,6 +635,7 @@ describe("the send_image tool", () => {
       resolveRequested: false,
       pendingAttachments: [],
       imagesInFlight: 0,
+      documentsInFlight: 0,
       attachmentsSeq: 0,
     };
     const tools = buildNativeTools(

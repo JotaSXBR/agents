@@ -35,6 +35,7 @@ CREATE TABLE "issued_documents" (
     "template_id" BIGINT,
     "title" TEXT NOT NULL,
     "number" INTEGER,
+    "number_prefix" TEXT,
     "thread_id" TEXT,
     "chatwoot_instance_id" BIGINT,
     "conversation_id" BIGINT,

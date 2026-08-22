@@ -28,6 +28,7 @@ function newTurnState(): TurnState {
     resolveRequested: false,
     pendingAttachments: [],
     imagesInFlight: 0,
+    documentsInFlight: 0,
     attachmentsSeq: 0,
   };
 }
@@ -237,9 +238,13 @@ describe.skipIf(!dbUp)("buildDocumentTools", () => {
   });
 
   // The check has to hold under Promise.all, which is how LangGraph's ToolNode runs one response's
-  // tool calls: a guard that only reads before the await is read by every call while the queue is
-  // still empty.
-  test("holds the one-per-turn rule under concurrent calls", async () => {
+  // tool calls. A guard that only reads the QUEUE is read by every call in the batch while the queue
+  // is still empty, so all three pass it, all three issue, and two of the numbered documents are
+  // then thrown away — invisible here if the queue length is all that is asserted, and visible to
+  // the operator as unsent documents on the tenant's list that nobody can account for. The slot has
+  // to be taken before the await, which is what the ROW count measures.
+  test("holds the one-per-turn rule under concurrent calls, and issues one", async () => {
+    const before = await suDb.issuedDocument.count({ where: { tenantId } });
     const turnState = newTurnState();
     const built = tool(turnState);
     await Promise.all([
@@ -247,6 +252,27 @@ describe.skipIf(!dbUp)("buildDocumentTools", () => {
       built.invoke({ ...ARGS, cliente: "B" }),
       built.invoke({ ...ARGS, cliente: "C" }),
     ]);
+    expect(turnState.pendingAttachments).toHaveLength(1);
+    expect(await suDb.issuedDocument.count({ where: { tenantId } })).toBe(
+      before + 1,
+    );
+  });
+
+  // A refusal must not burn the turn's only slot: the model is told what to fix, and its corrected
+  // call arrives in the SAME turn (a new response, the same TurnState). A reservation that is not
+  // released on failure would answer that retry with "a document already goes with your reply" while
+  // no document was ever issued, and the customer would get the reply with nothing attached.
+  test("a refused call leaves the turn's slot open for the corrected one", async () => {
+    const turnState = newTurnState();
+    const built = tool(turnState);
+    const refused = String(
+      await built.invoke({ ...ARGS, cliente: "Retry", validade: "05/09/2026" }),
+    );
+    expect(refused).toMatch(/ISO date/);
+    const ok = String(
+      await built.invoke({ ...ARGS, cliente: "Retry", validade: "2026-09-05" }),
+    );
+    expect(ok).toMatch(/Documento/);
     expect(turnState.pendingAttachments).toHaveLength(1);
   });
 

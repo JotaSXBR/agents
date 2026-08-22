@@ -1175,6 +1175,11 @@ model IssuedDocument {
   // Set once, from the template's counter. Rendered as {{doc_number}}; null only while the row is
   // still being written.
   number             Int?
+  // The template's prefix as it stood at issuance, frozen here rather than joined when the number is
+  // printed. The number is how this document identifies itself to the customer holding it: renaming
+  // the template's prefix must not rewrite it, and deleting the template (which nulls templateId,
+  // by design) must not erase it.
+  numberPrefix       String?  @map("number_prefix")
   // The conversation this document belongs to, as the thread key (tenant:instance:conversation).
   // Chatwoot conversation ids repeat across a tenant's accounts, so the conversation id alone
   // cannot address a conversation — the same trap PR #204 hit from the other side.

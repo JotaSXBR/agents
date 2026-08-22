@@ -17,7 +17,10 @@ import {
   previewDocumentTemplate,
   updateDocumentTemplate,
 } from "@/modules/documents/templates";
-import { updateCompanySettings } from "@/modules/tenant-settings/service";
+import {
+  setCompanyLogoKey,
+  updateCompanySettings,
+} from "@/modules/tenant-settings/service";
 
 // DB-backed: what the scoped writes and the RLS fence actually do. The rules themselves are a table
 // in document-blocks.test.ts; this file proves the persistence follows the decision — and covers the
@@ -437,5 +440,224 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       select: { templateId: true },
     });
     expect(row?.templateId).toBeNull();
+  });
+
+  // ── the losing side of an idempotency race ──
+  //
+  // Both callers have to MISS the initial lookup and then collide on the insert, which no amount of
+  // luck reaches from a test. Forced here by letting another connection win the key in between: the
+  // conflict then lands on the real unique index, in the real transaction, which is the only way to
+  // exercise what recovery from it has to survive.
+  test("a caller that loses the idempotency race gets the winner's document", async () => {
+    const key = `race-${process.pid}`;
+    let raced = false;
+    const racing = appDb.$extends({
+      query: {
+        issuedDocument: {
+          async create({ args, query }) {
+            if (!raced) {
+              raced = true;
+              await suDb.issuedDocument.create({
+                data: {
+                  tenantId: tenantA,
+                  templateId,
+                  title: "Orçamento",
+                  // What a real competing issuance writes, which is the point: the row that comes
+                  // back has to be the WINNER's, prefix included, not a reconstruction of our own.
+                  numberPrefix: "ORC-",
+                  idempotencyKey: key,
+                  status: "PENDING",
+                  snapshot: (args.data as { snapshot: unknown })
+                    .snapshot as never,
+                },
+              });
+            }
+            return query(args);
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+
+    const doc = await issueDocument({
+      tenantId: tenantA,
+      templateId,
+      idempotencyKey: key,
+      values: VALUES,
+      base: racing,
+      storageDir: DIR,
+    });
+    expect(raced).toBe(true);
+    expect(doc.status).toBe("READY");
+    expect(doc.number).toMatch(/^ORC-/);
+    expect(
+      await suDb.issuedDocument.count({
+        where: { tenantId: tenantA, idempotencyKey: key },
+      }),
+    ).toBe(1);
+  });
+
+  // ── the printed number is frozen with the document ──
+  //
+  // Its own template, because this test EDITS and then DELETES the one it uses.
+  //
+  // The number a customer reads on the PDF has to keep matching the number the console lists and the
+  // file name the download carries. Resolving the prefix from the live template breaks all three at
+  // once: renaming ORC- to PROP- rewrites history, and deleting the template (which nulls the FK,
+  // by design — the documents survive it) drops the prefix entirely.
+  test("prints the number from the prefix frozen at issuance", async () => {
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const tpl = await createDocumentTemplate(
+      ctx(tenantA),
+      {
+        name: "Orçamento numerado",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+        numberPrefix: "ORC-",
+      },
+      appDb,
+    );
+    const tplId = BigInt(tpl.id);
+    const doc = await issueDocument({
+      tenantId: tenantA,
+      templateId: tplId,
+      idempotencyKey: `frozen-prefix-${process.pid}`,
+      values: VALUES,
+      base: appDb,
+      storageDir: DIR,
+    });
+    expect(doc.number).toMatch(/^ORC-\d{4}$/);
+
+    await updateDocumentTemplate(
+      ctx(tenantA),
+      tplId,
+      { numberPrefix: "PROP-" },
+      appDb,
+    );
+    const listed = await listIssuedDocuments(
+      ctx(tenantA),
+      { templateId: tplId },
+      appDb,
+    );
+    expect(listed.map((d) => d.number)).toContain(doc.number);
+    const { fileName } = await getIssuedDocumentPdf(
+      ctx(tenantA),
+      BigInt(doc.id),
+      appDb,
+      DIR,
+    );
+    expect(fileName).toContain(doc.number);
+
+    // And the same after the template is gone, which is when the live join has nothing left to read.
+    await deleteDocumentTemplate(ctx(tenantA), tplId, appDb);
+    const afterDelete = await getIssuedDocumentPdf(
+      ctx(tenantA),
+      BigInt(doc.id),
+      appDb,
+      DIR,
+    );
+    expect(afterDelete.fileName).toContain(doc.number);
+    const orphaned = await listIssuedDocuments(ctx(tenantA), {}, appDb);
+    expect(orphaned.find((d) => d.id === doc.id)?.number).toBe(doc.number);
+  });
+
+  // ── a preview is a render, so its values go through the same gate ──
+  //
+  // /preview accepts caller-supplied values, and they reach the renderer on the request thread. Left
+  // unchecked they are a shape the renderer was never promised: a missing required field silently
+  // renders a blank, a string where a number belongs throws inside react-pdf, and a line-item array
+  // past MAX_LINE_ITEMS lays out on the API process at whatever length the caller sent.
+  test("refuses preview values the template's own fields would refuse", async () => {
+    await expect(
+      previewDocumentTemplate(
+        ctx(tenantA),
+        { id: templateId, values: { cliente: "Ana", itens: "não é lista" } },
+        appDb,
+      ),
+    ).rejects.toThrow(/itens/);
+    await expect(
+      previewDocumentTemplate(
+        ctx(tenantA),
+        {
+          id: templateId,
+          values: {
+            cliente: "Ana",
+            itens: Array.from({ length: 101 }, () => ({
+              description: "x",
+              quantity: 1,
+              unitPrice: 1,
+            })),
+          },
+        },
+        appDb,
+      ),
+    ).rejects.toThrow(/100/);
+    // The sample-value path is untouched: omitting values still renders.
+    const bytes = await previewDocumentTemplate(
+      ctx(tenantA),
+      { id: templateId },
+      appDb,
+    );
+    expect(pdfHeader(bytes)).toBe("%PDF-");
+  });
+
+  // Creation already answers a taken slug with a conflict; an update raising the same constraint has
+  // to answer the same way, or the console shows an internal error for a name the operator can fix.
+  test("answers a slug already taken on update with a conflict", async () => {
+    const starter = documentStarter("receipt", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const tpl = await createDocumentTemplate(
+      ctx(tenantA),
+      {
+        name: "Recibo para renomear",
+        slug: "recibo_para_renomear",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+      },
+      appDb,
+    );
+    await expect(
+      updateDocumentTemplate(
+        ctx(tenantA),
+        BigInt(tpl.id),
+        { slug: "orcamento" },
+        appDb,
+      ),
+    ).rejects.toThrow(/already exists/);
+  });
+
+  // The logo key is derived from the tenant id and the file EXTENSION, so replacing a PNG with
+  // another PNG produces the same key. Anything that keys off it — the console's blob, a browser
+  // cache of a response served with max-age — would go on showing the previous letterhead while
+  // freshly issued documents already carry the new one. The version is the half that moves.
+  test("a same-format logo replacement moves the version, though the key does not", async () => {
+    const first = await setCompanyLogoKey(
+      ctx(tenantB),
+      `${tenantB}-logo.png`,
+      appDb,
+    );
+    const second = await setCompanyLogoKey(
+      ctx(tenantB),
+      `${tenantB}-logo.png`,
+      appDb,
+    );
+    expect(second.logoKey).toBe(first.logoKey);
+    expect(second.logoVersion).toBeGreaterThan(first.logoVersion);
+    // Two writes inside one millisecond are still two versions: a clock is not a counter.
+    const a = await setCompanyLogoKey(
+      ctx(tenantB),
+      `${tenantB}-logo.png`,
+      appDb,
+      1_000,
+    );
+    const b = await setCompanyLogoKey(
+      ctx(tenantB),
+      `${tenantB}-logo.png`,
+      appDb,
+      1_000,
+    );
+    expect(b.logoVersion).toBeGreaterThan(a.logoVersion);
   });
 });

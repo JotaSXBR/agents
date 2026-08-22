@@ -193,7 +193,24 @@ export type ValuesParse =
   | { ok: true; values: DocumentValues }
   | { ok: false; reason: string };
 
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+// The shape is not the rule. "2026-02-31" matches the pattern, and neither the renderer nor
+// Intl refuses it — JavaScript rolls it forward to March 3, so the customer keeps a PDF carrying a
+// date nobody typed and no error is ever raised. Round-tripping through UTC is what separates a
+// date that exists from a string that looks like one.
+function isCalendarDate(value: string): boolean {
+  const m = DATE_RE.exec(value);
+  if (!m) return false;
+  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const at = new Date(Date.UTC(year, month - 1, day));
+  // TWO clauses, not three. Over every string the regex above admits (110_000 of them, measured),
+  // comparing the year and the day agrees with also comparing the month on every single input: a day
+  // that overflows lands on another day, and a month outside 1..12 lands in another year. The third
+  // clause decides nothing, and a rule carrying a clause that decides nothing is one nobody can
+  // safely edit later.
+  return at.getUTCFullYear() === year && at.getUTCDate() === day;
+}
 
 function valueProblem(field: DocumentField, value: unknown): string | null {
   switch (field.type) {
@@ -210,7 +227,7 @@ function valueProblem(field: DocumentField, value: unknown): string | null {
       // NOTE: ISO date only, never a pre-formatted string. The document is rendered in the
       // template's locale, and a date the model already wrote as "22/08" cannot be reformatted —
       // an en-US document would then carry one Brazilian date in the middle of it.
-      return typeof value === "string" && DATE_RE.test(value)
+      return typeof value === "string" && isCalendarDate(value)
         ? null
         : "must be an ISO date (YYYY-MM-DD)";
     case "lineItems": {

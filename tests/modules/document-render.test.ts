@@ -28,6 +28,7 @@ const COMPANY = {
   email: "contato@exemplo.com",
   website: "exemplo.com",
   logoKey: null,
+  logoVersion: 0,
 };
 
 // A 1x1 PNG, inline, so the test never touches the filesystem for it.

@@ -372,6 +372,7 @@ describe("native tools", () => {
       resolveRequested: false,
       pendingAttachments: [],
       imagesInFlight: 0,
+      documentsInFlight: 0,
       attachmentsSeq: 0,
     };
     const tools = buildNativeTools({ client, conversationId: 7, turnState });

@@ -87,9 +87,20 @@ and idempotent:
 3. Render the STORED snapshot outside any transaction, write it to a path derived from numeric ids,
    CAS to READY.
 
+Steps 2 and 3 are separate scoped calls rather than one transaction, and the insert is on its own:
+a `P2002` **aborts the PostgreSQL transaction it was raised in**, so the re-read that recovers the
+winner of an idempotency race cannot happen inside the transaction that lost it. Catching the
+conflict and re-reading in the same one turns a benign race — the very thing the key exists to make
+benign — into `current transaction is aborted` and a 500 for whoever arrived second.
+
 The number comes from `UPDATE document_templates SET last_number = last_number + 1 … RETURNING`, so
 the row lock makes it atomic. It is bumped AFTER the insert, so losing a race on the key does not
 consume one. Monotonic, not gapless.
+
+The template's **number prefix is frozen onto the issued row**, not joined when the number is
+printed. The number is how a document identifies itself to the customer holding it: renaming the
+template's prefix must not rewrite numbers already in circulation, and deleting the template (which
+nulls the FK, by design, because the documents outlive it) must not erase them.
 
 ## Delivery
 
@@ -104,15 +115,26 @@ customer are a property of the TURN, not of what the file is. Each entry carries
 queued it (for the flow line) and its **kind** (for the quota): reading one field for both questions
 is how a document would land in the image budget.
 
-At most one document per turn, checked twice around the await because one model response's tool calls
-run under `Promise.all`. The first check is what stops a second numbered row being created and thrown
-away.
+At most one document per turn, and the slot is **reserved before the await**, the way `send_image`
+reserves a download. One model response's tool calls run under `Promise.all`, so a check that only
+reads the queue is read by every call in the batch while the queue is still empty: all of them pass,
+all of them issue a numbered document, and all but one is discarded — leaving documents on the
+tenant's list that were never sent and that nobody can account for. The reservation is released in a
+`finally`, so a refused call does not burn the turn: the model is told what to fix and its corrected
+call arrives in the same turn, by which point the queue carries the claim instead.
 
 ## Granting
 
 `AgentToolSelection` with `source = DOCUMENT` and a `documentTemplateId`. **Fail-closed**, like
 HTTP/MCP/integration/RAG and unlike NATIVE: an agent with no grant has no document tool, so no
 existing agent gains one on upgrade.
+
+The tool's name is `send_<slug>`, and a slug whose name would collide with a built-in is refused when
+it is written. That check cannot be complete on its own: an MCP server names its own tools when it is
+contacted, so "is this name still free?" is a question no write can finish answering. The assembly is
+the one place that sees every name at once, so `dropDuplicateToolNames` decides it there — earlier
+wins, which puts the built-ins first, the loser is dropped rather than fatal (one bad name must not
+take a whole agent down), and the names that lost are logged for the operator who can rename them.
 
 ## Transports
 
@@ -140,6 +162,12 @@ the fallback that installation writes inside the container and loses every PDF o
 The filesystem has no RLS, so the **scoped read of the row** is the boundary: a storage key is only
 resolvable for the owning tenant, and every refusal is a 404 — which of the reasons applies is
 information about a document the caller may not be entitled to know exists.
+
+The logo's file name is derived from the tenant id and the extension, so replacing a PNG with another
+PNG lands on the same name. A `logoVersion` on the company block moves on every write, and that is
+what the console keys its fetch off: the name alone cannot say the letterhead changed, so a same
+format replacement would leave the card — and any browser cache of a response served with a
+`max-age` — showing the old logo while issued documents already carry the new one.
 
 The logo is read from disk as **bytes** and never as a URL: `@react-pdf/renderer` will fetch an
 `<Image src>` over the network, which on a server renderer is a request driven by tenant input. Its

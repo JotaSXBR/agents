@@ -83,6 +83,10 @@ export interface TurnState {
   // queued anything: without a reservation taken BEFORE the await, every call in the batch reads the
   // same empty queue, passes, and the ceiling means nothing.
   imagesInFlight: number;
+  // Documents issued but not yet queued. Same reservation as imagesInFlight and for the same reason,
+  // with a ceiling of one: without it a batch of document calls all read an empty queue, all issue a
+  // numbered document, and all but one of those rows is discarded unsent.
+  documentsInFlight: number;
   // Monotonic ticket, taken before the download for the same reason: the batch runs concurrently, so
   // the queue fills in COMPLETION order and the customer would receive the pictures — and the
   // captions written for them — in whatever order the hosts happened to answer. The order the model

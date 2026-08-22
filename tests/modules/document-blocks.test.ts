@@ -224,6 +224,38 @@ describe("parseDocumentValues", () => {
     expect(r.ok === false && r.reason).toContain("ISO date");
   });
 
+  // Shape is not enough: a date the calendar does not have is a string of the right form, and the
+  // renderer does not refuse it — JavaScript rolls 2026-02-31 forward to March 3, so the customer
+  // keeps a PDF carrying a date nobody typed. It has to round-trip to the same day or be refused.
+  test("refuses a date the calendar does not have", () => {
+    for (const validade of [
+      "2026-02-31",
+      "2026-13-01",
+      "2026-04-31",
+      "2026-00-10",
+    ]) {
+      const r = parseDocumentValues(FIELDS as never, {
+        cliente: "Ana",
+        validade,
+      });
+      expect(r.ok).toBe(false);
+      expect(r.ok === false && r.reason).toContain("ISO date");
+    }
+    // The leap day of a leap year is a real date, and stays one.
+    expect(
+      parseDocumentValues(FIELDS as never, {
+        cliente: "Ana",
+        validade: "2028-02-29",
+      }).ok,
+    ).toBe(true);
+    expect(
+      parseDocumentValues(FIELDS as never, {
+        cliente: "Ana",
+        validade: "2026-02-29",
+      }).ok,
+    ).toBe(false);
+  });
+
   test("refuses a non-finite amount and a malformed line item", () => {
     const nan = parseDocumentValues(FIELDS as never, {
       cliente: "Ana",

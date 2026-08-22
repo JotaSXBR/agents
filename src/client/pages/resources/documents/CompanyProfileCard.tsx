@@ -59,7 +59,7 @@ export function CompanyProfileCard({
     }
     void (async () => {
       const res = await mediaFetch(
-        `/api/v1/tenant-settings/company/logo?v=${encodeURIComponent(company.logoKey ?? "")}`,
+        `/api/v1/tenant-settings/company/logo?v=${company.logoVersion}`,
       );
       if (!res.ok || cancelled) return;
       revoked = URL.createObjectURL(await res.blob());
@@ -69,7 +69,11 @@ export function CompanyProfileCard({
       cancelled = true;
       if (revoked) URL.revokeObjectURL(revoked);
     };
-  }, [company?.logoKey]);
+    // The VERSION, not the key: the key is derived from the tenant id and the file extension, so
+    // replacing a PNG with another PNG leaves it identical and this effect would never run again —
+    // the card would keep showing the previous letterhead while issued documents carry the new one.
+    // It is also the cache buster the response's own max-age needs.
+  }, [company?.logoKey, company?.logoVersion]);
 
   const label: Record<(typeof FIELDS)[number], string> = {
     name: t("documents.company.name", "Company name"),

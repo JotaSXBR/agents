@@ -173,34 +173,46 @@ export async function issueDocument(
 
   // `create` rather than `createMany({ skipDuplicates })` because the counter must be bumped exactly
   // once per row actually inserted, and skipDuplicates cannot say whether it inserted.
-  const row = await runScopedOn(base, ctx, async (db) => {
-    const created = await db.issuedDocument
-      .create({
-        data: {
-          tenantId,
-          templateId: prepared.id,
-          title: prepared.name,
-          threadId: params.threadId ?? null,
-          chatwootInstanceId: params.chatwootInstanceId ?? null,
-          conversationId: params.conversationId ?? null,
-          idempotencyKey: params.idempotencyKey,
-          status: "PENDING",
-          snapshot: snapshot as unknown as Prisma.InputJsonValue,
-        },
-        select: { id: true },
-      })
-      .catch((err: unknown) => {
-        if (isUniqueViolation(err)) return null; // concurrent insert → fall through to the re-read
-        throw err;
-      });
-    if (created) {
-      // Bumped AFTER the insert, so a losing race on the idempotency key does not consume a number.
-      // A crash between the two leaves the row unnumbered, which the load below heals — monotonic,
-      // with a gap only where a process actually died.
-      await assignNumber(db, prepared.id, created.id);
-    }
-    return loadByKey(db, tenantId, params.idempotencyKey);
+  //
+  // Three scoped calls, not one: a P2002 ABORTS the PostgreSQL transaction it was raised in, so
+  // recovering the winner cannot happen inside the transaction that lost. Catching the conflict and
+  // re-reading in the same one turns a benign race — which the idempotency key exists to make benign
+  // — into "current transaction is aborted" and a 500 for the caller that merely arrived second.
+  const created = await runScopedOn(base, ctx, (db) =>
+    db.issuedDocument.create({
+      data: {
+        tenantId,
+        templateId: prepared.id,
+        title: prepared.name,
+        // FROZEN with the row, not joined from the template when the number is printed: the prefix
+        // is part of how this document identifies itself. Read live, renaming ORC- to PROP- would
+        // rewrite every number already in a customer's hands, and deleting the template (which nulls
+        // the FK by design — the documents outlive it) would drop the prefix altogether.
+        numberPrefix: prepared.numberPrefix,
+        threadId: params.threadId ?? null,
+        chatwootInstanceId: params.chatwootInstanceId ?? null,
+        conversationId: params.conversationId ?? null,
+        idempotencyKey: params.idempotencyKey,
+        status: "PENDING",
+        snapshot: snapshot as unknown as Prisma.InputJsonValue,
+      },
+      select: { id: true },
+    }),
+  ).catch((err: unknown) => {
+    if (isUniqueViolation(err)) return null; // lost the race → the winner is read below
+    throw err;
   });
+  if (created) {
+    // Bumped AFTER the insert, so a losing race on the idempotency key does not consume a number.
+    // A crash between the two leaves the row unnumbered, which the load below heals — monotonic,
+    // with a gap only where a process actually died.
+    await runScopedOn(base, ctx, (db) =>
+      assignNumber(db, prepared.id, created.id),
+    );
+  }
+  const row = await runScopedOn(base, ctx, (db) =>
+    loadByKey(db, tenantId, params.idempotencyKey),
+  );
   if (!row) throw new AppError("failed to persist the document", 500);
   return finish(row, { base, ctx, dir, tenantId, withBytes: params.withBytes });
 }
@@ -231,7 +243,7 @@ async function loadByKey(
       snapshot: true,
       pdfStorageKey: true,
       templateId: true,
-      template: { select: { numberPrefix: true } },
+      numberPrefix: true,
     },
   });
   if (!doc) return null;
@@ -243,7 +255,7 @@ async function loadByKey(
     snapshot: doc.snapshot,
     pdfStorageKey: doc.pdfStorageKey,
     templateId: doc.templateId,
-    numberPrefix: doc.template?.numberPrefix ?? null,
+    numberPrefix: doc.numberPrefix,
   };
 }
 
@@ -390,7 +402,7 @@ export async function getIssuedDocumentPdf(
         number: true,
         pdfStorageKey: true,
         revoked: true,
-        template: { select: { numberPrefix: true } },
+        numberPrefix: true,
       },
     }),
   );
@@ -410,7 +422,7 @@ export async function getIssuedDocumentPdf(
     bytes: await file.arrayBuffer(),
     fileName: documentFileName(
       row.title,
-      formatDocumentNumber(row.number, row.template?.numberPrefix ?? null),
+      formatDocumentNumber(row.number, row.numberPrefix),
     ),
   };
 }
@@ -451,14 +463,14 @@ export async function listIssuedDocuments(
         conversationId: true,
         revoked: true,
         createdAt: true,
-        template: { select: { numberPrefix: true } },
+        numberPrefix: true,
       },
     }),
   );
   return rows.map((r) => ({
     id: String(r.id),
     title: r.title,
-    number: formatDocumentNumber(r.number, r.template?.numberPrefix ?? null),
+    number: formatDocumentNumber(r.number, r.numberPrefix),
     templateId: r.templateId ? String(r.templateId) : null,
     status: r.status,
     threadId: r.threadId,

@@ -116,6 +116,7 @@ import {
   type McpSelection,
 } from "./tools/mcp";
 import { buildRagTools } from "./tools/rag";
+import { dropDuplicateToolNames } from "./tools/unique-names";
 import { UsageCapture, type UsagePersist, type UsageSource } from "./usage";
 
 // Shared agent-invocation plumbing used by BOTH entry points: runAgentTurn (incoming customer
@@ -777,6 +778,7 @@ export interface ToolsetCtx {
       kind: "image" | "document";
     }[];
     imagesInFlight: number;
+    documentsInFlight: number;
     attachmentsSeq: number;
   };
   // Structural mirror of HandoffTurnState in tools/native.ts, for the same reason as turnState.
@@ -803,6 +805,7 @@ export interface ToolBuildDeps {
           kind: "image" | "document";
         }[];
         imagesInFlight: number;
+        documentsInFlight: number;
         attachmentsSeq: number;
       };
       handoffState?: { customerMessage: string | null; completed: boolean };
@@ -1095,7 +1098,9 @@ export async function buildToolset(
   if (cfg.kanbanConfig.instructions) {
     toolInstructions.kanban_move_card = cfg.kanbanConfig.instructions;
   }
-  return [
+  // The order below IS the precedence when two sources claim one name — see unique-names.ts. Native
+  // first, because those are the tools the operator cannot rename.
+  const { tools, dropped } = dropDuplicateToolNames([
     ...deps.buildNativeTools(
       {
         client: ctx.client,
@@ -1165,7 +1170,19 @@ export async function buildToolset(
       },
       cfg.ragConfig?.tools,
     ),
-  ];
+  ]);
+  if (dropped.length > 0) {
+    // The operator is the only one who can fix this, and the symptom they would otherwise see is a
+    // tool that quietly does nothing — or, on a provider that rejects a duplicated function name,
+    // an agent that stops replying at all.
+    logger.warn(
+      "agent %s: %d tool(s) dropped for a duplicate name (%s) — rename the later one",
+      String(cfg.agentId),
+      dropped.length,
+      [...new Set(dropped)].join(", "),
+    );
+  }
+  return tools;
 }
 
 export interface CallbacksArgs {

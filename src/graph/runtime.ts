@@ -325,6 +325,7 @@ export async function runLoadedTurn(
     resolveRequested: false,
     pendingAttachments: [],
     imagesInFlight: 0,
+    documentsInFlight: 0,
     attachmentsSeq: 0,
   };
   const handoffState = {

@@ -66,6 +66,12 @@ export const companySettingsSchema = z.object({
   email: z.string().max(200),
   website: z.string().max(200),
   logoKey: z.string().max(200).nullable(),
+  // Bumped on every logo write. The key alone cannot say the logo CHANGED: it is derived from the
+  // tenant id and the file extension, so replacing a PNG with another PNG produces the same key —
+  // and everything downstream that keys off it (the console's blob, the browser's own cache of a
+  // response served with max-age) goes on showing the old letterhead while new documents render the
+  // new one.
+  logoVersion: z.number().int().nonnegative(),
 });
 export type CompanySettings = z.infer<typeof companySettingsSchema>;
 
@@ -77,6 +83,7 @@ export const COMPANY_DEFAULTS: CompanySettings = {
   email: "",
   website: "",
   logoKey: null,
+  logoVersion: 0,
 };
 
 export function parseCompanySettings(settings: unknown): CompanySettings {
@@ -261,7 +268,9 @@ export async function updateLangfuse(
   return merged;
 }
 
-export type CompanyUpdateInput = Partial<Omit<CompanySettings, "logoKey">>;
+export type CompanyUpdateInput = Partial<
+  Omit<CompanySettings, "logoKey" | "logoVersion">
+>;
 
 // Patch-merged, never replaced: the console edits one field at a time and the MCP write sends only
 // what changed. logoKey is deliberately not settable here — it is written by the upload path, which
@@ -280,17 +289,25 @@ export async function updateCompanySettings(
   return merged;
 }
 
-// Written only by the logo upload/clear path, after the bytes are on disk (or gone from it).
+// Written only by the logo upload/clear path, after the bytes are on disk (or gone from it). The
+// version moves with every write, including a replacement that lands on the same key.
 export async function setCompanyLogoKey(
   ctx: TenantContext,
   logoKey: string | null,
   base: PrismaClient = basePrisma,
+  now: number = Date.now(),
 ): Promise<CompanySettings> {
   const tenantId = requireTenantId(ctx);
   const current = await runScopedOn(base, ctx, (db) =>
     readCompanySettings(db, tenantId),
   );
-  const merged = companySettingsSchema.parse({ ...current, logoKey });
+  const merged = companySettingsSchema.parse({
+    ...current,
+    logoKey,
+    // Strictly increasing even if two writes land in the same millisecond, which is what a cache
+    // buster has to be to mean anything.
+    logoVersion: Math.max(now, current.logoVersion + 1),
+  });
   await writeBlock(ctx, base, "company", merged);
   return merged;
 }

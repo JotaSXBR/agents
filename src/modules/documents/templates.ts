@@ -18,7 +18,11 @@ import { type CompanyLogo, readCompanyLogo } from "./company";
 import { formatDate, formatDocumentNumber } from "./format";
 import { renderDocumentPdf } from "./render";
 import { sampleValues } from "./sample";
-import { type DocumentValues, parseTemplateContent } from "./validate";
+import {
+  type DocumentValues,
+  parseDocumentValues,
+  parseTemplateContent,
+} from "./validate";
 
 // Document templates: the tenant's own letterhead + layout for a class of document (quote, proposal,
 // receipt). CRUD plus the preview render, which is the piece that makes authoring over the API
@@ -57,6 +61,22 @@ function slugProblem(slug: string): string | null {
     return `the slug would produce the tool name "${documentToolName(slug)}", which is already a built-in tool`;
   }
   return null;
+}
+
+// A slug is unique per tenant in the database, and both writes can hit that index — the create with
+// a name already in use, the update with a rename onto one. Answering the same constraint two
+// different ways is how a rename ends up as a 500 for something the operator can fix by typing
+// another name, so the mapping lives here and both callers use it.
+function slugConflict(slug: string): (e: unknown) => never {
+  return (e: unknown) => {
+    if (e instanceof Error && (e as { code?: string }).code === "P2002") {
+      throw new ConflictError(
+        `a document template with the slug "${slug}" already exists`,
+        "errors.documentTemplateSlugTaken",
+      );
+    }
+    throw e;
+  };
 }
 
 export interface DocumentTemplateDto {
@@ -200,15 +220,7 @@ export async function createDocumentTemplate(
         },
         select: SELECT,
       })
-      .catch((e: unknown) => {
-        if (e instanceof Error && (e as { code?: string }).code === "P2002") {
-          throw new ConflictError(
-            `a document template with the slug "${slug}" already exists`,
-            "errors.documentTemplateSlugTaken",
-          );
-        }
-        throw e;
-      }),
+      .catch(slugConflict(slug)),
   );
   return toDto(row);
 }
@@ -255,7 +267,9 @@ export async function updateDocumentTemplate(
     data.fields = content.fields as unknown as Prisma.InputJsonValue;
   }
   const row = await runScopedOn(base, ctx, (db) =>
-    db.documentTemplate.update({ where: { id }, data, select: SELECT }),
+    db.documentTemplate
+      .update({ where: { id }, data, select: SELECT })
+      .catch(slugConflict(patch.slug ?? current.slug)),
   );
   return toDto(row);
 }
@@ -334,6 +348,24 @@ export async function readRenderContext(
   return { company, logo: await readCompanyLogo(company) };
 }
 
+// A preview is a RENDER, so caller-supplied values face the same gate the issued ones do. Passed
+// through unchecked they are a shape the renderer was never promised: a missing required field
+// prints a blank where the customer expects a name, a string where a number belongs throws inside
+// react-pdf, and a line-item array past the ceiling lays out on the API process at whatever length
+// the caller sent. Omitting them is the other path, and it stays free — sample values are ours.
+function callerValues(
+  fields: DocumentField[],
+  raw: unknown,
+  now: Date,
+): DocumentValues {
+  if (raw === undefined) return sampleValues(fields, now);
+  const parsed = parseDocumentValues(fields, raw);
+  if (!parsed.ok) {
+    throw new AppError(parsed.reason, 400, "errors.invalidDocumentValues");
+  }
+  return parsed.values;
+}
+
 // Renders a draft the caller has not saved (or a saved one, with sample values). The bytes are never
 // stored: a preview is a picture of a decision, not a document — nothing about it is issued,
 // numbered or delivered.
@@ -351,10 +383,7 @@ export async function previewDocumentTemplate(
   });
   const style = parseDocumentStyle(input.style ?? saved?.style);
   const now = input.now ?? new Date();
-  const values: DocumentValues =
-    input.values === undefined
-      ? sampleValues(content.fields, now)
-      : (input.values as DocumentValues);
+  const values = callerValues(content.fields, input.values, now);
   const { company, logo } = await readRenderContext(ctx, base);
   const prefix =
     input.numberPrefix !== undefined ? input.numberPrefix : saved?.numberPrefix;

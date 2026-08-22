@@ -17,6 +17,7 @@ const COMPANY = {
   email: "contato@exemplo.com",
   website: "exemplo.com",
   logoKey: null,
+  logoVersion: 0,
 };
 
 const META = { number: "ORC-0042", date: "05/09/2026", title: "Orçamento" };
