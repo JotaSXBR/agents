@@ -40,7 +40,7 @@ const PNG = Buffer.from(
 function starterInput(style?: Partial<DocumentStyle>) {
   const starter = documentStarters("pt-BR")[0];
   if (!starter) throw new Error("no starter");
-  const parsed = parseTemplateContent(starter.blocks, starter.fields);
+  const parsed = parseTemplateContent(starter.blocks, starter.fields, {});
   if (!parsed.ok) throw new Error(parsed.reason);
   return {
     blocks: parsed.content.blocks,
@@ -135,7 +135,7 @@ describe("renderDocumentPdf", () => {
   test("renders every starter, in both languages", async () => {
     for (const locale of ["pt-BR", "en-US"] as const) {
       for (const starter of documentStarters(locale)) {
-        const parsed = parseTemplateContent(starter.blocks, starter.fields);
+        const parsed = parseTemplateContent(starter.blocks, starter.fields, {});
         expect(parsed.ok).toBe(true);
         if (!parsed.ok) continue;
         const bytes = await renderDocumentPdf({

@@ -184,6 +184,12 @@ export function buildDocumentTools(
           if (e instanceof AppError && e.statusCode === 400) {
             return `Não consegui emitir o documento: ${e.message} Corrija os dados e tente de novo, ou siga a conversa sem prometer o envio.`;
           }
+          // The operator voided this document, and the key that identifies it comes from these very
+          // values — so "try again" would land back on it. No correction exists, and it is a
+          // deliberate decision rather than a failure, so it does not go to the alert channels.
+          if (e instanceof AppError && e.statusCode === 409) {
+            return "Esse documento foi cancelado e não pode ser reenviado. Siga a conversa sem prometer o envio, ou ofereça encaminhar para um atendente.";
+          }
           throw e;
         } finally {
           turnState.documentsInFlight--;

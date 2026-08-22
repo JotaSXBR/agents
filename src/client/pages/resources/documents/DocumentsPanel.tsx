@@ -14,6 +14,7 @@ import {
   useToast,
 } from "@/client/components";
 import { api } from "@/client/lib/api";
+import { mediaFetch } from "@/client/lib/media";
 import { type CompanyProfile, CompanyProfileCard } from "./CompanyProfileCard";
 import {
   type DocumentTemplate,
@@ -141,6 +142,26 @@ export function DocumentsPanel() {
     } finally {
       setDeleting(false);
     }
+  }
+
+  // A blob URL rather than a link to the endpoint. The PDF route is tenant-scoped, and for a
+  // SUPER_ADMIN the tenant lives ONLY in the X-Tenant-Id header — which `window.open` cannot send, so
+  // the tab would land on "a target tenant is required" instead of the document. Same fix the logo
+  // and the preview already use.
+  async function openPdf(doc: IssuedDocument) {
+    const res = await mediaFetch(`/api/v1/documents/${doc.id}/pdf`);
+    if (!res.ok) {
+      showToast(
+        t("documents.openPdfError", "Could not open the PDF."),
+        "error",
+      );
+      return;
+    }
+    const url = URL.createObjectURL(await res.blob());
+    window.open(url, "_blank", "noopener");
+    // The tab has the bytes by the time it paints; holding the handle any longer leaks it for as
+    // long as the console stays open.
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
 
   async function revoke(doc: IssuedDocument) {
@@ -277,9 +298,7 @@ export function DocumentsPanel() {
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() =>
-                      window.open(`/api/v1/documents/${doc.id}/pdf`, "_blank")
-                    }
+                    onClick={() => openPdf(doc)}
                     disabled={doc.revoked}
                   >
                     {t("documents.openPdf", "Open PDF")}

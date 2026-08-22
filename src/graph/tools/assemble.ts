@@ -140,6 +140,10 @@ export async function loadToolSelections(
           description: true,
           blocks: true,
           fields: true,
+          // Selected only so the content check sees the whole template: the footer's tokens are
+          // validated with the blocks' (see parseTemplateContent), and the tool itself renders
+          // nothing — issuance loads the template again for that.
+          style: true,
           enabled: true,
         },
       },
@@ -248,7 +252,7 @@ export async function loadToolSelections(
         // A template whose content no longer parses is SKIPPED rather than exposed with an empty
         // argument list: a tool that accepts nothing and renders a blank document is worse for the
         // customer than a tool the agent does not have.
-        const content = parseTemplateContent(tpl.blocks, tpl.fields);
+        const content = parseTemplateContent(tpl.blocks, tpl.fields, tpl.style);
         if (!content.ok) break;
         result.documentSelections.push({
           templateId: tpl.id,

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/../generated/prisma/client";
+import { AppError } from "@/lib/errors";
 import type { TenantContext } from "@/lib/tenancy";
 import {
   getIssuedDocumentPdf,
@@ -351,6 +352,22 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     await expect(
       getIssuedDocumentPdf(ctx(tenantA), BigInt(doc.id), appDb, DIR),
     ).rejects.toThrow(/not found/);
+
+    // …including through the key that issued it. The key is derived from the VALUES, so the agent
+    // asked to send the same quote again lands back on this exact row — and the retry path returns
+    // stored bytes without ever asking the question the download route asks. Revoking would then
+    // stop the operator's own link while the agent kept attaching the voided document.
+    await expect(
+      issueDocument({
+        tenantId: tenantA,
+        templateId,
+        idempotencyKey: "revoke-me",
+        values: VALUES,
+        withBytes: true,
+        base: appDb,
+        storageDir: DIR,
+      }),
+    ).rejects.toThrow(/revoked/);
   });
 
   // The filesystem has no RLS, so the scoped read of the row — and with it the storage key — is the
@@ -659,5 +676,68 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       1_000,
     );
     expect(b.logoVersion).toBeGreaterThan(a.logoVersion);
+  });
+
+  // A patch that touches ONLY the style still has to be validated: the footer's tokens are checked
+  // against the DECLARED FIELDS, which live in the half this patch did not send. A condition that
+  // only fires on blocks/fields would save an unresolvable footer without a word.
+  test("validates a patch that changes only the style", async () => {
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const tpl = await createDocumentTemplate(
+      ctx(tenantA),
+      {
+        name: "Orçamento com rodapé",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+      },
+      appDb,
+    );
+    await expect(
+      updateDocumentTemplate(
+        ctx(tenantA),
+        BigInt(tpl.id),
+        { style: { ...starter.style, footerText: "{{nao_declarado}}" } },
+        appDb,
+      ),
+    ).rejects.toThrow(/nao_declarado/);
+    const after = await getDocumentTemplate(
+      ctx(tenantA),
+      BigInt(tpl.id),
+      appDb,
+    );
+    expect(after.style.footerText).toBe(starter.style.footerText);
+  });
+
+  // The write body is shared by create and update, so `name` cannot be required there — the create
+  // route substitutes "". A raw ZodError escaping the service is not a validation response: nothing
+  // maps it, so it reaches the fallback handler as an INTERNAL_SERVER_ERROR and the operator gets a
+  // 500 for a name they can fix by typing one.
+  test("answers a missing or empty name with a 400, never a 500", async () => {
+    for (const name of ["", "   ", "x".repeat(121)]) {
+      const failed = await createDocumentTemplate(
+        ctx(tenantA),
+        { name, blocks: [], fields: [] },
+        appDb,
+      ).catch((e: unknown) => e);
+      expect(failed).toBeInstanceOf(AppError);
+      expect((failed as AppError).statusCode).toBe(400);
+      expect((failed as AppError).message).toContain("name");
+    }
+    // The same question on the update path, which raised the same raw error.
+    const tpl = await createDocumentTemplate(
+      ctx(tenantA),
+      { name: "Nomeado", blocks: [], fields: [] },
+      appDb,
+    );
+    const patchFailed = await updateDocumentTemplate(
+      ctx(tenantA),
+      BigInt(tpl.id),
+      { name: "" },
+      appDb,
+    ).catch((e: unknown) => e);
+    expect(patchFailed).toBeInstanceOf(AppError);
+    expect((patchFailed as AppError).statusCode).toBe(400);
   });
 });

@@ -6,6 +6,7 @@ import {
   documentFieldSchema,
   MAX_BLOCKS_PER_DOCUMENT,
   MAX_LINE_ITEMS,
+  parseDocumentStyle,
 } from "./blocks";
 import { isReservedTokenName, RESERVED_TOKEN_NAMES, tokensIn } from "./tokens";
 
@@ -97,9 +98,16 @@ function textsIn(block: DocumentBlock): string[] {
   }
 }
 
+// The style is taken as well as the blocks, and it is REQUIRED rather than optional, because the
+// footer is rendered through the same token resolver the block texts are: a typo there resolves to a
+// blank on the last line of every page of a document the customer keeps. Making it optional would
+// mean the check is only as good as each caller remembering to opt in, and the invariant this file
+// exists for — an unresolvable token is refused when it is WRITTEN, never at render — is not one a
+// caller should be able to skip by leaving an argument out.
 export function parseTemplateContent(
   rawBlocks: unknown,
   rawFields: unknown,
+  rawStyle: unknown,
 ): TemplateParse {
   const blocksParsed = documentBlocksSchema.safeParse(rawBlocks ?? []);
   if (!blocksParsed.success) {
@@ -164,17 +172,39 @@ export function parseTemplateContent(
       }
     }
     for (const text of textsIn(b)) {
-      for (const token of tokensIn(text)) {
-        if (byName.has(token) || RESERVED_TOKEN_NAMES.includes(token)) continue;
+      const unknown = unknownToken(text, byName);
+      if (unknown) {
         return {
           ok: false,
-          reason: `blocks: block "${b.id}" uses {{${token}}}, which is neither a declared field nor a reserved name. Declare it in fields, or remove it — an unresolved token renders as a blank space in the customer's document.`,
+          reason: `blocks: block "${b.id}" uses {{${unknown}}}, which is neither a declared field nor a reserved name. Declare it in fields, or remove it — an unresolved token renders as a blank space in the customer's document.`,
         };
       }
     }
   }
 
+  const footer = parseDocumentStyle(rawStyle).footerText;
+  const unknownInFooter = footer ? unknownToken(footer, byName) : null;
+  if (unknownInFooter) {
+    return {
+      ok: false,
+      reason: `style: footerText uses {{${unknownInFooter}}}, which is neither a declared field nor a reserved name. Declare it in fields, or remove it — an unresolved token renders as a blank on the last line of every page.`,
+    };
+  }
+
   return { ok: true, content: { blocks, fields } };
+}
+
+// One question, asked of every text that reaches resolveTokens: block texts and the style's footer
+// alike. Returns the first token that would render as a blank, or null.
+function unknownToken(
+  text: string,
+  byName: Map<string, DocumentField>,
+): string | null {
+  for (const token of tokensIn(text)) {
+    if (byName.has(token) || RESERVED_TOKEN_NAMES.includes(token)) continue;
+    return token;
+  }
+  return null;
 }
 
 // ── values (what one issuance supplies) ──

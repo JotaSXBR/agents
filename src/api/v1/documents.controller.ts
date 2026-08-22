@@ -29,6 +29,8 @@ import {
 // translate('errors.invalidDocumentTemplate', 'This document template is not valid')
 // translate('errors.invalidDocumentValues', 'The values do not match what this template declares')
 // translate('errors.invalidDocumentSlug', 'This identifier is not valid')
+// translate('errors.invalidDocumentTemplateName', 'The document template name must be between 1 and 120 characters')
+// translate('errors.documentRevoked', 'This document was revoked and cannot be issued again')
 // translate('errors.logoNotFound', 'Logo not found')
 
 function ctxOrThrow(ctx: TenantContext | null): TenantContext {

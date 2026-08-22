@@ -744,6 +744,10 @@ export async function exportAgent(
             credentialRef: refToName(i.credentialRef ?? null),
           })),
           knowledgeBases: componentsRaw.knowledgeBases,
+          // Carried through explicitly, like every other list here: this object is REBUILT rather
+          // than spread, so a component the rebuild forgets is exported as a grant pointing at
+          // nothing and the import can only drop it with a warning.
+          documentTemplates: componentsRaw.documentTemplates,
           businessHours: componentsRaw.businessHours,
         }
       : undefined;
@@ -1312,7 +1316,7 @@ async function createMissingComponents(
     // Re-validated on the way IN, never trusted as exported: a template written by a newer build can
     // carry a block this one does not know how to render, and a warning that names the reason is a
     // better import than a document that renders wrong in front of a customer.
-    const content = parseTemplateContent(tpl.blocks, tpl.fields);
+    const content = parseTemplateContent(tpl.blocks, tpl.fields, tpl.style);
     if (!content.ok) {
       warnings.push({
         code: "documentTemplateInvalid",

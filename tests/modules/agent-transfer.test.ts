@@ -10,6 +10,8 @@ import {
   exportAgent,
   importAgent,
 } from "@/modules/agents/transfer";
+import { documentStarter } from "@/modules/documents/starters";
+import { createDocumentTemplate } from "@/modules/documents/templates";
 
 const appUrl = process.env.TEST_APP_DATABASE_URL;
 const suUrl = process.env.MIGRATION_DATABASE_URL;
@@ -577,6 +579,19 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
         ],
       },
     });
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const tpl = await createDocumentTemplate(
+      srcCtx(),
+      {
+        name: "Orçamento",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+        numberPrefix: "ORC-",
+      },
+      appDb,
+    );
     const agent = await suDb.agent.create({
       data: {
         tenantId: srcTenant,
@@ -621,6 +636,14 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
           enabledTools: ["search_knowledge"],
           knowledgeBaseIds: [kb.id],
         },
+        {
+          tenantId: srcTenant,
+          agentId: srcAgentId,
+          source: "DOCUMENT",
+          documentTemplateId: BigInt(tpl.id),
+          enabledTools: [],
+          knowledgeBaseIds: [],
+        },
       ],
     });
   });
@@ -635,6 +658,7 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
         "mcp_server_connections",
         "integration_instances",
         "knowledge_bases",
+        "document_templates",
         "business_hours",
         "vault_entries",
       ]) {
@@ -660,6 +684,13 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
     expect(c?.mcpServers.find((m) => m.name === "tools-server")).toBeDefined();
     expect(c?.integrations.find((i) => i.name === "Pagamentos")).toBeDefined();
     expect(c?.knowledgeBases.find((k) => k.name === "Catálogo")).toBeDefined();
+    // A DOCUMENT grant names a template by SLUG, so the template itself has to travel with it —
+    // otherwise the import has a grant pointing at a component the destination never heard of, and
+    // the only thing it can do is drop the grant with a warning.
+    expect(
+      c?.documentTemplates?.find((tpl) => tpl.slug === "orcamento")?.blocks
+        ?.length,
+    ).toBeGreaterThan(0);
     // Business hours are bundled so the import can recreate them.
     expect(c?.businessHours?.some((h) => h.name === "Comercial")).toBe(true);
     expect(
@@ -738,11 +769,25 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
       select: { source: true },
     });
     expect(grants.map((g) => g.source).sort()).toEqual([
+      "DOCUMENT",
       "HTTP",
       "INTEGRATION",
       "MCP",
       "RAG",
     ]);
+    // The template itself was recreated on the destination, and the grant points at THAT row —
+    // a DOCUMENT grant carrying the source tenant's id would reach across the fence or resolve to
+    // nothing at all.
+    const dstTemplate = await suDb.documentTemplate.findFirst({
+      where: { tenantId: dstTenant, slug: "orcamento" },
+      select: { id: true, numberPrefix: true },
+    });
+    expect(dstTemplate?.numberPrefix).toBe("ORC-");
+    const docGrant = await suDb.agentToolSelection.findFirst({
+      where: { agentId: BigInt(agent.id), source: "DOCUMENT" },
+      select: { documentTemplateId: true },
+    });
+    expect(docGrant?.documentTemplateId).toBe(dstTemplate?.id as bigint);
   });
 
   test("import canonicalizes legacy authoring shapes (JSON-Schema inputSchema, single-brace {var})", async () => {

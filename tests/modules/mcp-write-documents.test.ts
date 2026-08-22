@@ -205,6 +205,43 @@ describe.skipIf(!dbUp)("MCP document writes", () => {
     expect(after?.name).toBe("Orçamento");
   });
 
+  // The dry-run's whole job is to show what applying WOULD change, and `fields` is the half a client
+  // cares most about: it is the agent's argument list. A projection that carries the patch for some
+  // properties and the stored value for others reports "nothing changes" for a write that changes
+  // the tool contract — the worst possible answer, because it is confident.
+  test("the update dry-run diffs patched fields and style, not just names", async () => {
+    const [tpl] = await listDocumentTemplates(ctx(), appDb);
+    const r = await documentTemplateUpdate(
+      principal({ tenantId }),
+      {
+        document_template_id: tpl?.id as string,
+        // Appended, not replaced: the blocks still point at the starter's fields, and dropping
+        // those would be refused by the content check — a different rule, correctly.
+        fields: [
+          ...(tpl?.fields ?? []),
+          { name: "observacao", label: "Observação", type: "text" },
+        ],
+        style: { ...tpl?.style, font: "mono" },
+      },
+      { base: appDb },
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const data = r.data as {
+        diff: Record<string, { before: unknown; after: unknown }>;
+      };
+      expect(data.diff.fields).toBeDefined();
+      expect(data.diff.fields?.after).toContain("observacao:text");
+      expect(
+        (data.diff.style?.after as { font?: string } | undefined)?.font,
+      ).toBe("mono");
+    }
+    // …and still applies nothing.
+    const [after] = await listDocumentTemplates(ctx(), appDb);
+    expect(after?.fields.some((f) => f.name === "observacao")).toBe(false);
+    expect(after?.style.font).not.toBe("mono");
+  });
+
   test("delete dry-run says what survives the deletion", async () => {
     const [tpl] = await listDocumentTemplates(ctx(), appDb);
     const r = await documentTemplateDelete(

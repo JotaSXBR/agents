@@ -327,6 +327,29 @@ describe.skipIf(!dbUp)("buildDocumentTools", () => {
     );
   });
 
+  // The key is derived from the values, so "send it again" lands on the row the operator voided.
+  // The model has to be told, and told something other than "correct the data and try again" —
+  // there is no correction that does not lead back to the same document.
+  test("declines to resend a document the operator revoked", async () => {
+    const first = newTurnState();
+    await tool(first).invoke({ ...ARGS, cliente: "Revogado" });
+    const row = await suDb.issuedDocument.findFirst({
+      where: { tenantId },
+      orderBy: { id: "desc" },
+      select: { id: true },
+    });
+    await suDb.issuedDocument.update({
+      where: { id: row?.id as bigint },
+      data: { revoked: true },
+    });
+    const turnState = newTurnState();
+    const out = String(
+      await tool(turnState).invoke({ ...ARGS, cliente: "Revogado" }),
+    );
+    expect(out).toMatch(/cancelado/);
+    expect(turnState.pendingAttachments).toHaveLength(0);
+  });
+
   test("returns a fixable message when the service refuses a value", async () => {
     const turnState = newTurnState();
     const out = String(

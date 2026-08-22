@@ -117,7 +117,7 @@ type Row = Prisma.DocumentTemplateGetPayload<{ select: typeof SELECT }>;
 // rather than throwing keeps the console listable: a template that cannot be parsed has to be
 // visible to be fixed.
 function toDto(row: Row): DocumentTemplateDto {
-  const parsed = parseTemplateContent(row.blocks, row.fields);
+  const parsed = parseTemplateContent(row.blocks, row.fields, row.style);
   return {
     id: String(row.id),
     name: row.name,
@@ -146,13 +146,33 @@ export interface DocumentTemplateInput {
   enabled?: boolean;
 }
 
-export const templateNameSchema = z.string().min(1).max(120);
+export const templateNameSchema = z.string().trim().min(1).max(120);
 
-function validated(input: { blocks: unknown; fields: unknown }): {
+// Both writes name a template, and a raw `.parse` here is not a validation response: nothing maps a
+// ZodError, so it reaches the fallback handler as an INTERNAL_SERVER_ERROR and an operator who left
+// the name empty is told the server broke. The create route in particular CANNOT require the name at
+// the transport — the body schema is shared with the patch — so this is where the answer is decided.
+function parseTemplateName(value: unknown): string {
+  const parsed = templateNameSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new AppError(
+      "name: must be between 1 and 120 characters.",
+      400,
+      "errors.invalidDocumentTemplateName",
+    );
+  }
+  return parsed.data;
+}
+
+function validated(input: {
+  blocks: unknown;
+  fields: unknown;
+  style: unknown;
+}): {
   blocks: DocumentBlock[];
   fields: DocumentField[];
 } {
-  const parsed = parseTemplateContent(input.blocks, input.fields);
+  const parsed = parseTemplateContent(input.blocks, input.fields, input.style);
   if (!parsed.ok) {
     throw new AppError(parsed.reason, 400, "errors.invalidDocumentTemplate");
   }
@@ -191,7 +211,7 @@ export async function createDocumentTemplate(
   input: DocumentTemplateInput,
   base: PrismaClient = basePrisma,
 ): Promise<DocumentTemplateDto> {
-  const name = templateNameSchema.parse(input.name);
+  const name = parseTemplateName(input.name);
   const slug = input.slug ? input.slug : slugifyTemplateName(name);
   const problem = slugProblem(slug);
   if (problem) {
@@ -200,6 +220,7 @@ export async function createDocumentTemplate(
   const content = validated({
     blocks: input.blocks ?? [],
     fields: input.fields ?? [],
+    style: input.style,
   });
   const style = parseDocumentStyle(input.style);
   if (ctx.tenantId === null) throw new AppError("tenant required", 400);
@@ -233,8 +254,7 @@ export async function updateDocumentTemplate(
 ): Promise<DocumentTemplateDto> {
   const current = await getDocumentTemplate(ctx, id, base);
   const data: Prisma.DocumentTemplateUpdateInput = {};
-  if (patch.name !== undefined)
-    data.name = templateNameSchema.parse(patch.name);
+  if (patch.name !== undefined) data.name = parseTemplateName(patch.name);
   if (patch.slug !== undefined) {
     const problem = slugProblem(patch.slug);
     if (problem) {
@@ -254,14 +274,20 @@ export async function updateDocumentTemplate(
       patch.style,
     ) as unknown as Prisma.InputJsonValue;
   }
-  // NOTE: blocks and fields are validated TOGETHER even when only one was sent, because half the
-  // rules are about the relationship between them — a block pointing at a field, a token naming one.
-  // Validating the patched half alone would accept a template whose blocks reference fields the
-  // other half just removed.
-  if (patch.blocks !== undefined || patch.fields !== undefined) {
+  // NOTE: blocks, fields and style are validated TOGETHER even when only one was sent, because the
+  // rules are about the relationship between them — a block pointing at a field, a token in a block
+  // or in the footer naming one. Validating only the patched part would accept a template whose
+  // blocks reference fields the other half just removed, or a footer whose token the fields never
+  // declared.
+  if (
+    patch.blocks !== undefined ||
+    patch.fields !== undefined ||
+    patch.style !== undefined
+  ) {
     const content = validated({
       blocks: patch.blocks ?? current.blocks,
       fields: patch.fields ?? current.fields,
+      style: patch.style ?? current.style,
     });
     data.blocks = content.blocks as unknown as Prisma.InputJsonValue;
     data.fields = content.fields as unknown as Prisma.InputJsonValue;
@@ -380,6 +406,7 @@ export async function previewDocumentTemplate(
   const content = validated({
     blocks: input.blocks ?? saved?.blocks ?? [],
     fields: input.fields ?? saved?.fields ?? [],
+    style: input.style ?? saved?.style,
   });
   const style = parseDocumentStyle(input.style ?? saved?.style);
   const now = input.now ?? new Date();

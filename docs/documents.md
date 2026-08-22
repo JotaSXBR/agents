@@ -73,6 +73,11 @@ TTF: a face resolves from a path that differs between the dev tree and the conta
 goes into is global and does not deduplicate, and the built-ins cover Latin-1, which is what PT-BR
 needs. A bundled family is purely additive later.
 
+`footerText` goes through the **same token resolver** the block texts do, and it prints on every
+page, so its tokens are validated with them: a template is refused as a whole, style included. That
+is also why a patch touching only the style is re-validated — the names a footer may use are declared
+in the half the patch did not send.
+
 ## Issuing
 
 `issueDocument` is one core with two callers (`POST /v1/documents` and the agent's tool), two-phase
@@ -96,6 +101,11 @@ benign — into `current transaction is aborted` and a 500 for whoever arrived s
 The number comes from `UPDATE document_templates SET last_number = last_number + 1 … RETURNING`, so
 the row lock makes it atomic. It is bumped AFTER the insert, so losing a race on the key does not
 consume one. Monotonic, not gapless.
+
+**Revocation ends the document, including through the key.** The idempotency key is derived from the
+values, so an agent asked to send the same quote again lands on the row the operator voided; the
+retry path refuses it (409) rather than handing back the stored bytes, which is the answer the
+download route already gives, decided at a different stage.
 
 The template's **number prefix is frozen onto the issued row**, not joined when the number is
 printed. The number is how a document identifies itself to the customer holding it: renaming the

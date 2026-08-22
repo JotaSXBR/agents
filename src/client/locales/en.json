@@ -585,6 +585,7 @@
     "numberPrefix": "Number prefix",
     "numberPrefixHint": "e.g. \"ORC-\" → ORC-0001",
     "openPdf": "Open PDF",
+    "openPdfError": "Could not open the PDF.",
     "preview": {
       "errorTitle": "This document does not render",
       "title": "Document preview"

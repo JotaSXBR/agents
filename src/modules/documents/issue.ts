@@ -146,7 +146,11 @@ export async function issueDocument(
       "errors.documentTemplateDisabled",
     );
   }
-  const content = parseTemplateContent(prepared.blocks, prepared.fields);
+  const content = parseTemplateContent(
+    prepared.blocks,
+    prepared.fields,
+    prepared.style,
+  );
   if (!content.ok) {
     throw new AppError(content.reason, 400, "errors.invalidDocumentTemplate");
   }
@@ -226,6 +230,7 @@ interface LoadedDocument {
   pdfStorageKey: string | null;
   templateId: bigint | null;
   numberPrefix: string | null;
+  revoked: boolean;
 }
 
 async function loadByKey(
@@ -244,6 +249,7 @@ async function loadByKey(
       pdfStorageKey: true,
       templateId: true,
       numberPrefix: true,
+      revoked: true,
     },
   });
   if (!doc) return null;
@@ -256,6 +262,7 @@ async function loadByKey(
     pdfStorageKey: doc.pdfStorageKey,
     templateId: doc.templateId,
     numberPrefix: doc.numberPrefix,
+    revoked: doc.revoked,
   };
 }
 
@@ -272,6 +279,22 @@ async function finish(
   },
 ): Promise<IssuedDocumentResult> {
   const { base, ctx, dir, tenantId } = deps;
+  // Revocation ends the document, and the idempotency key leads straight back to it: the key is
+  // derived from the VALUES, so an agent asked to send the same quote again lands on this exact row.
+  // Without this the retry would hand back the stored bytes and attach a voided document to a
+  // customer's reply, while the operator's own download link answered 404.
+  //
+  // NOT documentVerdict, which the download route uses: that one also refuses a row with no PDF, and
+  // here a row with no PDF is the ordinary case — it is the one this function is about to render.
+  // A 409, not a 400: nothing about the caller's arguments is wrong, and there is nothing to correct
+  // that would not lead back to the same voided row.
+  if (loaded.revoked) {
+    throw new AppError(
+      "this document was revoked",
+      409,
+      "errors.documentRevoked",
+    );
+  }
   let row = loaded;
   if (row.number === null && row.templateId) {
     const templateId = row.templateId;

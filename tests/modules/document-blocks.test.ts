@@ -47,7 +47,27 @@ describe("parseTemplateContent", () => {
         },
       ),
       FIELDS,
+      {},
     );
+    expect(r.ok).toBe(true);
+  });
+
+  // The footer is rendered through the SAME token resolver the block texts are, and it prints on
+  // every page. A typo there is the most invisible kind: it costs a blank on the last line of a
+  // document the customer keeps, and nothing in the console ever says so.
+  test("refuses an unresolvable token in the style's footer", () => {
+    const r = parseTemplateContent(blocks(), FIELDS, {
+      footerText: "{{empresa}} · {{doc_number}}",
+    });
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.reason).toContain("footerText");
+    expect(r.ok === false && r.reason).toContain("empresa");
+  });
+
+  test("accepts a footer built from declared fields and reserved names", () => {
+    const r = parseTemplateContent(blocks(), FIELDS, {
+      footerText: "{{company_name}} · {{doc_number}} · {{cliente}}",
+    });
     expect(r.ok).toBe(true);
   });
 
@@ -59,6 +79,7 @@ describe("parseTemplateContent", () => {
         text: "{{company_name}} · {{empresa_documento}} · {{doc_number}}",
       }),
       FIELDS,
+      {},
     );
     expect(r.ok).toBe(true);
   });
@@ -68,6 +89,7 @@ describe("parseTemplateContent", () => {
     const r = parseTemplateContent(
       blocks({ id: "t", type: "text", text: "Prazo: {{prazo}}" }),
       FIELDS,
+      {},
     );
     expect(r.ok).toBe(false);
     expect(r.ok === false && r.reason).toContain("{{prazo}}");
@@ -85,6 +107,7 @@ describe("parseTemplateContent", () => {
         },
       ],
       FIELDS,
+      {},
     );
     expect(inMeta.ok).toBe(false);
     const inRows = parseTemplateContent(
@@ -94,23 +117,30 @@ describe("parseTemplateContent", () => {
         rows: [{ label: "Total", value: "{{inexistente}}" }],
       }),
       FIELDS,
+      {},
     );
     expect(inRows.ok).toBe(false);
   });
 
   test("refuses a field whose name would shadow the letterhead", () => {
-    const r = parseTemplateContent(blocks(), [
-      { name: "empresa_nome", label: "Nome", type: "text" },
-    ]);
+    const r = parseTemplateContent(
+      blocks(),
+      [{ name: "empresa_nome", label: "Nome", type: "text" }],
+      {},
+    );
     expect(r.ok).toBe(false);
     expect(r.ok === false && r.reason).toContain("reserved prefix");
   });
 
   test("refuses a duplicate field name and a duplicate block id", () => {
-    const dupField = parseTemplateContent(blocks(), [
-      { name: "x", label: "A", type: "text" },
-      { name: "x", label: "B", type: "text" },
-    ]);
+    const dupField = parseTemplateContent(
+      blocks(),
+      [
+        { name: "x", label: "A", type: "text" },
+        { name: "x", label: "B", type: "text" },
+      ],
+      {},
+    );
     expect(dupField.ok).toBe(false);
     const dupBlock = parseTemplateContent(
       [
@@ -118,6 +148,7 @@ describe("parseTemplateContent", () => {
         { id: "same", type: "divider" },
       ],
       [],
+      {},
     );
     expect(dupBlock.ok).toBe(false);
     expect(dupBlock.ok === false && dupBlock.reason).toContain(
@@ -129,11 +160,13 @@ describe("parseTemplateContent", () => {
     const missing = parseTemplateContent(
       blocks({ id: "li", type: "lineItems", field: "nao_existe" }),
       FIELDS,
+      {},
     );
     expect(missing.ok).toBe(false);
     const wrongType = parseTemplateContent(
       blocks({ id: "li", type: "lineItems", field: "cliente" }),
       FIELDS,
+      {},
     );
     expect(wrongType.ok).toBe(false);
     expect(wrongType.ok === false && wrongType.reason).toContain("lineItems");
@@ -148,13 +181,14 @@ describe("parseTemplateContent", () => {
         discountField: "validade",
       }),
       FIELDS,
+      {},
     );
     expect(r.ok).toBe(false);
     expect(r.ok === false && r.reason).toContain("discountField");
   });
 
   test("refuses an unknown block type, naming the ones that exist", () => {
-    const r = parseTemplateContent([{ id: "x", type: "image" }], []);
+    const r = parseTemplateContent([{ id: "x", type: "image" }], [], {});
     expect(r.ok).toBe(false);
     expect(r.ok === false && r.reason).toContain("lineItems");
   });
@@ -169,7 +203,7 @@ describe("parseTemplateContent", () => {
         type: "divider",
       }),
     );
-    const r = parseTemplateContent(many, []);
+    const r = parseTemplateContent(many, [], {});
     expect(r.ok).toBe(false);
     expect(r.ok === false && r.reason).toContain(
       String(MAX_BLOCKS_PER_DOCUMENT),

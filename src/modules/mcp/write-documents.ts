@@ -1,5 +1,6 @@
 import basePrisma from "@/api/lib/prisma";
 import { AppError } from "@/lib/errors";
+import { parseDocumentStyle } from "@/modules/documents/blocks";
 import { documentStarter } from "@/modules/documents/starters";
 import {
   createDocumentTemplate,
@@ -216,7 +217,21 @@ export async function documentTemplateUpdate(
           ? { numberPrefix: patch.numberPrefix }
           : {}),
         ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+        // Every property the patch can carry, and for the same reason each one is here: the diff is
+        // the client's only picture of what applying would do. A projection that takes the patch for
+        // some properties and the stored value for others answers "nothing changes" to a write that
+        // changes the agent's own argument list — confidently, which is the worst way to be wrong.
+        // Shapes are re-read from the projection's own types, so a fields patch of another shape
+        // shows up as a diff rather than a crash.
         ...(Array.isArray(patch.blocks) ? { blocks: patch.blocks } : {}),
+        ...(Array.isArray(patch.fields)
+          ? { fields: patch.fields as { name: string; type: string }[] }
+          : {}),
+        ...(patch.style !== undefined
+          ? {
+              style: parseDocumentStyle(patch.style) as Record<string, unknown>,
+            }
+          : {}),
       });
       return ok({
         dryRun: true,
