@@ -688,6 +688,10 @@ async function maybeConsumeCommandOrGate(params: {
   // test mode). Both resolved by the caller before the mirror ran.
   command: ControlCommand | null;
   commandActive: boolean;
+  // The bot whose webhook ROUTE this delivery arrived on. Not an ownership question — that one is
+  // `stillOurs` — but a routing one: Chatwoot fans the same message out to the conversation's
+  // assigned bot AND the inbox's, and a command must run on exactly one of them.
+  agentBotId: number | null;
   base: PrismaClient;
 }): Promise<boolean> {
   const { tenantId, instanceId, n, command, commandActive, base } = params;
@@ -797,6 +801,32 @@ async function maybeConsumeCommandOrGate(params: {
       base,
       botToken: (await persona())?.accessToken,
     });
+
+  // NOTE: One command, one run. Chatwoot dispatches an incoming message to the conversation's
+  // ASSIGNED agent bot and to the inbox's (agent_bot_listener.rb), and those are two deliveries with
+  // two ids — so on a conversation assigned to another persona's bot, the gate that lets a command
+  // through regardless of ownership let BOTH routes execute it. Two resets, two acknowledgements,
+  // and the second one clearing state the first had just rebuilt.
+  //
+  // The inbox's persona is the one that runs it, because the command is about the agent bound to
+  // THIS inbox: it is that agent's memory being cleared and that agent the conversation goes back
+  // to. The other route consumes the delivery and does nothing — returning false there would hand
+  // "/reset" to its own agent as ordinary customer text.
+  const commandRoute = async (): Promise<"ours" | "another-bot"> => {
+    const ourBotId = (await persona())?.chatwootAgentBotId ?? null;
+    return ourBotId === null ||
+      params.agentBotId === null ||
+      params.agentBotId === ourBotId
+      ? "ours"
+      : "another-bot";
+  };
+  if (command !== null && commandActive && (await commandRoute()) !== "ours") {
+    logger.info(
+      "chatwoot: command delivered on another bot's route, leaving it to the inbox's persona (conv=%s)",
+      String(conversationId),
+    );
+    return true;
+  }
 
   // Is the conversation still the bot's, RIGHT NOW? `act` upstream was decided from the payload
   // Chatwoot sent, so a human who took the conversation between that event and this post is invisible
@@ -1926,6 +1956,7 @@ export async function processChatwootDelivery(
       n,
       command,
       commandActive,
+      agentBotId: params.agentBotId,
       base,
     });
     if (!consumed) {

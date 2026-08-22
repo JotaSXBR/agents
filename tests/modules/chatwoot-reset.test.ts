@@ -632,8 +632,10 @@ describe.skipIf(!dbUp)(
         assigneeType: "User",
       });
 
-      // Unassign BEFORE pending, which is the order returnConversationToAgent documents: the two
-      // cannot be one toggle_status call.
+      // Pending BEFORE unassign, which is the order returnConversationToAgent documents, and it is
+      // chosen for the failure: the two are separate requests, and the partial that leaves the human
+      // holding the conversation is recoverable by doing nothing, while the one that removes them
+      // and leaves a status the gate refuses is nobody's conversation.
       const owned = cw.calls.filter(
         (c) =>
           c.method === "POST" &&
@@ -641,8 +643,8 @@ describe.skipIf(!dbUp)(
             c.path.endsWith(`/conversations/${CONV_ID}/toggle_status`)),
       );
       expect(owned.map((c) => [c.path.split("/").pop(), c.body])).toEqual([
-        ["assignments", { assignee_id: 0 }],
         ["toggle_status", { status: "pending" }],
+        ["assignments", { assignee_id: 0 }],
       ]);
       // Admin token on both: the bot cannot reassign a conversation away from a human, and the
       // audit should show the operator rather than the persona.
@@ -683,6 +685,30 @@ describe.skipIf(!dbUp)(
         .join(" ");
       expect(ack).toContain("atribuição");
       expect(ack).not.toContain("desativado");
+    });
+
+    // And what that ordering buys. The status call failing must leave the human where they were, not
+    // strip the conversation from them and hand it to a gate that refuses it.
+    test("a hand-back that fails halfway leaves the human holding it", async () => {
+      const cw = fakeChatwoot(/\/toggle_status$/);
+      globalThis.fetch = cw.impl;
+      await sendReset("/reset", CONV_ID, {
+        status: "open",
+        assigneeType: "User",
+      });
+
+      // The unassign never ran, so nothing was taken away.
+      expect(
+        cw.calls.filter((c) =>
+          c.path.endsWith(`/conversations/${CONV_ID}/assignments`),
+        ),
+      ).toEqual([]);
+      // And the operator is told which part did not happen.
+      expect(
+        ackCalls(cw.calls)
+          .map((c) => (c.body as { content?: string })?.content ?? "")
+          .join(" "),
+      ).toContain("atribuição");
     });
 
     // The other half of the same rule: asked with `shouldBotHandle` so an ordinary reset does not
@@ -1568,26 +1594,38 @@ describe.skipIf(!dbUp)(
       return { token, agentId: otherAgent.id };
     };
 
-    // Which bot the question is about. Chatwoot fans a message out to the conversation's assigned
-    // bot AND the inbox's, so the delivery can arrive on a ROUTE that belongs to a different persona
-    // than the one bound to this inbox. Asking "is it ours" about the route's bot then answers yes
-    // about a conversation the inbox's agent cannot touch, and /reset leaves it that way.
-    test("ownership is asked about the inbox's persona, not the route the delivery came on", async () => {
+    // Which route runs the command. Chatwoot dispatches an incoming message to the conversation's
+    // ASSIGNED agent bot AND to the inbox's, as two deliveries with two ids — so once commands
+    // stopped being gated on ownership, both routes executed the same /reset: two runs, two
+    // acknowledgements, and the second clearing state the first had just rebuilt.
+    test("a command delivered on another bot's route is left to the inbox's persona", async () => {
       const { token: otherToken, agentId: otherAgentId } =
         await seedOtherPersonaHoldingIt();
       const cw = fakeChatwoot();
       globalThis.fetch = cw.impl;
-      // `pending` on purpose: `shouldBotHandle` rejects any other status BEFORE it compares bot ids,
-      // so an `open` conversation answers "not ours" for a reason that has nothing to do with which
-      // bot is being asked about, and the comparison under test is never reached.
-      //
-      // Assigned to bot 77 and delivered on bot 77's route, while the inbox's persona is bot 9. The
-      // old comparison asked about the route's bot, found it equal to the assignee, and concluded
-      // the conversation was ours — leaving the inbox's agent unable to answer it.
+      // Assigned to bot 77, delivered on bot 77's route, while the inbox's persona is bot 9.
       await sendReset("/reset", CONV_ID, {
         status: "pending",
         silentMeta: true,
         routeToken: otherToken,
+      });
+
+      // Consumed and dropped: no reset, and no acknowledgement either — the run belongs to the other
+      // delivery. Returning false here instead would hand "/reset" to this bot's agent as customer
+      // text.
+      expect(cw.calls).toEqual([]);
+      await suDb.agent.delete({ where: { id: otherAgentId } });
+    });
+
+    // The other half: the inbox's own route DOES run it, on the very conversation the other bot
+    // holds. Without this the fence above could be passing by refusing every route.
+    test("the inbox's own route runs the command on a conversation another bot holds", async () => {
+      const { agentId: otherAgentId } = await seedOtherPersonaHoldingIt();
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      await sendReset("/reset", CONV_ID, {
+        status: "pending",
+        silentMeta: true,
       });
 
       expect(
@@ -1600,34 +1638,8 @@ describe.skipIf(!dbUp)(
       await suDb.agent.delete({ where: { id: otherAgentId } });
     });
 
-    // The same question, asked by the OTHER command. /teste's acknowledgement branches on whether the
-    // agent may speak here, and it used to branch on the caller's `act` — which is decided against
-    // the ROUTE's bot. On a conversation held by another persona's bot, delivered on that persona's
-    // route, `act` is true and the plain "activated" is posted about a conversation the inbox's agent
-    // still cannot answer in: the silence this whole change exists to explain, restated as success.
-    test("/teste answers about the inbox's persona too, not the route", async () => {
-      const { token: otherToken, agentId: otherAgentId } =
-        await seedOtherPersonaHoldingIt();
-      const cw = fakeChatwoot();
-      globalThis.fetch = cw.impl;
-      await sendReset("/teste", CONV_ID, {
-        status: "pending",
-        silentMeta: true,
-        routeToken: otherToken,
-      });
-
-      const ack = ackCalls(cw.calls)
-        .map((c) => (c.body as { content?: string })?.content ?? "")
-        .join(" ");
-      expect(ack).toContain("não está com este agente");
-      expect(ack).toContain("/reset");
-      await suDb.agent.delete({ where: { id: otherAgentId } });
-    });
-
-    // Switching an agent off switches off everything it says to the customer — the runtime refuses to
-    // run it, and the away-message branch already says so. /reset was the one path that acted anyway:
-    // it took the human off the conversation and set it back to pending, leaving the customer with
-    // neither. Clearing the episode is still fine; handing the conversation over is not.
+    // The agent switched off, restored afterwards: it is shared by every test in this file, so the
+    // flag cannot leak.
     const withDisabledAgent = async (
       run: () => Promise<void>,
     ): Promise<void> => {

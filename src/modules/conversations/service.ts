@@ -1254,6 +1254,13 @@ export async function handoffConversation(
 // confirmed that toggle_status → pending does NOT clear the assignee, so unassigning is mandatory —
 // otherwise the next inbound message still carries assignee_type "User" and the bot stays silent.
 // The optional reengage prompt is a separate proactive message the caller sends via replyToConversation.
+//
+// STATUS FIRST, and that ordering is chosen for the failure, not for the success: the two calls are
+// separate requests and either can fail. Unassigning first and then failing leaves a conversation
+// with no assignee and a status the gate refuses — the human is gone and the bot still will not
+// speak, which is nobody's conversation. Failing the other way leaves the human holding it exactly
+// as before, one status apart. The caller reports the partial either way; only one of the two
+// partials is recoverable by doing nothing.
 export async function returnConversationToAgent(
   ctx: TenantContext,
   id: bigint,
@@ -1267,10 +1274,10 @@ export async function returnConversationToAgent(
     ...deps,
     base,
   });
-  await client.unassignConversation(conv.chatwootConversationId, {
+  await client.toggleStatus(conv.chatwootConversationId, "pending", {
     asAdmin: true,
   });
-  await client.toggleStatus(conv.chatwootConversationId, "pending", {
+  await client.unassignConversation(conv.chatwootConversationId, {
     asAdmin: true,
   });
   const state = await mirrorConsoleWrite(ctx, base, id, conv, client, {
