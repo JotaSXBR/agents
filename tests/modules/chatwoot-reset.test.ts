@@ -955,6 +955,63 @@ describe.skipIf(!dbUp)(
       });
     });
 
+    // The booking lives where the AI runs, and in a redirect episode that is never the entry
+    // conversation: the gate answers there with a fixed message and no model, so every turn happens
+    // in the widget. A reset typed on the entry side was cancelling reminders on a thread that had
+    // never booked anything, and the test appointment kept nudging the customer.
+    test("the appointment reminders of the widget side are cancelled too", async () => {
+      await withRedirectPair(async (_convId, widgetThread) => {
+        await suDb.schedulerJob.createMany({
+          data: [
+            {
+              tenantId,
+              kind: "APPOINTMENT_REMINDER",
+              dedupeKey: "reminder:evt-widget:60",
+              runAt: new Date(Date.now() + 3_600_000),
+              payload: {
+                threadId: widgetThread,
+                eventId: "evt-widget",
+                calendarId: "c",
+              },
+            },
+            // And one on the ENTRY thread: reaching the sibling must not come at the cost of the
+            // conversation the operator actually typed the command in.
+            {
+              tenantId,
+              kind: "APPOINTMENT_REMINDER",
+              dedupeKey: "reminder:evt-entry:60",
+              runAt: new Date(Date.now() + 3_600_000),
+              payload: {
+                threadId: `${tenantId}:${instanceId}:${CONV_ID}`,
+                eventId: "evt-entry",
+                calendarId: "c",
+              },
+            },
+          ],
+        });
+        const cw = fakeChatwoot();
+        globalThis.fetch = cw.impl;
+        // Typed on the ENTRY conversation, which never booked anything.
+        await sendReset();
+
+        const jobs = await suDb.schedulerJob.findMany({
+          where: { tenantId, kind: "APPOINTMENT_REMINDER" },
+          select: { dedupeKey: true, status: true, payload: true },
+          orderBy: { dedupeKey: "asc" },
+        });
+        expect(
+          jobs.map((j) => [
+            j.dedupeKey,
+            j.status,
+            (j.payload as { cancelledAt?: string })?.cancelledAt !== undefined,
+          ]),
+        ).toEqual([
+          ["reminder:evt-entry:60", "DONE", true],
+          ["reminder:evt-widget:60", "DONE", true],
+        ]);
+      });
+    });
+
     // The fence on the widening. Contact ids are account-wide and a tenant can run several agents on
     // one Chatwoot instance, so "every ladder this contact is in" reaches a funnel nobody touched.
     // The pair is whatever THIS agent's config says it is.
@@ -1659,7 +1716,8 @@ describe.skipIf(!dbUp)(
         base: blind,
       });
 
-      // The command still reports what it did...
+      // The command still reports what it did — including the sentence about the hand-back, whose
+      // own ownership read is the second place this could have thrown after the cleanup.
       expect(ackCalls(cw.calls).length).toBeGreaterThan(0);
       // ...and did not take the conversation from the human on an answer it does not have.
       expect(
@@ -1667,6 +1725,60 @@ describe.skipIf(!dbUp)(
           c.path.endsWith(`/conversations/${CONV_ID}/assignments`),
         ),
       ).toEqual([]);
+    });
+
+    // The same guard on the OTHER late ownership read: the sentence that explains a withheld
+    // hand-back asks the question again, after everything has run. It reaches that line only while
+    // the agent is disabled, which is why the failure has to be driven with the switch off.
+    test("a disabled agent still acknowledges when ownership cannot be read", async () => {
+      const inbox = await suDb.inbox.findFirstOrThrow({
+        where: { tenantId, chatwootInboxId: INBOX_ID },
+        select: { agentId: true },
+      });
+      const agentId = inbox.agentId as bigint;
+      await suDb.agent.update({
+        where: { id: agentId },
+        data: { enabled: false },
+      });
+      const blind = appDb.$extends({
+        query: {
+          conversation: {
+            findUnique({ args, query }) {
+              const sel = (args.select ?? {}) as Record<string, unknown>;
+              if (
+                Object.keys(sel).length === 3 &&
+                sel.assigneeType === true &&
+                sel.assigneeId === true &&
+                sel.status === true
+              ) {
+                return Promise.reject(new Error("connection reset"));
+              }
+              return query(args);
+            },
+          },
+        },
+      }) as unknown as PrismaClient;
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      try {
+        await sendReset("/reset", CONV_ID, {
+          status: "open",
+          assigneeType: "User",
+          base: blind,
+        });
+
+        expect(ackCalls(cw.calls).length).toBeGreaterThan(0);
+        expect(
+          cw.calls.filter((c) =>
+            c.path.endsWith(`/conversations/${CONV_ID}/assignments`),
+          ),
+        ).toEqual([]);
+      } finally {
+        await suDb.agent.update({
+          where: { id: agentId },
+          data: { enabled: true },
+        });
+      }
     });
 
     // And the row being GONE, which is the other thing a re-read can find. Deleting the agent while

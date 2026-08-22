@@ -881,28 +881,37 @@ async function maybeConsumeCommandOrGate(params: {
     }
   };
 
-  // Neither half may throw. /reset asks this AFTER its cleanup has run, so a rejection here loses the
-  // acknowledgement of work already done and leaves the delivery mid-flight; /teste asks it after the
-  // activation is committed. `none` is the fallback both consumers want, and they want it for
-  // opposite-looking reasons that agree: the hand-back is the irreversible act, so an unknown answer
-  // must not trigger it, and the wrong text is cheaper in this direction too — "activated" on a
-  // conversation a human holds is a silence the operator retries out of, while "send /reset" on a
-  // conversation the agent already owns talks them into clearing an episode for nothing.
-  const answerBlocker = async (): Promise<
-    "none" | "ownership" | "disabled"
-  > => {
-    if (!(await agentStillEnabled())) return "disabled";
+  // `stillOurs`, for the callers that must not throw. /reset asks about ownership AFTER its cleanup
+  // has run, so a rejection there loses the acknowledgement of work that DID happen and leaves the
+  // delivery mid-flight; /teste asks after the activation is committed.
+  //
+  // Unknown reads as OURS, and the two consumers want that for opposite-looking reasons that agree:
+  // the hand-back is the irreversible act, so an unknown answer must not trigger it, and the wrong
+  // text is cheaper in this direction too — "activated" on a conversation a human holds is a silence
+  // the operator retries out of, while "send /reset" on a conversation the agent already owns talks
+  // them into clearing an episode for nothing.
+  //
+  // `postPublicMessage` keeps its own catch with the OPPOSITE fallback on purpose: there the question
+  // is "may this text go to the customer", and an unreadable answer has to withhold it.
+  const stillOursOrUnknown = async (): Promise<boolean> => {
     try {
-      return (await stillOurs()) ? "none" : "ownership";
+      return await stillOurs();
     } catch (err) {
       logger.warn(
         "chatwoot: could not read whether the conversation is still the bot's (conv=%s): %s",
         String(conversationId),
         errMsg(err),
       );
-      return "none";
+      return true;
     }
   };
+
+  const answerBlocker = async (): Promise<"none" | "ownership" | "disabled"> =>
+    !(await agentStillEnabled())
+      ? "disabled"
+      : (await stillOursOrUnknown())
+        ? "none"
+        : "ownership";
 
   // Returns whether the message actually left. Whoever records that it was sent has to read this: the
   // away message would otherwise burn the day it just claimed, and the redirect gate would close its
@@ -1353,13 +1362,26 @@ async function maybeConsumeCommandOrGate(params: {
           base,
         ),
     );
-    await step("cancel appointment reminders", "lembretes de agendamento", () =>
-      cancelThreadAppointmentReminders(
-        tenantId,
-        chatwootThreadId(tenantId, instanceId, conversationId),
-        base,
-      ),
-    );
+    // Both sides of the pair, for the same reason the ladder is cancelled by the widget's key: in a
+    // redirect episode the AI does not serve the entry conversation at all — the gate answers there
+    // with a fixed message and no model, and every turn (so every booking) happens in the widget
+    // (docs/channel-redirect.md). A /reset typed on the entry side would therefore cancel reminders
+    // on a thread that never booked anything, and the test appointment would go on nudging the
+    // customer about an episode the operator was told had been erased.
+    for (const convId of redirectSibling === null
+      ? [conversationId]
+      : [conversationId, redirectSibling]) {
+      await step(
+        "cancel appointment reminders",
+        "lembretes de agendamento",
+        () =>
+          cancelThreadAppointmentReminders(
+            tenantId,
+            chatwootThreadId(tenantId, instanceId, convId),
+            base,
+          ),
+      );
+    }
 
     // LAST, and that ordering is the point. The state that decides whether the agent may speak AT
     // ALL — `shouldBotHandle` needs both `status === "pending"` and an assignee that is not a human
@@ -1406,7 +1428,7 @@ async function maybeConsumeCommandOrGate(params: {
     // read as the command failing. Only when it was actually withheld: a conversation the agent
     // already owned has nothing to explain.
     const heldBack =
-      resetBlocker === "disabled" && !(await stillOurs())
+      resetBlocker === "disabled" && !(await stillOursOrUnknown())
         ? " Este agente está desativado, então a conversa continua com quem a atendia."
         : "";
     await postAcknowledgement(
