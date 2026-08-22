@@ -19,6 +19,18 @@ import {
   getConversationDetail,
   getConversationMessages,
 } from "@/modules/conversations/service";
+import { documentAuthoringSchema } from "@/modules/documents/blocks";
+import { listIssuedDocuments } from "@/modules/documents/issue";
+import { documentStarters } from "@/modules/documents/starters";
+import {
+  getDocumentTemplate,
+  listDocumentTemplates,
+} from "@/modules/documents/templates";
+import {
+  COMPANY_TOKEN_ALIASES,
+  DOCUMENT_TOKEN_ALIASES,
+  RESERVED_TOKEN_PREFIXES,
+} from "@/modules/documents/tokens";
 import {
   experimentResults,
   getExperiment,
@@ -143,6 +155,130 @@ export async function toolGet(
   if (typeof id !== "bigint") return id;
   try {
     return ok({ tool: await getToolDefinition(ctx, id, base) });
+  } catch (e) {
+    return failOf(e);
+  }
+}
+
+// ── document templates ──
+
+export async function documentTemplateList(
+  principal: VerifiedToken,
+  deps: WriteDeps = {},
+): Promise<WriteResult> {
+  const base = deps.base ?? basePrisma;
+  const ctx = readGate(principal);
+  if ("ok" in ctx) return ctx;
+  try {
+    const templates = await listDocumentTemplates(ctx, base);
+    // Blocks are dropped from the LIST: they are the bulk of a template and nobody browsing the list
+    // reads them. document_template_get returns the whole thing.
+    return ok({
+      templates: templates.map((t) => ({
+        id: t.id,
+        name: t.name,
+        slug: t.slug,
+        toolName: t.toolName,
+        description: t.description,
+        blocks: t.blocks.length,
+        fields: t.fields.map(
+          (f) => `${f.name}:${f.type}${f.required ? "*" : ""}`,
+        ),
+        numberPrefix: t.numberPrefix,
+        lastNumber: t.lastNumber,
+        enabled: t.enabled,
+      })),
+    });
+  } catch (e) {
+    return failOf(e);
+  }
+}
+
+export async function documentTemplateGet(
+  principal: VerifiedToken,
+  args: { document_template_id: string },
+  deps: WriteDeps = {},
+): Promise<WriteResult> {
+  const base = deps.base ?? basePrisma;
+  const ctx = readGate(principal);
+  if ("ok" in ctx) return ctx;
+  const id = asBigInt(args.document_template_id, "document_template_id");
+  if (typeof id !== "bigint") return id;
+  try {
+    return ok({ template: await getDocumentTemplate(ctx, id, base) });
+  } catch (e) {
+    return failOf(e);
+  }
+}
+
+// The block/field/style shapes, as JSON Schema generated from the validator itself, plus the token
+// names. Served on demand because publishing it in every tools/list would cost thousands of
+// characters per session for a contract only a caller authoring a template needs.
+export async function documentTemplateSchema(
+  principal: VerifiedToken,
+): Promise<WriteResult> {
+  const ctx = readGate(principal);
+  if ("ok" in ctx) return ctx;
+  return ok({
+    ...documentAuthoringSchema(),
+    tokens: {
+      company: Object.entries(COMPANY_TOKEN_ALIASES).map(
+        ([canonical, alias]) => `{{${canonical}}} / {{${alias}}}`,
+      ),
+      document: Object.entries(DOCUMENT_TOKEN_ALIASES).map(
+        ([canonical, alias]) => `{{${canonical}}} / {{${alias}}}`,
+      ),
+      fields:
+        "Any declared field by its own name, e.g. {{validade}}. A token naming neither a declared field nor a reserved name is refused.",
+      reservedPrefixes: [...RESERVED_TOKEN_PREFIXES],
+    },
+  });
+}
+
+export async function documentStarterList(
+  principal: VerifiedToken,
+  args: { locale?: string } = {},
+): Promise<WriteResult> {
+  const ctx = readGate(principal);
+  if ("ok" in ctx) return ctx;
+  const starters = documentStarters(
+    args.locale === "en-US" ? "en-US" : "pt-BR",
+  );
+  return ok({
+    starters: starters.map((s) => ({
+      key: s.key,
+      name: s.name,
+      description: s.description,
+      blocks: s.blocks.length,
+      fields: s.fields.map(
+        (f) => `${f.name}:${f.type}${f.required ? "*" : ""}`,
+      ),
+    })),
+  });
+}
+
+export async function issuedDocumentList(
+  principal: VerifiedToken,
+  args: { template_id?: string; thread_id?: string; limit?: number } = {},
+  deps: WriteDeps = {},
+): Promise<WriteResult> {
+  const base = deps.base ?? basePrisma;
+  const ctx = readGate(principal);
+  if ("ok" in ctx) return ctx;
+  let templateId: bigint | undefined;
+  if (args.template_id) {
+    const parsed = asBigInt(args.template_id, "template_id");
+    if (typeof parsed !== "bigint") return parsed;
+    templateId = parsed;
+  }
+  try {
+    return ok({
+      documents: await listIssuedDocuments(
+        ctx,
+        { templateId, threadId: args.thread_id, limit: args.limit },
+        base,
+      ),
+    });
   } catch (e) {
     return failOf(e);
   }

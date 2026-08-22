@@ -1,6 +1,7 @@
 import {
   Check,
   ChevronDown,
+  FileText,
   type LucideIcon,
   Pencil,
   Plug,
@@ -744,6 +745,21 @@ export function ToolGrantsEditor({
     }
   }
 
+  // A template grant exposes exactly one tool, so there is nothing to narrow: the card is the whole
+  // switch, unlike the MCP and integration cards below it.
+  function toggleDocument(id: string) {
+    const exists = nonRag.some(
+      (g) => g.source === "DOCUMENT" && g.documentTemplateId === id,
+    );
+    emit(
+      exists
+        ? nonRag.filter(
+            (g) => !(g.source === "DOCUMENT" && g.documentTemplateId === id),
+          )
+        : [...nonRag, { source: "DOCUMENT", documentTemplateId: id }],
+    );
+  }
+
   function toggleIntegration(id: string, allTools: string[]) {
     const exists = nonRag.some(
       (g) => g.source === "INTEGRATION" && g.integrationInstanceId === id,
@@ -1126,6 +1142,49 @@ export function ToolGrantsEditor({
               </div>
             );
           })
+        )}
+      </Section>
+
+      <Section
+        id="tools-documents"
+        icon={FileText}
+        title={t("editor.tools.documents", "Documents")}
+        description={t(
+          "editor.tools.documentsDesc",
+          "Templates this agent may issue and attach to a reply. Each one becomes a tool of its own.",
+        )}
+      >
+        {catalog.documentTemplates.length === 0 ? (
+          <p className="text-text-muted text-xs">
+            {t(
+              "editor.tools.noDocuments",
+              "No document templates yet. Create one under Components.",
+            )}
+          </p>
+        ) : (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {catalog.documentTemplates.map((tpl) => (
+              <SelectableCard
+                key={tpl.id}
+                selected={nonRag.some(
+                  (g) =>
+                    g.source === "DOCUMENT" && g.documentTemplateId === tpl.id,
+                )}
+                onToggle={() => toggleDocument(tpl.id)}
+                icon={FileText}
+                title={tpl.name}
+                badge={<Badge variant="secondary">{tpl.toolName}</Badge>}
+                description={
+                  tpl.enabled
+                    ? (tpl.description ?? undefined)
+                    : t(
+                        "editor.tools.documentDisabled",
+                        "Disabled — the agent will not see this tool.",
+                      )
+                }
+              />
+            ))}
+          </div>
         )}
       </Section>
 

@@ -50,6 +50,7 @@ function makeConfig(
     httpToolDefs: [],
     mcpSelections: [],
     integrationSelections: [],
+    documentSelections: [],
     ragConfig: undefined,
     langfuseCfg: null,
     ttsConfig: TTS_DEFAULTS,

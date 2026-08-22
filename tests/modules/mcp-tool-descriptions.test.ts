@@ -147,6 +147,46 @@ describe("MCP tool descriptions", () => {
     expect(restated).toEqual([]);
   });
 
+  // The instrument the ceiling above did NOT have. It guards the schema of exactly one tool, so a
+  // second heavy schema could land anywhere else and pass green — and the schema half is the larger
+  // one: 38k characters against 25k of prose, published in full on every tools/list of every
+  // session, before a client knows whether any of it will be used.
+  //
+  // Measured with the document tools in: 103 tools, 25,641 characters of description and 38,379 of
+  // schema. The headroom below is deliberately smaller than one substantial tool, so the next
+  // addition is a decision — raising these is a legitimate outcome of that decision, and not
+  // noticing is not.
+  test("the whole tools/list payload stays under its ceiling", async () => {
+    const all = await listed();
+    let desc = 0;
+    let schema = 0;
+    for (const t of all.values()) {
+      desc += t.description.length;
+      schema += t.schema.length;
+    }
+    expect(desc).toBeLessThanOrEqual(26_500);
+    expect(schema).toBeLessThanOrEqual(39_500);
+  });
+
+  // Why the document write tools declare `blocks`/`fields` as loose arrays and put the vocabulary in
+  // document_template_schema instead: a six-variant discriminated union publishes as JSON Schema by
+  // inlining every variant, measured at ~3.2k characters PER TOOL against the ~700 below, on both
+  // the create and the update. That trade is the reason the totals above are where they are, so it
+  // is asserted rather than left as a claim in a comment.
+  test("the document write tools keep their schemas compact", async () => {
+    const all = await listed();
+    for (const name of [
+      "document_template_create",
+      "document_template_update",
+    ]) {
+      const t = all.get(name);
+      expect(t).toBeDefined();
+      expect((t as { schema: string }).schema.length).toBeLessThanOrEqual(
+        1_000,
+      );
+    }
+  });
+
   // NOTE: the norm is about WHERE content lives, not about length, so the check that matters for the
   // other tools is that none of them grew a second offender while nobody was counting.
   test("no other description is anywhere near that size", async () => {

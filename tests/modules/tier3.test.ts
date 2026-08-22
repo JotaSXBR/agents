@@ -27,7 +27,10 @@ import {
   replyToConversation,
   returnConversationToAgent,
 } from "@/modules/conversations/service";
-import { listQuotes, revokeQuote } from "@/modules/quotes/service";
+import {
+  listIssuedDocuments,
+  revokeIssuedDocument,
+} from "@/modules/documents/issue";
 import { seedChatwootInstance } from "../utils/chatwoot";
 
 const appUrl = process.env.TEST_APP_DATABASE_URL;
@@ -673,7 +676,7 @@ describe.skipIf(!dbUp)("tier-3 conversation ops (stub client)", () => {
 });
 
 describe.skipIf(!dbUp)(
-  "tier-3 analytics KPIs/timeseries + quotes + audit",
+  "tier-3 analytics KPIs/timeseries + documents + audit",
   () => {
     let tenant = 0n;
     let instanceId = 0n;
@@ -716,12 +719,14 @@ describe.skipIf(!dbUp)(
           completionTokens: 5,
         },
       });
-      await suDb.quote.create({
+      await suDb.issuedDocument.create({
         data: {
           tenantId: tenant,
+          title: "Orçamento",
+          number: 1,
           idempotencyKey: "k1",
           status: "READY",
-          snapshot: { title: "Orçamento", currency: "BRL" },
+          snapshot: {},
         },
       });
     });
@@ -732,7 +737,8 @@ describe.skipIf(!dbUp)(
         "llm_usage",
         "conversations",
         "chatwoot_instances",
-        "quotes",
+        "issued_documents",
+        "document_templates",
         "audit_logs",
       ]) {
         await suDb.$executeRawUnsafe(
@@ -765,12 +771,18 @@ describe.skipIf(!dbUp)(
       expect(convs).toBe(1);
     });
 
-    test("quotes list + revoke", async () => {
-      const list = await listQuotes(ctx(tenant), {}, appDb);
+    test("issued documents list + revoke", async () => {
+      const list = await listIssuedDocuments(ctx(tenant), {}, appDb);
       expect(list).toHaveLength(1);
       expect(list[0]?.title).toBe("Orçamento");
-      await revokeQuote(ctx(tenant), BigInt(list[0]?.id as string), appDb);
-      const after = await listQuotes(ctx(tenant), {}, appDb);
+      // No template row behind it, so the prefix is absent and the number pads on its own.
+      expect(list[0]?.number).toBe("0001");
+      await revokeIssuedDocument(
+        ctx(tenant),
+        BigInt(list[0]?.id as string),
+        appDb,
+      );
+      const after = await listIssuedDocuments(ctx(tenant), {}, appDb);
       expect(after[0]?.revoked).toBe(true);
     });
 

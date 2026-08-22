@@ -1,0 +1,114 @@
+import { describe, expect, test } from "bun:test";
+import {
+  formatDate,
+  formatDocumentNumber,
+  formatMoney,
+  formatNumber,
+} from "@/modules/documents/format";
+import { computeTotals, lineTotal } from "@/modules/documents/totals";
+
+// The arithmetic as a table. The property that matters is not "the total is right" in the abstract:
+// it is that the numbers the renderer PRINTS add up to each other, because a customer reading three
+// lines that contradict themselves is the failure this file exists to stop.
+
+const item = (quantity: number, unitPrice: number) => ({
+  description: "x",
+  quantity,
+  unitPrice,
+});
+
+describe("computeTotals", () => {
+  test("sums in cents, so a float artefact never reaches the page", () => {
+    // 3 × 0.1 is 0.30000000000000004 as a float; a document that prints a total one cent off the sum
+    // of its own lines is the kind of error a customer photographs.
+    expect(computeTotals([item(3, 0.1)]).subtotal).toBe(0.3);
+    expect(lineTotal(item(3, 0.1))).toBe(0.3);
+    const many = computeTotals(Array.from({ length: 10 }, () => item(1, 0.1)));
+    expect(many.subtotal).toBe(1);
+  });
+
+  test("an empty document totals zero rather than NaN", () => {
+    expect(computeTotals([])).toEqual({
+      subtotal: 0,
+      discount: 0,
+      tax: 0,
+      total: 0,
+    });
+  });
+
+  test("subtracts the discount and adds the tax, which is an amount not a rate", () => {
+    const t = computeTotals([item(2, 100)], { discount: 30, tax: 12.5 });
+    expect(t).toEqual({ subtotal: 200, discount: 30, tax: 12.5, total: 182.5 });
+  });
+
+  // The clamped discount is what comes back, so the printed rows still add up. A discount larger
+  // than the subtotal is somebody's mistake either way; a document whose own three numbers
+  // contradict each other is the worse way for the customer to find out.
+  test("clamps a discount larger than the subtotal, and reports the clamped value", () => {
+    const t = computeTotals([item(1, 50)], { discount: 500 });
+    expect(t.discount).toBe(50);
+    expect(t.total).toBe(0);
+    expect(t.subtotal - t.discount + t.tax).toBe(t.total);
+  });
+
+  test("ignores a negative discount or tax instead of inflating the total", () => {
+    const t = computeTotals([item(1, 100)], { discount: -10, tax: -10 });
+    expect(t).toEqual({ subtotal: 100, discount: 0, tax: 0, total: 100 });
+  });
+
+  test("the printed rows always add up", () => {
+    for (const [q, p, d, x] of [
+      [1, 0.01, 0, 0],
+      [7, 13.37, 5.05, 1.11],
+      [3, 0.1, 0.3, 0],
+      [100, 99.99, 1000, 250],
+    ] as const) {
+      const t = computeTotals([item(q, p)], { discount: d, tax: x });
+      expect(t.subtotal - t.discount + t.tax).toBeCloseTo(t.total, 10);
+    }
+  });
+});
+
+describe("format", () => {
+  // pt-BR currency output separates the symbol from the number with U+00A0, not a plain space. That
+  // is correct typography and is kept; asserting it in CODEPOINTS is what stops a future test from
+  // "fixing" it by stripping whitespace, which would stop testing anything.
+  test("formats currency in the document's locale, non-breaking space included", () => {
+    const brl = formatMoney(1299.9, "pt-BR", "BRL");
+    expect([...brl].map((c) => c.codePointAt(0))).toEqual([
+      0x52, 0x24, 0x00a0, 0x31, 0x2e, 0x32, 0x39, 0x39, 0x2c, 0x39, 0x30,
+    ]);
+    expect(formatMoney(1299.9, "en-US", "USD")).toBe("$1,299.90");
+    expect(formatMoney(0, "pt-BR", "BRL")).toContain("0,00");
+  });
+
+  // The document still has to render. Refusing to produce the PDF over a currency code is worse for
+  // the customer than a legible fallback.
+  //
+  // NOTE: an UNKNOWN three-letter code does not throw — Intl prints it as-is — so the fallback is
+  // reached only by a code that is three characters and not three LETTERS, which the style schema
+  // (length 3, no character class, per "type and choice, never size") does let through.
+  test("prints an unknown currency code, and falls back on a malformed one", () => {
+    expect(formatMoney(12.3, "pt-BR", "XYZ")).toBe("XYZ\u00a012,30");
+    expect(formatMoney(12.3, "pt-BR", "1BR")).toBe("12.30 1BR");
+  });
+
+  // Parsed as UTC noon: a date-only string parsed as UTC midnight and formatted in a western zone
+  // lands on the previous day, which is how a validity date silently loses 24 hours.
+  test("formats a date without slipping a day", () => {
+    expect(formatDate("2026-09-05", "pt-BR")).toBe("05/09/2026");
+    expect(formatDate("2026-09-05", "en-US")).toBe("09/05/2026");
+    expect(formatDate("not-a-date", "pt-BR")).toBe("not-a-date");
+  });
+
+  test("pads the document number and prefixes it", () => {
+    expect(formatDocumentNumber(42, "ORC-")).toBe("ORC-0042");
+    expect(formatDocumentNumber(12345, null)).toBe("12345");
+    expect(formatDocumentNumber(null, "ORC-")).toBe("");
+  });
+
+  test("formats a plain number in the locale", () => {
+    expect(formatNumber(1500.5, "pt-BR")).toBe("1.500,5");
+    expect(formatNumber(1500.5, "en-US")).toBe("1,500.5");
+  });
+});

@@ -116,6 +116,8 @@ export interface RuntimeDeps {
   ttsFetch?: typeof fetch;
   // Injectable download + SSRF assertion for send_image (tests); the real ones in production.
   imageDeps?: ImageFetchDeps;
+  // Injectable for tests: where a document tool writes and reads its rendered PDF.
+  documentsStorageDir?: string;
   // Injectable LLM speech normalizer (tests); production builds one from the agent's model when the
   // agent enables tts.normalize. Best-effort — synthesizeReply falls back to raw text on failure.
   normalizeSpeech?: (text: string) => Promise<string>;
@@ -226,12 +228,13 @@ async function applyDeferredResolve(
   }
 }
 
-// Delivers the images the agent queued this turn, AFTER the same gates the reply passes. Best-effort
-// per image: one failed attachment must not cost the customer the reply that follows it. Invariant:
-// called only on the "posted" and "empty" outcomes — a superseded, taken-over or blocked turn drops
-// the queue, exactly like the deferred resolve intent. Returns whether the customer actually received
-// something, which is what makes an image-only turn count as answered.
-async function deliverPendingImages(
+// Delivers the files the agent queued this turn (an image, a document), AFTER the same gates the
+// reply passes. Best-effort per file: one failed attachment must not cost the customer the reply that
+// follows it. Invariant: called only on the "posted" and "empty" outcomes — a superseded, taken-over
+// or blocked turn drops the queue, exactly like the deferred resolve intent. Returns whether the
+// customer actually received something, which is what makes an attachment-only turn count as
+// answered.
+async function deliverPendingAttachments(
   client: ChatwootClient,
   conversationId: number,
   turnState: TurnState,
@@ -239,29 +242,33 @@ async function deliverPendingImages(
 ): Promise<boolean> {
   // NOTE: Sorted by the model's tool-call order, not by the order the downloads finished in — the
   // batch runs concurrently, and a caption only makes sense next to the picture it was written for.
-  const queued = turnState.pendingImages
+  const queued = turnState.pendingAttachments
     .splice(0)
     .sort((a, b) => a.order - b.order);
   let sent = false;
-  for (const img of queued) {
+  for (const file of queued) {
     try {
       await client.sendFileAttachment(
         conversationId,
-        img.bytes,
-        img.fileName,
-        img.mime,
-        { caption: img.caption },
+        file.bytes,
+        file.fileName,
+        file.mime,
+        { caption: file.caption },
       );
       sent = true;
       emitFlowEvent(flow, {
         stage: "tool",
         status: "ok",
-        detail: { tool: "send_image", outcome: "sent" },
+        // NOTE: the queueing tool, not a constant. An operator filtering the trail for the tool they
+        // granted has to find the line it produced, and a document reported as send_image sends them
+        // to the image host allowlist to debug a PDF read off our own disk.
+        detail: { tool: file.tool, outcome: "sent" },
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logger.warn(
-        "send_image delivery failed (conv=%s): %s",
+        "%s delivery failed (conv=%s): %s",
+        file.tool,
         String(conversationId),
         msg,
       );
@@ -269,7 +276,7 @@ async function deliverPendingImages(
         stage: "tool",
         level: "warn",
         status: "error",
-        detail: { tool: "send_image", outcome: "failed" },
+        detail: { tool: file.tool, outcome: "failed" },
         errorMessage: msg,
       });
     }
@@ -316,9 +323,9 @@ export async function runLoadedTurn(
   // Per-turn mutable state shared with the native tools (deferred resolve intent).
   const turnState: TurnState = {
     resolveRequested: false,
-    pendingImages: [],
+    pendingAttachments: [],
     imagesInFlight: 0,
-    imagesSeq: 0,
+    attachmentsSeq: 0,
   };
   const handoffState = {
     customerMessage: null as string | null,
@@ -335,6 +342,7 @@ export async function runLoadedTurn(
       threadId,
       messageId: params.messageId,
       imageDeps: params.deps?.imageDeps,
+      documentsStorageDir: params.deps?.documentsStorageDir,
       turnState,
       handoffState,
     },
@@ -565,7 +573,7 @@ export async function runLoadedTurn(
       // customer-facing text means the same thing wherever it is reached: a `silent` action that
       // suppressed the goodbye and then let a photo through would be the operator's policy applied
       // to one artefact and not the other.
-      if (guardrailTripped(guarded)) turnState.pendingImages.length = 0;
+      if (guardrailTripped(guarded)) turnState.pendingAttachments.length = 0;
       const screened = screenedText(guarded, line);
       if (screened === null) return;
       deliveredBalloons = await deliverText(
@@ -918,13 +926,13 @@ export async function runLoadedTurn(
     // the queue — the safe reply replaces what the model wrote, images included. This sits ABOVE the
     // empty-reply branch because a caption is customer-facing text even when the model produced no
     // final message of its own (skip_reply with an image is a legitimate shape).
-    const captions = turnState.pendingImages
+    const captions = turnState.pendingAttachments
       .map((i) => i.caption?.trim())
       .filter((c): c is string => !!c);
     const screened = [reply, ...captions].filter(Boolean).join("\n");
     const outGuard = screened ? await runGuardrail("output", screened) : null;
     if (outGuard && guardrailTripped(outGuard)) {
-      turnState.pendingImages.length = 0;
+      turnState.pendingAttachments.length = 0;
       const replacement = screenedText(outGuard, screened);
       if (replacement === null) return "blocked";
       reply = replacement;
@@ -939,23 +947,24 @@ export async function runLoadedTurn(
     // callers key the error-cleared/answered bookkeeping off that word, and an image-only turn that
     // reported "empty" would leave a stale turn error on a conversation that was just answered.
     if (!reply) {
-      const queued = turnState.pendingImages.length;
-      const sent = await deliverPendingImages(
+      const queued = turnState.pendingAttachments.length;
+      const sent = await deliverPendingAttachments(
         client,
         conversationId,
         turnState,
         flow,
       );
-      // NOTE: The images WERE the turn and none of them reached the customer. That is a failed turn,
-      // not a silent one: returning "empty" here would let the deferred resolve close a conversation
-      // nobody answered, and the callers only record a turn error (private note, lastError, alert)
-      // when the turn THROWS. Best-effort per image still holds where a reply carries the turn.
-      // NOTE: ...unless a handoff already answered. Then the images were NOT the turn, and a throw
+      // NOTE: The attachments WERE the turn and none of them reached the customer. That is a failed
+      // turn, not a silent one: returning "empty" here would let the deferred resolve close a
+      // conversation nobody answered, and the callers only record a turn error (private note,
+      // lastError, alert) when the turn THROWS. Best-effort per file still holds where a reply
+      // carries the turn.
+      // NOTE: ...unless a handoff already answered. Then the files were NOT the turn, and a throw
       // would record a turn error (private note, lastError, alert) on a conversation that was both
       // answered and correctly handed to a human.
       if (queued > 0 && !sent && !handedOff) {
         throw new Error(
-          "send_image: nenhuma imagem foi entregue e o turno não tinha resposta em texto",
+          "envio de anexo: nada foi entregue e o turno não tinha resposta em texto",
         );
       }
       await applyDeferredResolve(client, conversationId, turnState, flow, {
@@ -969,7 +978,7 @@ export async function runLoadedTurn(
 
     // The image lands before the text that talks about it, and before the TTS branch: an audio
     // reply must not swallow the attachment.
-    await deliverPendingImages(client, conversationId, turnState, flow);
+    await deliverPendingAttachments(client, conversationId, turnState, flow);
 
     deliveredBalloons = await deliverText(reply, recheck.voiceReply);
     await applyDeferredResolve(client, conversationId, turnState, flow, {

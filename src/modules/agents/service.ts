@@ -659,6 +659,7 @@ export async function cloneAgent(
         toolDefinitionId: true,
         mcpServerConnectionId: true,
         integrationInstanceId: true,
+        documentTemplateId: true,
         knowledgeBaseIds: true,
         enabledTools: true,
       },
@@ -687,6 +688,7 @@ export async function cloneAgent(
           toolDefinitionId: g.toolDefinitionId,
           mcpServerConnectionId: g.mcpServerConnectionId,
           integrationInstanceId: g.integrationInstanceId,
+          documentTemplateId: g.documentTemplateId,
           knowledgeBaseIds: g.knowledgeBaseIds,
           enabledTools: g.enabledTools,
         })),
@@ -704,6 +706,7 @@ const AGENT_TOOL_SOURCES = [
   "HTTP",
   "MCP",
   "INTEGRATION",
+  "DOCUMENT",
 ] as const;
 type AgentToolSourceLit = (typeof AGENT_TOOL_SOURCES)[number];
 
@@ -712,6 +715,7 @@ export interface ToolGrantInput {
   toolDefinitionId?: string | null;
   mcpServerConnectionId?: string | null;
   integrationInstanceId?: string | null;
+  documentTemplateId?: string | null;
   knowledgeBaseIds?: string[];
   enabledTools?: string[];
 }
@@ -721,6 +725,7 @@ export interface ToolGrantDto {
   toolDefinitionId: string | null;
   mcpServerConnectionId: string | null;
   integrationInstanceId: string | null;
+  documentTemplateId: string | null;
   knowledgeBaseIds: string[];
   enabledTools: string[];
 }
@@ -748,6 +753,15 @@ export interface ToolSelectionView {
         args: { name: string; description?: string; required: boolean }[];
       }[];
     }[];
+    documentTemplates: {
+      id: string;
+      name: string;
+      // The tool name the agent will see (send_<slug>), so the editor shows WHAT it grants rather
+      // than making the operator derive it from the template name.
+      toolName: string;
+      description: string | null;
+      enabled: boolean;
+    }[];
     knowledgeBases: {
       id: string;
       name: string;
@@ -768,6 +782,7 @@ interface NormalizedGrant {
   toolDefinitionId: bigint | null;
   mcpServerConnectionId: bigint | null;
   integrationInstanceId: bigint | null;
+  documentTemplateId: bigint | null;
   knowledgeBaseIds: bigint[];
   enabledTools: string[];
 }
@@ -796,6 +811,7 @@ function normalizeGrants(input: ToolGrantInput[]): NormalizedGrant[] {
   const httpSeen = new Set<string>();
   const mcpSeen = new Set<string>();
   const intSeen = new Set<string>();
+  const docSeen = new Set<string>();
   const nativeSet = new Set<string>(NATIVE_TOOL_NAMES);
   const ragSet = new Set<string>(RAG_TOOL_NAMES);
   for (const g of input) {
@@ -825,6 +841,7 @@ function normalizeGrants(input: ToolGrantInput[]): NormalizedGrant[] {
           toolDefinitionId: null,
           mcpServerConnectionId: null,
           integrationInstanceId: null,
+          documentTemplateId: null,
           knowledgeBaseIds: [],
           enabledTools,
         });
@@ -863,6 +880,7 @@ function normalizeGrants(input: ToolGrantInput[]): NormalizedGrant[] {
           toolDefinitionId: null,
           mcpServerConnectionId: null,
           integrationInstanceId: null,
+          documentTemplateId: null,
           knowledgeBaseIds,
           enabledTools: ragTools,
         });
@@ -883,6 +901,7 @@ function normalizeGrants(input: ToolGrantInput[]): NormalizedGrant[] {
           toolDefinitionId: id,
           mcpServerConnectionId: null,
           integrationInstanceId: null,
+          documentTemplateId: null,
           knowledgeBaseIds: [],
           enabledTools: [],
         });
@@ -903,6 +922,7 @@ function normalizeGrants(input: ToolGrantInput[]): NormalizedGrant[] {
           toolDefinitionId: null,
           mcpServerConnectionId: id,
           integrationInstanceId: null,
+          documentTemplateId: null,
           knowledgeBaseIds: [],
           enabledTools,
         });
@@ -923,8 +943,33 @@ function normalizeGrants(input: ToolGrantInput[]): NormalizedGrant[] {
           toolDefinitionId: null,
           mcpServerConnectionId: null,
           integrationInstanceId: id,
+          documentTemplateId: null,
           knowledgeBaseIds: [],
           enabledTools,
+        });
+        break;
+      }
+      case "DOCUMENT": {
+        const id = bigOrThrow(g.documentTemplateId, "documentTemplateId");
+        if (docSeen.has(String(id))) {
+          throw new AppError(
+            "duplicate DOCUMENT grant",
+            400,
+            "errors.invalidToolGrant",
+          );
+        }
+        docSeen.add(String(id));
+        out.push({
+          source: "DOCUMENT",
+          toolDefinitionId: null,
+          mcpServerConnectionId: null,
+          integrationInstanceId: null,
+          documentTemplateId: id,
+          // NOTE: no enabledTools. A template grant exposes exactly one tool — the one derived from
+          // that template — so there is nothing to narrow, and an allowlist here would be a second
+          // switch for the grant itself.
+          knowledgeBaseIds: [],
+          enabledTools: [],
         });
         break;
       }
@@ -944,6 +989,7 @@ function toGrantDto(g: {
   toolDefinitionId: bigint | null;
   mcpServerConnectionId: bigint | null;
   integrationInstanceId: bigint | null;
+  documentTemplateId: bigint | null;
   knowledgeBaseIds: bigint[];
   enabledTools: string[];
 }): ToolGrantDto {
@@ -955,6 +1001,8 @@ function toGrantDto(g: {
       g.mcpServerConnectionId === null ? null : String(g.mcpServerConnectionId),
     integrationInstanceId:
       g.integrationInstanceId === null ? null : String(g.integrationInstanceId),
+    documentTemplateId:
+      g.documentTemplateId === null ? null : String(g.documentTemplateId),
     knowledgeBaseIds: g.knowledgeBaseIds.map((k) => String(k)),
     enabledTools: g.enabledTools,
   };
@@ -971,6 +1019,7 @@ async function buildToolSelectionView(
       toolDefinitionId: true,
       mcpServerConnectionId: true,
       integrationInstanceId: true,
+      documentTemplateId: true,
       knowledgeBaseIds: true,
       enabledTools: true,
     },
@@ -995,6 +1044,16 @@ async function buildToolSelectionView(
   });
   const knowledgeBases = await db.knowledgeBase.findMany({
     select: { id: true, name: true, description: true },
+    orderBy: { name: "asc" },
+  });
+  const documentTemplates = await db.documentTemplate.findMany({
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+      description: true,
+      enabled: true,
+    },
     orderBy: { name: "asc" },
   });
   // Per-KB count of documents imported but not yet indexed (an agent import that bundled the source
@@ -1044,6 +1103,15 @@ async function buildToolSelectionView(
         name: k.name,
         description: k.description,
         unindexedCount: unindexedByKb.get(k.id) ?? 0,
+      })),
+      documentTemplates: documentTemplates.map((d) => ({
+        id: String(d.id),
+        name: d.name,
+        // The tool name the agent will see, so the editor can show WHAT it is granting rather than
+        // making the operator derive it from the template name.
+        toolName: `send_${d.slug}`,
+        description: d.description,
+        enabled: d.enabled,
       })),
     },
   };
@@ -1119,6 +1187,13 @@ export async function replaceAgentToolSelections(
           .map((g) => g.integrationInstanceId as bigint),
       ),
     ];
+    const docIds = [
+      ...new Set(
+        grants
+          .filter((g) => g.source === "DOCUMENT")
+          .map((g) => g.documentTemplateId as bigint),
+      ),
+    ];
     const kbIds = [...new Set(grants.flatMap((g) => g.knowledgeBaseIds))];
 
     if (tdIds.length > 0) {
@@ -1140,6 +1215,17 @@ export async function replaceAgentToolSelections(
         throw new NotFoundError(
           "mcp connection not found",
           "errors.mcpConnectionNotFound",
+        );
+      }
+    }
+    if (docIds.length > 0) {
+      const found = await db.documentTemplate.count({
+        where: { id: { in: docIds } },
+      });
+      if (found !== docIds.length) {
+        throw new NotFoundError(
+          "document template not found",
+          "errors.documentTemplateNotFound",
         );
       }
     }
@@ -1195,6 +1281,7 @@ export async function replaceAgentToolSelections(
           toolDefinitionId: g.toolDefinitionId,
           mcpServerConnectionId: g.mcpServerConnectionId,
           integrationInstanceId: g.integrationInstanceId,
+          documentTemplateId: g.documentTemplateId,
           knowledgeBaseIds: g.knowledgeBaseIds,
           enabledTools: g.enabledTools,
         })),

@@ -51,6 +51,41 @@ export const LANGFUSE_DEFAULTS: LangfuseSettings = {
   debug: false,
 };
 
+// The tenant's own identity as it appears on a document it issues: the letterhead. Lives here
+// rather than in a table of its own because it is a singleton per tenant — the exact shape
+// Tenant.settings exists for — and because the render path already reads the tenant row, so a
+// letterhead costs no extra query. It holds no secret, so the vault rule above does not apply.
+//
+// The logo is the one part that is NOT here: bytes do not belong in a JSON column, so this keeps the
+// file name and the bytes live on disk. Same split as branding.
+export const companySettingsSchema = z.object({
+  name: z.string().max(200),
+  document: z.string().max(40),
+  address: z.string().max(300),
+  phone: z.string().max(40),
+  email: z.string().max(200),
+  website: z.string().max(200),
+  logoKey: z.string().max(200).nullable(),
+});
+export type CompanySettings = z.infer<typeof companySettingsSchema>;
+
+export const COMPANY_DEFAULTS: CompanySettings = {
+  name: "",
+  document: "",
+  address: "",
+  phone: "",
+  email: "",
+  website: "",
+  logoKey: null,
+};
+
+export function parseCompanySettings(settings: unknown): CompanySettings {
+  const block = (settings as Record<string, unknown> | null | undefined)
+    ?.company;
+  const parsed = companySettingsSchema.partial().safeParse(block ?? {});
+  return { ...COMPANY_DEFAULTS, ...(parsed.success ? parsed.data : {}) };
+}
+
 export function parseEmbeddingSettings(settings: unknown): EmbeddingSettings {
   const block = (settings as Record<string, unknown> | null | undefined)
     ?.embedding;
@@ -97,11 +132,19 @@ export async function readLangfuseSettings(
   return parseLangfuseSettings(await readRawSettings(db, tenantId));
 }
 
+export async function readCompanySettings(
+  db: ScopedDb,
+  tenantId: bigint,
+): Promise<CompanySettings> {
+  return parseCompanySettings(await readRawSettings(db, tenantId));
+}
+
 // ── ctx-based REST surface (TENANT_ADMIN) ──
 
 export interface TenantSettingsDto {
   embedding: EmbeddingSettings;
   langfuse: LangfuseSettings;
+  company: CompanySettings;
 }
 
 export async function getTenantSettings(
@@ -114,6 +157,7 @@ export async function getTenantSettings(
     return {
       embedding: parseEmbeddingSettings(raw),
       langfuse: parseLangfuseSettings(raw),
+      company: parseCompanySettings(raw),
     };
   });
 }
@@ -121,8 +165,8 @@ export async function getTenantSettings(
 async function writeBlock(
   ctx: TenantContext,
   base: PrismaClient,
-  key: "embedding" | "langfuse",
-  value: EmbeddingSettings | LangfuseSettings,
+  key: "embedding" | "langfuse" | "company",
+  value: EmbeddingSettings | LangfuseSettings | CompanySettings,
 ): Promise<void> {
   const tenantId = requireTenantId(ctx);
   await runScopedOn(base, ctx, async (db) => {
@@ -214,5 +258,39 @@ export async function updateLangfuse(
     debug: input.debug ?? current.debug,
   });
   await writeBlock(ctx, base, "langfuse", merged);
+  return merged;
+}
+
+export type CompanyUpdateInput = Partial<Omit<CompanySettings, "logoKey">>;
+
+// Patch-merged, never replaced: the console edits one field at a time and the MCP write sends only
+// what changed. logoKey is deliberately not settable here — it is written by the upload path, which
+// is the only place that knows a file with that name actually exists.
+export async function updateCompanySettings(
+  ctx: TenantContext,
+  patch: CompanyUpdateInput,
+  base: PrismaClient = basePrisma,
+): Promise<CompanySettings> {
+  const tenantId = requireTenantId(ctx);
+  const current = await runScopedOn(base, ctx, (db) =>
+    readCompanySettings(db, tenantId),
+  );
+  const merged = companySettingsSchema.parse({ ...current, ...patch });
+  await writeBlock(ctx, base, "company", merged);
+  return merged;
+}
+
+// Written only by the logo upload/clear path, after the bytes are on disk (or gone from it).
+export async function setCompanyLogoKey(
+  ctx: TenantContext,
+  logoKey: string | null,
+  base: PrismaClient = basePrisma,
+): Promise<CompanySettings> {
+  const tenantId = requireTenantId(ctx);
+  const current = await runScopedOn(base, ctx, (db) =>
+    readCompanySettings(db, tenantId),
+  );
+  const merged = companySettingsSchema.parse({ ...current, logoKey });
+  await writeBlock(ctx, base, "company", merged);
   return merged;
 }

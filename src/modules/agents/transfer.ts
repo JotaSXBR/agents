@@ -32,6 +32,8 @@ import {
   SETTINGS_CREDENTIAL_PATHS,
 } from "@/modules/agents/credential-paths";
 import { clampOversizedTextInPlace } from "@/modules/agents/text-caps";
+import { parseDocumentStyle } from "@/modules/documents/blocks";
+import { parseTemplateContent } from "@/modules/documents/validate";
 import { normalizeSettingsForStorage } from "@/modules/images/settings";
 import { isKnownCatalogType } from "@/modules/integrations/catalog";
 import { assertNoSecrets } from "@/modules/n8n-export/n8n";
@@ -82,6 +84,10 @@ const exportedGrantSchema = z.discriminatedUnion("source", [
     integration: z.string(),
     enabledTools: z.array(z.string()),
   }),
+  // NOTE: by SLUG, not by name. The slug is what the agent's tool name is derived from, so it is the
+  // half that has to survive the trip — a destination that renamed the template still grants the
+  // same tool. No enabledTools: a template grant exposes exactly one tool.
+  z.object({ source: z.literal("DOCUMENT"), documentTemplate: z.string() }),
 ]);
 
 // Full component definitions (opt-in via ?components=true). Each references its credential BY NAME
@@ -139,6 +145,15 @@ const exportedIntegrationSchema = z.object({
   config: z.record(z.string(), z.unknown()),
   credentialRef: z.string().nullable().optional(),
 });
+const exportedDocumentTemplateSchema = z.object({
+  name: z.string(),
+  slug: z.string(),
+  description: z.string().nullable().optional(),
+  blocks: z.array(z.unknown()),
+  fields: z.array(z.unknown()),
+  style: z.record(z.string(), z.unknown()).optional(),
+  numberPrefix: z.string().nullable().optional(),
+});
 // One source document of a knowledge base. Only the extracted TEXT travels (content); the destination
 // re-chunks + re-embeds. `sourceType` is a plain string (matches the DB column) so a future source kind
 // does not break import of older/newer exports.
@@ -176,6 +191,8 @@ const exportedComponentsSchema = z.object({
   httpTools: z.array(exportedHttpToolSchema),
   mcpServers: z.array(exportedMcpServerSchema),
   integrations: z.array(exportedIntegrationSchema),
+  // Optional for back-compat: an export written before document templates existed simply has none.
+  documentTemplates: z.array(exportedDocumentTemplateSchema).optional(),
   knowledgeBases: z.array(exportedKnowledgeBaseSchema),
   businessHours: z.array(exportedBusinessHoursSchema).optional(),
 });
@@ -231,6 +248,7 @@ export type ImportWarningTarget =
   | { kind: "tool"; name: string }
   | { kind: "mcp"; name: string }
   | { kind: "integration"; catalogType: string; name: string }
+  | { kind: "document"; name: string }
   | { kind: "knowledge"; name: string };
 
 export interface ImportWarning {
@@ -404,9 +422,11 @@ export async function exportAgent(
         toolDefinitionId: true,
         mcpServerConnectionId: true,
         integrationInstanceId: true,
+        documentTemplateId: true,
         toolDefinition: { select: { name: true } },
         mcpServerConnection: { select: { name: true } },
         integrationInstance: { select: { catalogType: true, name: true } },
+        documentTemplate: { select: { slug: true } },
       },
     });
 
@@ -473,6 +493,14 @@ export async function exportAgent(
             });
           }
           break;
+        case "DOCUMENT":
+          if (g.documentTemplate) {
+            tools.push({
+              source: "DOCUMENT",
+              documentTemplate: g.documentTemplate.slug,
+            });
+          }
+          break;
       }
     }
 
@@ -512,6 +540,19 @@ export async function exportAgent(
       const mcpRows = mcpIds.length
         ? await db.mcpServerConnection.findMany({
             where: { id: { in: mcpIds } },
+          })
+        : [];
+      const documentTemplateIds = [
+        ...new Set(
+          grants
+            .filter((g) => g.source === "DOCUMENT")
+            .map((g) => g.documentTemplateId)
+            .filter((x): x is bigint => x != null),
+        ),
+      ];
+      const documentTemplateRows = documentTemplateIds.length
+        ? await db.documentTemplate.findMany({
+            where: { id: { in: documentTemplateIds } },
           })
         : [];
       const integrationRows = integrationIds.length
@@ -619,6 +660,17 @@ export async function exportAgent(
             bhNameById,
           ),
           credentialRef: r.credentialRef,
+        })),
+        // No credential of any kind travels here, which is what makes a document template the
+        // simplest component: blocks, fields and style are plain JSON the destination re-validates.
+        documentTemplates: documentTemplateRows.map((r) => ({
+          name: r.name,
+          slug: r.slug,
+          description: r.description,
+          blocks: (r.blocks ?? []) as unknown[],
+          fields: (r.fields ?? []) as unknown[],
+          style: (r.style ?? {}) as Record<string, unknown>,
+          numberPrefix: r.numberPrefix,
         })),
         knowledgeBases: kbRows.map((r) => ({
           name: r.name,
@@ -1244,6 +1296,46 @@ async function createMissingComponents(
     // any time on the integration page; for a clone the operator wires the external webhook from scratch.
   }
 
+  for (const tpl of components.documentTemplates ?? []) {
+    const existing = await db.documentTemplate.findFirst({
+      where: { slug: tpl.slug },
+      select: { id: true },
+    });
+    if (existing) {
+      warnings.push({
+        code: "documentTemplateReused",
+        params: { name: tpl.name },
+        target: { kind: "document", name: tpl.slug },
+      });
+      continue;
+    }
+    // Re-validated on the way IN, never trusted as exported: a template written by a newer build can
+    // carry a block this one does not know how to render, and a warning that names the reason is a
+    // better import than a document that renders wrong in front of a customer.
+    const content = parseTemplateContent(tpl.blocks, tpl.fields);
+    if (!content.ok) {
+      warnings.push({
+        code: "documentTemplateInvalid",
+        params: { name: tpl.name, reason: content.reason },
+      });
+      continue;
+    }
+    await db.documentTemplate.create({
+      data: {
+        tenantId,
+        name: tpl.name,
+        slug: tpl.slug,
+        description: tpl.description ?? null,
+        blocks: content.content.blocks as unknown as Prisma.InputJsonValue,
+        fields: content.content.fields as unknown as Prisma.InputJsonValue,
+        style: parseDocumentStyle(
+          tpl.style,
+        ) as unknown as Prisma.InputJsonValue,
+        numberPrefix: tpl.numberPrefix ?? null,
+      },
+    });
+  }
+
   for (const kb of components.knowledgeBases) {
     const existing = await db.knowledgeBase.findFirst({
       where: { name: kb.name },
@@ -1384,6 +1476,29 @@ async function buildGrantRows(
           source: "MCP",
           mcpServerConnectionId: conn.id,
           enabledTools: g.enabledTools,
+          knowledgeBaseIds: [],
+        });
+        break;
+      }
+      case "DOCUMENT": {
+        const tpl = await db.documentTemplate.findFirst({
+          where: { slug: g.documentTemplate },
+          select: { id: true },
+        });
+        if (!tpl) {
+          warnings.push({
+            code: "documentGrantNotFound",
+            params: { name: g.documentTemplate },
+            target: { kind: "document", name: g.documentTemplate },
+          });
+          break;
+        }
+        rows.push({
+          tenantId,
+          agentId,
+          source: "DOCUMENT",
+          documentTemplateId: tpl.id,
+          enabledTools: [],
           knowledgeBaseIds: [],
         });
         break;

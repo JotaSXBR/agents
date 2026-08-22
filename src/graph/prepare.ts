@@ -108,6 +108,7 @@ import {
   type RagConfig,
 } from "./tools/assemble";
 import type { NativeToolName } from "./tools/catalog";
+import { buildDocumentTools, type DocumentSelection } from "./tools/documents";
 import {
   buildMcpContextSection,
   loadMcpToolsForAgent,
@@ -199,6 +200,7 @@ export interface AgentConfig {
   httpToolDefs: LoadedHttpToolDef[];
   mcpSelections: McpSelection[];
   integrationSelections: IntegrationSelection[];
+  documentSelections: DocumentSelection[];
   ragConfig?: RagConfig;
   langfuseCfg: LangfuseConfig | null;
   // TTS (audio reply) config + the contact's stored preference, for the reply-modality decision.
@@ -692,6 +694,7 @@ export async function loadAgentConfig(
     httpToolDefs: sel.httpToolDefs,
     mcpSelections: sel.mcpSelections,
     integrationSelections: sel.integrationSelections,
+    documentSelections: sel.documentSelections,
     ragConfig: sel.ragConfig,
     langfuseCfg,
     ttsConfig: ttsCfg,
@@ -757,19 +760,24 @@ export interface ToolsetCtx {
   // (defaults are the real ones). The assertion resolves DNS, so a hermetic test has to stub it —
   // same convention as ToolpackCtx.assertSafe.
   imageDeps?: ImageFetchDeps;
+  // Injectable for tests: where a document tool writes and reads its rendered PDF (default: the
+  // configured documents directory).
+  documentsStorageDir?: string;
   turnState?: {
     resolveRequested: boolean;
-    // Mirror of TurnState.pendingImages: send_image queues here and the runtime delivers after the
-    // turn's gates.
-    pendingImages: {
+    // Mirror of TurnState.pendingAttachments: send_image and the document tools queue here and the
+    // runtime delivers after the turn's gates.
+    pendingAttachments: {
       bytes: ArrayBuffer;
       mime: string;
       fileName: string;
       caption?: string;
       order: number;
+      tool: string;
+      kind: "image" | "document";
     }[];
     imagesInFlight: number;
-    imagesSeq: number;
+    attachmentsSeq: number;
   };
   // Structural mirror of HandoffTurnState in tools/native.ts, for the same reason as turnState.
   // Two fields, not one: the line the model wants delivered, and whether the transfer completed.
@@ -783,17 +791,19 @@ export interface ToolBuildDeps {
       conversationId: number;
       turnState?: {
         resolveRequested: boolean;
-        // Mirror of TurnState.pendingImages: send_image queues here and the runtime delivers after the
-        // turn's gates.
-        pendingImages: {
+        // Mirror of TurnState.pendingAttachments: send_image and the document tools queue here and
+        // the runtime delivers after the turn's gates.
+        pendingAttachments: {
           bytes: ArrayBuffer;
           mime: string;
           fileName: string;
           caption?: string;
           order: number;
+          tool: string;
+          kind: "image" | "document";
         }[];
         imagesInFlight: number;
-        imagesSeq: number;
+        attachmentsSeq: number;
       };
       handoffState?: { customerMessage: string | null; completed: boolean };
       transferWithSummary?: boolean;
@@ -1112,6 +1122,19 @@ export async function buildToolset(
       },
       cfg.nativeToolsAllow,
     ),
+    ...buildDocumentTools(cfg.documentSelections, {
+      tenantId: ctx.tenantId,
+      turnState: ctx.turnState,
+      // The document is bound to the conversation by its THREAD key, never by the conversation id
+      // alone: that id only identifies a conversation within one Chatwoot account, and a tenant can
+      // have several. Absent off a real conversation, and the document is then issued unbound.
+      threadId: apptThreadId ?? undefined,
+      chatwootInstanceId: ctx.conversationId > 0 ? ctx.instanceId : null,
+      conversationDbId: cfg.conversationDbId,
+      base: ctx.base,
+      storageDir: ctx.documentsStorageDir,
+      toolInstructions,
+    }),
     ...buildHttpTools(cfg.httpToolDefs, {
       resolveCredential,
       emitAck,

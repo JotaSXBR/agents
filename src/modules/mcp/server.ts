@@ -30,6 +30,10 @@ import {
   businessHoursList,
   conversationGet,
   conversationMessages,
+  documentStarterList,
+  documentTemplateGet,
+  documentTemplateList,
+  documentTemplateSchema,
   experimentGet,
   experimentList,
   experimentResultsGet,
@@ -38,6 +42,7 @@ import {
   instanceList,
   integrationCatalog,
   integrationList,
+  issuedDocumentList,
   knowledgeApprovalsList,
   knowledgeDocumentsList,
   knowledgeList,
@@ -104,6 +109,12 @@ import {
   conversationReturn,
   conversationStatus,
 } from "./write-conversations";
+import {
+  type DocumentTemplateWriteArgs,
+  documentTemplateCreate,
+  documentTemplateDelete,
+  documentTemplateUpdate,
+} from "./write-documents";
 import { tenantCreate, tenantGet, tenantList } from "./write-fleet";
 import {
   knowledgeApprove,
@@ -1437,6 +1448,149 @@ export function buildMcpServer(principal: VerifiedToken): McpServer {
       },
       async (args: { tool_id: string; dry_run?: boolean }, eff) =>
         writeContent(await toolDelete(eff, args)),
+    );
+
+    registerTenantTool(
+      server,
+      principal,
+      "document_template_list",
+      {
+        description:
+          "List the tenant's document templates (id, name, slug, the agent tool name it produces, declared fields, block count, numbering). The blocks themselves come from document_template_get.",
+        inputSchema: {},
+      },
+      async (_args, eff) => writeContent(await documentTemplateList(eff)),
+    );
+
+    registerTenantTool(
+      server,
+      principal,
+      "document_template_get",
+      {
+        description:
+          "Get one document template in full: its blocks, declared fields and style, exactly as document_template_update accepts them.",
+        inputSchema: { document_template_id: z.string() },
+      },
+      async (args: { document_template_id: string }, eff) =>
+        writeContent(await documentTemplateGet(eff, args)),
+    );
+
+    // NOTE: the block vocabulary is served HERE, on demand, instead of being published in every
+    // tools/list as the input schema of the two write tools. A document block is a six-variant
+    // discriminated union, and JSON Schema publishes a union by inlining every variant — measured at
+    // ~3.2k characters per tool, paid by every client on every session, for a contract only a caller
+    // actually authoring a template needs. Nothing on the client side renders a form for a six-way
+    // oneOf, so the cost buys nothing. The enforcement is not weakened: the service validates
+    // strictly, and its refusal names the block and the rule.
+    registerTenantTool(
+      server,
+      principal,
+      "document_template_schema",
+      {
+        description:
+          "The authoring contract for document templates: JSON Schema for every block type, for a declared field and for the style, plus the full {{token}} list. Generated from the validator itself, so it is exactly what document_template_create accepts. Call it once before authoring blocks.",
+        inputSchema: {},
+      },
+      async (_args, eff) => writeContent(await documentTemplateSchema(eff)),
+    );
+
+    registerTenantTool(
+      server,
+      principal,
+      "document_starters_list",
+      {
+        description:
+          "List the ready-made document templates (quote, proposal, receipt) that document_template_create can start from with `starter`.",
+        inputSchema: { locale: z.enum(["pt-BR", "en-US"]).optional() },
+      },
+      async (args: { locale?: "pt-BR" | "en-US" }, eff) =>
+        writeContent(await documentStarterList(eff, args)),
+    );
+
+    registerTenantTool(
+      server,
+      principal,
+      "issued_document_list",
+      {
+        description:
+          "List documents the tenant has issued (id, title, number, template, status, thread, revoked). The PDFs themselves are served only to an authenticated console session.",
+        inputSchema: {
+          template_id: z.string().optional(),
+          thread_id: z.string().optional(),
+          limit: z.number().int().optional(),
+        },
+      },
+      async (
+        args: { template_id?: string; thread_id?: string; limit?: number },
+        eff,
+      ) => writeContent(await issuedDocumentList(eff, args)),
+    );
+
+    registerTenantTool(
+      server,
+      principal,
+      "document_template_create",
+      {
+        description:
+          'Create a document template (quote, proposal, receipt, service order) that an agent can issue and attach to a reply. Previews by RENDERING the document and creates NOTHING unless dry_run is false. Call document_template_schema first for the exact shape of blocks/fields/style — this description carries only what that cannot tell you. Pass `starter` ("quote"|"proposal"|"receipt", see document_starters_list) to begin from a ready-made template and override what you need; that is the cheapest way in. `blocks` lays the document out (header, text, fields, lineItems, totals, divider); `fields` declares what the AGENT fills at issue time, and becomes the argument list of the tool that agent gets. Rules that REFUSE the call: a field name may not start with company_, empresa_, doc_ or documento_ (those already resolve to the letterhead or to the document itself); a lineItems or totals block may only point at a field of type lineItems; and any {{token}} naming neither a declared field nor a reserved name is refused, because it would render as a blank space in a document the customer keeps. totals computes its own arithmetic from the line items — never ask a model for a sum, and never declare a field to hold one. Text blocks take **bold**, *italic* and "- " bullets and nothing else; anything richer renders as its own source. The letterhead (name, tax id, address, logo) comes from the tenant company profile, not from here.',
+        inputSchema: {
+          name: z.string().optional(),
+          slug: z.string().optional(),
+          description: z.string().nullable().optional(),
+          blocks: z.array(z.record(z.string(), z.unknown())).optional(),
+          fields: z.array(z.record(z.string(), z.unknown())).optional(),
+          style: z.record(z.string(), z.unknown()).optional(),
+          number_prefix: z.string().nullable().optional(),
+          enabled: z.boolean().optional(),
+          starter: z.string().optional(),
+          locale: z.enum(["pt-BR", "en-US"]).optional(),
+          dry_run: z.boolean().optional(),
+        },
+      },
+      async (args: DocumentTemplateWriteArgs, eff) =>
+        writeContent(await documentTemplateCreate(eff, args)),
+    );
+
+    registerTenantTool(
+      server,
+      principal,
+      "document_template_update",
+      {
+        description:
+          "Patch a document template; omitted fields keep their value. blocks/fields/style take the shapes document_template_schema publishes, and sending either blocks or fields re-validates BOTH — half the rules are about how the two refer to each other. Previews by rendering the result and changes NOTHING unless dry_run is false.",
+        inputSchema: {
+          document_template_id: z.string(),
+          name: z.string().optional(),
+          slug: z.string().optional(),
+          description: z.string().nullable().optional(),
+          blocks: z.array(z.record(z.string(), z.unknown())).optional(),
+          fields: z.array(z.record(z.string(), z.unknown())).optional(),
+          style: z.record(z.string(), z.unknown()).optional(),
+          number_prefix: z.string().nullable().optional(),
+          enabled: z.boolean().optional(),
+          dry_run: z.boolean().optional(),
+        },
+      },
+      async (
+        args: DocumentTemplateWriteArgs & { document_template_id: string },
+        eff,
+      ) => writeContent(await documentTemplateUpdate(eff, args)),
+    );
+
+    registerTenantTool(
+      server,
+      principal,
+      "document_template_delete",
+      {
+        description:
+          "Delete a document template. Previews the target and deletes NOTHING unless dry_run is false. Documents already issued from it keep their own frozen copy and stay readable.",
+        inputSchema: {
+          document_template_id: z.string(),
+          dry_run: z.boolean().optional(),
+        },
+      },
+      async (args: { document_template_id: string; dry_run?: boolean }, eff) =>
+        writeContent(await documentTemplateDelete(eff, args)),
     );
 
     registerTenantTool(

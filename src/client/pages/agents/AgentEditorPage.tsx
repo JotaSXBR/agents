@@ -1746,6 +1746,24 @@ function AgentEditor() {
           'MCP server "{{name}}" was not found, so its grant was skipped.',
           p,
         );
+      case "documentGrantNotFound":
+        return t(
+          "editor.importWarning.documentGrantNotFound",
+          'Document template "{{name}}" was not found, so its grant was skipped.',
+          p,
+        );
+      case "documentTemplateReused":
+        return t(
+          "editor.importWarning.documentTemplateReused",
+          'Document template "{{name}}" already existed and was reused; check it is right.',
+          p,
+        );
+      case "documentTemplateInvalid":
+        return t(
+          "editor.importWarning.documentTemplateInvalid",
+          'Document template "{{name}}" could not be imported: {{reason}}',
+          p,
+        );
       case "integrationGrantNotFound":
         return t(
           "editor.importWarning.integrationGrantNotFound",

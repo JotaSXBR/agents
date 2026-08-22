@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { rm } from "node:fs/promises";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { AIMessage, type BaseMessage } from "@langchain/core/messages";
 import { FakeListChatModel } from "@langchain/core/utils/testing";
@@ -22,6 +23,8 @@ import { runAgentTurn } from "@/graph/runtime";
 import type { TenantContext } from "@/lib/tenancy";
 import type { ChatwootClient } from "@/modules/chatwoot/client";
 import type { NormalizedChatwootEvent } from "@/modules/chatwoot/types";
+import { documentStarter } from "@/modules/documents/starters";
+import { createDocumentTemplate } from "@/modules/documents/templates";
 import { readGuardrailHealth } from "@/modules/guardrails/health";
 import { selectClosedPrefix } from "@/modules/memory/cut";
 import { seedChatwootInstance } from "../utils/chatwoot";
@@ -32,6 +35,7 @@ import {
   HandoffThenReplyModel,
   HandoffThenThrowModel,
   ResolveThenReplyModel,
+  SendDocumentThenReplyModel,
   SendImageAndResolveModel,
   SendImageBatchModel,
   SendImageOnlyModel,
@@ -1987,6 +1991,104 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
     ]);
   });
 
+  // The whole feature, end to end and to the OBSERVABLE effect: a template the operator authored, a
+  // grant, a model that calls the tool it produced, and a customer who receives the PDF before the
+  // sentence about it. Anything short of the attachment landing on the conversation is a proxy for
+  // this, and the last mile is exactly where the previous attempt at this feature stopped.
+  test("a granted document template becomes a tool whose PDF reaches the customer first", async () => {
+    await allowImageHost();
+    await seedConversation(941, null);
+    const dir = `/tmp/fazerai-runtime-doc-${process.pid}`;
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const agent = await suDb.agent.findFirst({
+      where: { tenantId },
+      select: { id: true },
+    });
+    const tpl = await createDocumentTemplate(
+      { tenantId, userId: null, role: "TENANT_ADMIN" },
+      {
+        name: "Orçamento",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+        numberPrefix: "ORC-",
+      },
+      appDb,
+    );
+    await suDb.agentToolSelection.create({
+      data: {
+        tenantId,
+        agentId: agent?.id as bigint,
+        source: "DOCUMENT",
+        documentTemplateId: BigInt(tpl.id),
+        enabledTools: [],
+        knowledgeBaseIds: [],
+      },
+    });
+    const calls: Array<[string, number, string]> = [];
+    try {
+      const outcome = await runAgentTurn({
+        tenantId,
+        instanceId,
+        agentBotId: 9,
+        event: incoming({ conversationId: 941 }),
+        base: appDb,
+        deps: {
+          makeModel: () =>
+            new SendDocumentThenReplyModel(
+              "Segue o orçamento!",
+              "send_orcamento",
+              {
+                cliente: "Ana Ribeiro",
+                itens: [
+                  { description: "Consultoria", quantity: 2, unitPrice: 450 },
+                ],
+              },
+            ) as unknown as BaseChatModel,
+          makeClient: makeImageClient(calls),
+          checkpointer: new MemorySaver(),
+          documentsStorageDir: dir,
+        },
+      });
+      expect(outcome).toBe("posted");
+      expect(calls).toEqual([
+        ["sendFileAttachment", 941, "Orcamento-ORC-0001.pdf"],
+        ["sendMessage", 941, "Segue o orçamento!"],
+      ]);
+      // The document is a row, not only a file: it is numbered, READY, and bound to this
+      // conversation's thread key.
+      const row = await suDb.issuedDocument.findFirst({
+        where: { tenantId, threadId: `${tenantId}:${instanceId}:941` },
+        select: { id: true, status: true, number: true },
+      });
+      expect(row).toMatchObject({ status: "READY", number: 1 });
+      // And the bytes really went to the injected directory. Asserting this is not ceremony: the
+      // first version of this test passed a dir the runtime did not plumb through, so the PDF was
+      // written to the configured one and nothing said so.
+      expect(
+        await Bun.file(`${dir}/${tenantId}/${row?.id ?? 0}.pdf`).exists(),
+      ).toBe(true);
+      // And the trail names the tool the operator granted, not a constant: an operator filtering for
+      // it has to find the line it produced.
+      const flow = await suDb.executionLog.findMany({
+        where: { tenantId, stage: "tool" },
+        select: { detail: true },
+      });
+      const details = flow.map((f) => JSON.stringify(f.detail));
+      expect(
+        details.some(
+          (d) => d.includes("send_orcamento") && d.includes('"outcome":"sent"'),
+        ),
+      ).toBe(true);
+    } finally {
+      await suDb.$executeRawUnsafe(
+        `DELETE FROM agent_tool_selections WHERE tenant_id = ${tenantId}`,
+      );
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   // "Show me the three colours" is one response with three tool calls, which LangGraph runs with
   // Promise.all. Whoever answers first would otherwise be first in the conversation, and the customer
   // would read "a azul é essa" under the green one.
@@ -2068,9 +2170,14 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
     expect(calls).toEqual([["sendFileAttachment", 932, "imagem.png"]]);
   });
 
-  // The other half of that rule: when the images were the whole turn and NONE of them got through,
-  // nothing reached the customer. Reporting "empty" would let the deferred resolve close an
+  // The other half of that rule: when the attachments were the whole turn and NONE of them got
+  // through, nothing reached the customer. Reporting "empty" would let the deferred resolve close an
   // unanswered conversation, and the callers only record a turn error when the turn throws.
+  //
+  // NOTE: the assertion matches the GENERAL wording, not "no image was delivered". The queue is
+  // shared with the document tools now, and a turn whose only artefact was a quote fails through
+  // exactly this branch — a message naming images would send the operator to the image allowlist to
+  // debug a PDF read off our own disk.
   test("an image-only turn whose delivery fails does not resolve, and fails loudly", async () => {
     await allowImageHost();
     await seedConversation(933, null);
@@ -2090,7 +2197,7 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
           imageDeps,
         },
       }),
-    ).rejects.toThrow(/nenhuma imagem foi entregue/);
+    ).rejects.toThrow(/anexo: nada foi entregue/);
     expect(calls).toEqual([["sendFileAttachment", 933, "imagem.png"]]);
     expect((await mirroredStatus(933)) === "resolved").toBe(false);
   });

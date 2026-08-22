@@ -1,0 +1,343 @@
+import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
+import {
+  Button,
+  FormField,
+  Input,
+  Modal,
+  type ModalController,
+  Select,
+  SwitchField,
+  Textarea,
+  useToast,
+} from "@/client/components";
+import { api } from "@/client/lib/api";
+import { DocumentPreview } from "./DocumentPreview";
+import { useDocumentPreview } from "./useDocumentPreview";
+
+// Editing a template, deliberately narrow: name, numbering, style, and the TEXT of text blocks.
+//
+// Adding, removing and reordering blocks is API/MCP only, and the panel says so. That is a real
+// scope cut, not an oversight: a block editor that can move a totals row above the items it sums is
+// a layout tool, and building one badly is worse than not having one. What the console does own is
+// the part an operator changes weekly — the words — and the preview, which is what makes authoring
+// through the API bearable.
+
+type TemplatesData = Awaited<
+  ReturnType<(typeof api.api.v1)["document-templates"]["get"]>
+>["data"];
+export type DocumentTemplate = NonNullable<TemplatesData>["templates"][number];
+type Style = DocumentTemplate["style"];
+type Block = DocumentTemplate["blocks"][number];
+
+export interface TemplateModalPayload {
+  template: DocumentTemplate;
+}
+
+const FONTS = ["sans", "serif", "mono"] as const;
+const MARGINS = ["narrow", "normal", "wide"] as const;
+const PAGE_SIZES = ["A4", "LETTER"] as const;
+
+export function DocumentTemplateModal({
+  modal,
+  onSaved,
+}: {
+  modal: ModalController<TemplateModalPayload>;
+  onSaved: () => void;
+}) {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const template = modal.payload?.template ?? null;
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [numberPrefix, setNumberPrefix] = useState("");
+  const [enabled, setEnabled] = useState(true);
+  const [style, setStyle] = useState<Style | null>(null);
+  const [texts, setTexts] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!template) return;
+    setName(template.name);
+    setDescription(template.description ?? "");
+    setNumberPrefix(template.numberPrefix ?? "");
+    setEnabled(template.enabled);
+    setStyle({ ...template.style });
+    setTexts(
+      Object.fromEntries(
+        template.blocks
+          .filter((b): b is Block & { type: "text"; text: string } =>
+            Boolean(b && b.type === "text"),
+          )
+          .map((b) => [b.id, b.text]),
+      ),
+    );
+  }, [template]);
+
+  // The blocks as edited: only the text of `text` blocks differs from what was loaded.
+  const blocks = useMemo(() => {
+    if (!template) return [];
+    return template.blocks.map((b) =>
+      b.type === "text" && texts[b.id] !== undefined
+        ? { ...b, text: texts[b.id] }
+        : b,
+    );
+  }, [template, texts]);
+
+  const draft = useMemo(
+    () =>
+      template
+        ? {
+            id: template.id,
+            name,
+            blocks,
+            fields: template.fields,
+            style,
+            numberPrefix: numberPrefix || null,
+          }
+        : null,
+    [template, name, blocks, style, numberPrefix],
+  );
+  const preview = useDocumentPreview(draft as Record<string, unknown> | null);
+
+  async function save() {
+    if (!template || !style) return;
+    setSaving(true);
+    try {
+      const { error } = await api.api.v1["document-templates"]({
+        id: template.id,
+      }).patch({
+        name,
+        description: description || null,
+        numberPrefix: numberPrefix || null,
+        enabled,
+        blocks: blocks as Record<string, unknown>[],
+        style: style as unknown as Record<string, unknown>,
+      });
+      if (error) {
+        showToast(
+          t("documents.saveError", "Could not save this template."),
+          "error",
+        );
+        return;
+      }
+      showToast(t("common.saved", "Saved."), "success");
+      modal.close();
+      onSaved();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const textBlocks = blocks.filter((b) => b.type === "text");
+
+  return (
+    <Modal
+      modal={modal}
+      size="xl"
+      title={t("documents.editTitle", "Edit document template")}
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button variant="secondary" onClick={() => modal.close()}>
+            {t("common.cancel", "Cancel")}
+          </Button>
+          <Button onClick={save} loading={saving}>
+            {t("common.save", "Save")}
+          </Button>
+        </div>
+      }
+    >
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className="flex flex-col gap-3">
+          <FormField label={t("documents.name", "Name")}>
+            <Input value={name} onChange={(e) => setName(e.target.value)} />
+          </FormField>
+          <FormField label={t("documents.description", "Description")}>
+            <Input
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </FormField>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <FormField
+              label={t("documents.numberPrefix", "Number prefix")}
+              hint={t("documents.numberPrefixHint", 'e.g. "ORC-" → ORC-0001')}
+            >
+              <Input
+                value={numberPrefix}
+                onChange={(e) => setNumberPrefix(e.target.value)}
+              />
+            </FormField>
+            <FormField label={t("documents.toolName", "Agent tool")}>
+              <Input value={template?.toolName ?? ""} readOnly disabled />
+            </FormField>
+          </div>
+
+          {style && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <FormField label={t("documents.style.font", "Font")}>
+                <Select
+                  value={style.font}
+                  onChange={(e) =>
+                    setStyle({
+                      ...style,
+                      font: e.target.value as Style["font"],
+                    })
+                  }
+                >
+                  {FONTS.map((f) => (
+                    <option key={f} value={f}>
+                      {f}
+                    </option>
+                  ))}
+                </Select>
+              </FormField>
+              <FormField label={t("documents.style.size", "Base font size")}>
+                <Input
+                  type="number"
+                  min={8}
+                  max={14}
+                  value={style.baseFontSize}
+                  onChange={(e) =>
+                    setStyle({ ...style, baseFontSize: Number(e.target.value) })
+                  }
+                />
+              </FormField>
+              <FormField
+                label={t("documents.style.accent", "Accent color")}
+                group
+              >
+                <div className="flex items-center gap-2">
+                  <input
+                    type="color"
+                    aria-label={t("documents.style.accent", "Accent color")}
+                    value={style.accentColor}
+                    onChange={(e) =>
+                      setStyle({ ...style, accentColor: e.target.value })
+                    }
+                    className="h-9 w-12 rounded border border-border bg-bg-secondary"
+                  />
+                  <Input
+                    value={style.accentColor}
+                    onChange={(e) =>
+                      setStyle({ ...style, accentColor: e.target.value })
+                    }
+                  />
+                </div>
+              </FormField>
+              <FormField label={t("documents.style.margin", "Margins")}>
+                <Select
+                  value={style.margin}
+                  onChange={(e) =>
+                    setStyle({
+                      ...style,
+                      margin: e.target.value as Style["margin"],
+                    })
+                  }
+                >
+                  {MARGINS.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </Select>
+              </FormField>
+              <FormField label={t("documents.style.pageSize", "Page size")}>
+                <Select
+                  value={style.pageSize}
+                  onChange={(e) =>
+                    setStyle({
+                      ...style,
+                      pageSize: e.target.value as Style["pageSize"],
+                    })
+                  }
+                >
+                  {PAGE_SIZES.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </Select>
+              </FormField>
+              <FormField label={t("documents.style.currency", "Currency")}>
+                <Input
+                  value={style.currency}
+                  maxLength={3}
+                  onChange={(e) =>
+                    setStyle({
+                      ...style,
+                      currency: e.target.value.toUpperCase(),
+                    })
+                  }
+                />
+              </FormField>
+            </div>
+          )}
+
+          <SwitchField
+            label={t("documents.enabled", "Agents may issue this document")}
+            checked={enabled}
+            onCheckedChange={setEnabled}
+          />
+
+          <div className="flex flex-col gap-2">
+            <p className="font-medium text-sm text-text-primary">
+              {t("documents.textBlocks", "Text")}
+            </p>
+            <p className="text-text-muted text-xs">
+              {t(
+                "documents.textBlocksHint",
+                "Only the wording is editable here. Adding, removing or reordering blocks is done through the API or MCP.",
+              )}
+            </p>
+            {textBlocks.length === 0 ? (
+              <p className="text-sm text-text-muted">
+                {t(
+                  "documents.noTextBlocks",
+                  "This template has no text block.",
+                )}
+              </p>
+            ) : (
+              textBlocks.map((b) => (
+                <FormField key={b.id} label={b.id}>
+                  <Textarea
+                    rows={4}
+                    value={texts[b.id] ?? ""}
+                    onChange={(e) =>
+                      setTexts((prev) => ({ ...prev, [b.id]: e.target.value }))
+                    }
+                  />
+                </FormField>
+              ))
+            )}
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <p className="font-medium text-sm text-text-primary">
+              {t("documents.fields", "Fields the agent fills")}
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {(template?.fields ?? []).map((f) => (
+                <span
+                  key={f.name}
+                  className="rounded border border-border bg-bg-secondary px-2 py-0.5 font-mono text-text-secondary text-xs"
+                >
+                  {`${f.name}: ${f.type}${f.required ? " *" : ""}`}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* NOTE: `self-start` is what makes the sticky actually stick. A grid item stretches to the
+            row height by default, so `sticky` has nothing to travel within and the preview scrolls
+            away as soon as the form below it is longer than the viewport — which is exactly when it
+            is being used. */}
+        <DocumentPreview
+          state={preview}
+          className="min-h-96 lg:sticky lg:top-0 lg:max-h-[70vh] lg:self-start"
+        />
+      </div>
+    </Modal>
+  );
+}

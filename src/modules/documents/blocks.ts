@@ -1,0 +1,214 @@
+import { z } from "zod";
+
+// The vocabulary a document is written in, and the ONE place that says which shapes exist.
+//
+// A document is an ordered list of blocks, a list of `fields` the agent fills at issue time, and a
+// `style`. The set is deliberately closed: every block is something the renderer knows how to lay
+// out, so an operator authoring through the API cannot produce a document that renders as a
+// surprise. What the set does not cover goes in a `text` block as prose — that is the escape hatch,
+// and it is why there is no generic "html" or "raw" block.
+//
+// Pure and DB-free on purpose: the client bundle imports the same types, and the MCP write path
+// validates with the same schemas the REST path does.
+
+// Blocks carry their own id rather than being addressed by position. The UI edits the text of a
+// `text` block; the API and MCP reorder freely. Addressing by index means a reorder from one
+// transport makes the other write into the wrong block, and nothing would report it.
+const blockBase = {
+  id: z.string().min(1).max(40),
+  spaceAfter: z.enum(["none", "sm", "md", "lg"]).optional(),
+};
+
+const metaRowSchema = z.object({
+  label: z.string().min(1).max(60),
+  value: z.string().max(200),
+});
+
+export const headerBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal("header"),
+  title: z.string().max(200).optional(),
+  subtitle: z.string().max(300).optional(),
+  showLogo: z.boolean().optional(),
+  showCompany: z.boolean().optional(),
+  meta: z.array(metaRowSchema).max(6).optional(),
+});
+
+export const textBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal("text"),
+  text: z.string().max(5_000),
+  align: z.enum(["left", "center", "right"]).optional(),
+  variant: z.enum(["body", "heading", "muted"]).optional(),
+});
+
+// Label/value pairs in aligned columns ("Validade: 7 dias", "Condições: 50% na aprovação"). Written
+// as a block rather than left to prose because prose produces ragged columns, and ragged columns are
+// most of what makes a commercial document look improvised.
+export const fieldsBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal("fields"),
+  rows: z.array(metaRowSchema).min(1).max(20),
+  columns: z.union([z.literal(1), z.literal(2)]).optional(),
+});
+
+export const LINE_ITEM_COLUMNS = [
+  "description",
+  "quantity",
+  "unitPrice",
+  "total",
+] as const;
+export type LineItemColumn = (typeof LINE_ITEM_COLUMNS)[number];
+
+// The one block whose content is repeating structure rather than text, which is what makes a quote a
+// document instead of a message. `field` names a declared field of type `lineItems`.
+export const lineItemsBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal("lineItems"),
+  field: z.string().min(1).max(40),
+  columns: z.array(z.enum(LINE_ITEM_COLUMNS)).min(1).max(4).optional(),
+  showHeader: z.boolean().optional(),
+});
+
+export const TOTAL_ROWS = ["subtotal", "discount", "tax", "total"] as const;
+export type TotalRow = (typeof TOTAL_ROWS)[number];
+
+// Separate from `lineItems` because the two exist apart: a service order lists items with no total,
+// a fixed-price proposal states a total with no table. The arithmetic is the renderer's, never the
+// model's — a model that is asked to add up its own line items will eventually get it wrong in front
+// of a customer, and the number it got wrong is a price.
+export const totalsBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal("totals"),
+  field: z.string().min(1).max(40),
+  rows: z.array(z.enum(TOTAL_ROWS)).min(1).max(4).optional(),
+  discountField: z.string().max(40).optional(),
+  taxField: z.string().max(40).optional(),
+});
+
+export const dividerBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal("divider"),
+});
+
+export const documentBlockSchema = z.discriminatedUnion("type", [
+  headerBlockSchema,
+  textBlockSchema,
+  fieldsBlockSchema,
+  lineItemsBlockSchema,
+  totalsBlockSchema,
+  dividerBlockSchema,
+]);
+export type DocumentBlock = z.infer<typeof documentBlockSchema>;
+export type DocumentBlockType = DocumentBlock["type"];
+
+export const DOCUMENT_BLOCK_TYPES: DocumentBlockType[] = [
+  "header",
+  "text",
+  "fields",
+  "lineItems",
+  "totals",
+  "divider",
+];
+
+// ── fields: the contract the agent fills ──
+
+export const FIELD_TYPES = [
+  "text",
+  "number",
+  "date",
+  "currency",
+  "lineItems",
+] as const;
+export type DocumentFieldType = (typeof FIELD_TYPES)[number];
+
+// `name` is token-safe BY CONSTRUCTION: the same character class the token resolver accepts, so a
+// declared field is always addressable as {{name}} and no field can be declared that the resolver
+// would then refuse to see.
+export const FIELD_NAME_RE = /^[a-z][a-z0-9_]{0,39}$/;
+
+export const documentFieldSchema = z.object({
+  name: z.string().regex(FIELD_NAME_RE),
+  label: z.string().min(1).max(60),
+  type: z.enum(FIELD_TYPES),
+  required: z.boolean().optional(),
+  description: z.string().max(200).optional(),
+});
+export type DocumentField = z.infer<typeof documentFieldSchema>;
+
+// ── style ──
+
+// The three families @react-pdf/renderer ships built in. Deliberately not a bundled TTF: font files
+// are megabytes in a public repo and resolve from a path that differs between the dev tree and the
+// container, which is the failure the old renderer's header was written to avoid. Built-ins cover
+// Latin-1, so PT-BR accents render. A bundled family is purely additive later.
+export const DOCUMENT_FONTS = ["sans", "serif", "mono"] as const;
+export type DocumentFont = (typeof DOCUMENT_FONTS)[number];
+
+export const BASE_FONT_SIZE_MIN = 8;
+export const BASE_FONT_SIZE_MAX = 14;
+
+export const documentStyleSchema = z.object({
+  font: z.enum(DOCUMENT_FONTS),
+  // NOTE: no .min/.max, and the reader CLAMPS instead. "Type and choice, never size" (docs/mcp.md):
+  // a bound copied into the schema turns a clamp into a refusal, so the same write would be accepted
+  // in the console and rejected over MCP. The range lives in the description.
+  baseFontSize: z.number().int(),
+  // Written out rather than /^#[0-9a-f]{6}$/i: the `i` flag does not survive publication as JSON
+  // Schema, and a client would then refuse what this server accepts.
+  accentColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  margin: z.enum(["narrow", "normal", "wide"]),
+  pageSize: z.enum(["A4", "LETTER"]),
+  locale: z.enum(["pt-BR", "en-US"]),
+  currency: z.string().length(3),
+  footerText: z.string().max(200).optional(),
+  showPageNumbers: z.boolean(),
+});
+export type DocumentStyle = z.infer<typeof documentStyleSchema>;
+
+export const DOCUMENT_STYLE_DEFAULTS: DocumentStyle = {
+  font: "sans",
+  baseFontSize: 10,
+  accentColor: "#111827",
+  margin: "normal",
+  pageSize: "A4",
+  locale: "pt-BR",
+  currency: "BRL",
+  showPageNumbers: false,
+};
+
+export function parseDocumentStyle(value: unknown): DocumentStyle {
+  const parsed = documentStyleSchema.partial().safeParse(value ?? {});
+  const merged = {
+    ...DOCUMENT_STYLE_DEFAULTS,
+    ...(parsed.success ? parsed.data : {}),
+  };
+  return {
+    ...merged,
+    baseFontSize: Math.min(
+      BASE_FONT_SIZE_MAX,
+      Math.max(BASE_FONT_SIZE_MIN, Math.round(merged.baseFontSize)),
+    ),
+  };
+}
+
+// ── bounds ──
+
+// The preview renders on the request thread with operator-supplied input, which makes it the one
+// place a tenant can spend our CPU on a shape they chose. Both ceilings are checked BEFORE the
+// render, never during it.
+export const MAX_BLOCKS_PER_DOCUMENT = 60;
+export const MAX_LINE_ITEMS = 100;
+
+// The authoring contract, generated FROM the schemas above so it cannot drift from what the
+// validator enforces. Served on demand (the `document_template_schema` MCP tool, and the console's
+// block reference) rather than published in every tools/list: a six-variant discriminated union
+// costs thousands of characters of JSON Schema on every session, and only the caller actually
+// authoring a template needs it.
+export function documentAuthoringSchema(): Record<string, unknown> {
+  return {
+    blocks: z.toJSONSchema(documentBlockSchema),
+    fields: z.toJSONSchema(documentFieldSchema),
+    style: z.toJSONSchema(documentStyleSchema),
+  };
+}
