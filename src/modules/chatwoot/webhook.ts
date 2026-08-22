@@ -849,8 +849,44 @@ async function maybeConsumeCommandOrGate(params: {
   //
   // `disabled` wins the tie because it is the reason /reset cannot help: the command returns a
   // conversation, it does not switch an agent back on.
+  //
+  // Both halves are read FRESH, for the same reason `stillOurs` is: /reset asks this question after
+  // its cleanup, which is a dozen network calls long. `ctx.agentEnabled` came from the lookup at the
+  // top of this function, and pairing a fresh ownership read with a stale switch is how the
+  // hand-back would still reach an agent an operator turned off while the command ran. On a read
+  // that fails, the initial value stands — that is the answer this had before the re-read existed,
+  // and a transient failure must not decide it — but it is logged rather than swallowed.
+  const agentStillEnabled = async (): Promise<boolean> => {
+    const agentId = ctx.agentId;
+    if (agentId === null) return ctx.agentEnabled;
+    try {
+      const row = await runScopedOn(base, sysCtx(tenantId), (db) =>
+        db.agent.findUnique({
+          where: { id: agentId },
+          select: { enabled: true },
+        }),
+      );
+      // A row that is GONE is not an agent that can answer, so the hand-back is refused rather than
+      // falling back to what the lookup said before it was deleted. Only `findUnique` on a deleted
+      // row lands here, which is narrow — and it is the same harm this whole predicate exists to
+      // prevent, so the narrow case gets the same answer as the loud one.
+      return row?.enabled === true;
+    } catch (err) {
+      logger.warn(
+        "chatwoot: could not re-read whether the agent is enabled (conv=%s): %s",
+        String(conversationId),
+        errMsg(err),
+      );
+      return ctx.agentEnabled;
+    }
+  };
+
   const answerBlocker = async (): Promise<"none" | "ownership" | "disabled"> =>
-    !ctx.agentEnabled ? "disabled" : (await stillOurs()) ? "none" : "ownership";
+    !(await agentStillEnabled())
+      ? "disabled"
+      : (await stillOurs())
+        ? "none"
+        : "ownership";
 
   // Returns whether the message actually left. Whoever records that it was sent has to read this: the
   // away message would otherwise burn the day it just claimed, and the redirect gate would close its

@@ -181,6 +181,8 @@ async function sendReset(
     // The inbox the delivery names. The mirror follows it, so a test that seeds a conversation on
     // another inbox has to say so here or the row is moved back to the default one.
     inboxId?: number;
+    // A stand-in Prisma client, for driving a failure into one specific query.
+    base?: PrismaClient;
   } = {},
 ): Promise<void> {
   deliverySeq += 1;
@@ -230,7 +232,7 @@ async function sendReset(
     deliveryRowId: r.deliveryRowId as bigint,
     agentBotId: r.agentBotId ?? null,
     normalized: r.normalized as NonNullable<typeof r.normalized>,
-    base: appDb,
+    base: live.base ?? appDb,
   });
 }
 
@@ -1474,6 +1476,141 @@ describe.skipIf(!dbUp)(
         });
       }
     };
+
+    // The switch is read the same way ownership is: FRESH, at the moment the hand-back is decided.
+    // /reset asks after its cleanup, which is a dozen network calls long, so pairing a fresh
+    // ownership read with the agent's state from the top of the function is exactly how the
+    // conversation would still be handed to an agent an operator turned off while the command ran.
+    // The Chatwoot double doubles as the rendezvous: the switch flips on the card call, mid-cleanup.
+    test("the switch is re-read when the hand-back is decided, not before", async () => {
+      const inbox = await suDb.inbox.findFirstOrThrow({
+        where: { tenantId, chatwootInboxId: INBOX_ID },
+        select: { agentId: true },
+      });
+      const agentId = inbox.agentId as bigint;
+      const cw = fakeChatwoot();
+      const inner = cw.impl;
+      let flipped = false;
+      globalThis.fetch = (async (input, init) => {
+        if (!flipped && String(input).includes("/kanban/tasks/")) {
+          flipped = true;
+          await suDb.agent.update({
+            where: { id: agentId },
+            data: { enabled: false },
+          });
+        }
+        return inner(input, init);
+      }) as typeof fetch;
+      try {
+        await sendReset("/reset", CONV_ID, {
+          status: "open",
+          assigneeType: "User",
+        });
+
+        expect(flipped).toBe(true);
+        expect(
+          cw.calls.filter((c) =>
+            c.path.endsWith(`/conversations/${CONV_ID}/assignments`),
+          ),
+        ).toEqual([]);
+      } finally {
+        await suDb.agent.update({
+          where: { id: agentId },
+          data: { enabled: true },
+        });
+      }
+    });
+
+    // And what a FAILED re-read decides: nothing. The fallback is the value the command already had,
+    // because a transient database failure is not evidence that the operator turned the agent on.
+    // The mutation this kills is the tempting one — a catch that answers "enabled" — which would hand
+    // a human's conversation to a switched-off agent on a blip.
+    test("a failed re-read of the switch does not answer for it", async () => {
+      const inbox = await suDb.inbox.findFirstOrThrow({
+        where: { tenantId, chatwootInboxId: INBOX_ID },
+        select: { agentId: true },
+      });
+      const agentId = inbox.agentId as bigint;
+      await suDb.agent.update({
+        where: { id: agentId },
+        data: { enabled: false },
+      });
+      // Keyed on the SELECTION, not on a call count: the handler reads the agent twice before this
+      // one (the inbox runtime and the command's own context lookup), both of which have to succeed
+      // for the command to run at all, and both select more than one column. The re-read under test
+      // is the only one that asks for `enabled` alone.
+      let reads = 0;
+      const flaky = appDb.$extends({
+        query: {
+          agent: {
+            findUnique({ args, query }) {
+              const sel = (args.select ?? {}) as Record<string, unknown>;
+              if (Object.keys(sel).length === 1 && sel.enabled === true) {
+                reads += 1;
+                throw new Error("connection reset");
+              }
+              return query(args);
+            },
+          },
+        },
+      }) as unknown as PrismaClient;
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      try {
+        await sendReset("/reset", CONV_ID, {
+          status: "open",
+          assigneeType: "User",
+          base: flaky,
+        });
+
+        expect(reads).toBeGreaterThan(0);
+        // Started disabled, the re-read failed, so the answer stays "disabled" and the human keeps
+        // the conversation.
+        expect(
+          cw.calls.filter((c) =>
+            c.path.endsWith(`/conversations/${CONV_ID}/assignments`),
+          ),
+        ).toEqual([]);
+      } finally {
+        await suDb.agent.update({
+          where: { id: agentId },
+          data: { enabled: true },
+        });
+      }
+    });
+
+    // And the row being GONE, which is the other thing a re-read can find. Deleting the agent while
+    // the command runs is narrow, but the answer has to be the same one the loud case gets: nothing
+    // can answer here, so the human keeps the conversation.
+    test("an agent that no longer exists does not get the conversation either", async () => {
+      const vanished = appDb.$extends({
+        query: {
+          agent: {
+            findUnique({ args, query }) {
+              const sel = (args.select ?? {}) as Record<string, unknown>;
+              // Promise.resolve, not a bare null: Prisma awaits whatever the hook returns, and a
+              // plain null makes it throw — which would land in the catch and prove the wrong branch.
+              if (Object.keys(sel).length === 1 && sel.enabled === true)
+                return Promise.resolve(null);
+              return query(args);
+            },
+          },
+        },
+      }) as unknown as PrismaClient;
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      await sendReset("/reset", CONV_ID, {
+        status: "open",
+        assigneeType: "User",
+        base: vanished,
+      });
+
+      expect(
+        cw.calls.filter((c) =>
+          c.path.endsWith(`/conversations/${CONV_ID}/assignments`),
+        ),
+      ).toEqual([]);
+    });
 
     test("a disabled agent does not get a conversation a human is holding", async () => {
       await withDisabledAgent(async () => {
