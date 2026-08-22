@@ -36,6 +36,7 @@ const CONV_ID = 42;
 const INBOX_ID = 7;
 const KANBAN_TASK_ID = 55;
 const CONTACT_CW_ID = 808;
+const WIDGET_INBOX_ID = 8;
 
 interface CwCall {
   method: string;
@@ -177,6 +178,9 @@ async function sendReset(
     // Omit `meta` entirely: the payload then says nothing about ownership and the mirror's stored
     // trio is what the gate reads, which is how a real degraded event behaves.
     silentMeta?: boolean;
+    // The inbox the delivery names. The mirror follows it, so a test that seeds a conversation on
+    // another inbox has to say so here or the row is moved back to the default one.
+    inboxId?: number;
   } = {},
 ): Promise<void> {
   deliverySeq += 1;
@@ -189,7 +193,7 @@ async function sendReset(
     private: false,
     conversation: {
       id: convId,
-      inbox_id: INBOX_ID,
+      inbox_id: live.inboxId ?? INBOX_ID,
       status: live.status ?? "pending",
       contact_inbox: { id: 301 },
       ...(live.silentMeta ? {} : { meta: undefined }),
@@ -801,115 +805,400 @@ describe.skipIf(!dbUp)(
       await suDb.schedulerJob.deleteMany({ where: { tenantId } });
     });
 
-    // The ladder is keyed by the WIDGET thread, and its stages act on BOTH sides of the pair: stage 2
-    // re-sends the link on the WhatsApp ENTRY conversation, stage 3 closes and resolves both. So the
-    // entry conversation — which is where `redirectCount` lives, and therefore where the operator
-    // re-runs the funnel from — cannot reach it by its own thread id. Cancelling only that key left
-    // the previous episode's ladder free to message and resolve the conversation just cleared.
-    test("the redirect ladder is cancelled from the entry side of the pair", async () => {
-      const contact = await suDb.conversation.findFirstOrThrow({
+    // The redirect funnel spans a PAIR of conversations, and the four tests below are about naming
+    // it. `withRedirectPair` configures the agent's entry/widget inboxes, seeds the widget-side
+    // conversation of the same contact, and undoes both afterwards — the agent is shared by every
+    // test in this file, so the config cannot leak.
+    const withRedirectPair = async (
+      run: (widgetConvId: number, widgetThread: string) => Promise<void>,
+    ): Promise<void> => {
+      const mine = await suDb.conversation.findFirstOrThrow({
         where: { tenantId, chatwootConversationId: CONV_ID },
-        select: { contactId: true, inboxId: true },
+        select: { contactId: true, inbox: { select: { agentId: true } } },
+      });
+      const agentId = mine.inbox?.agentId as bigint;
+      const widgetInbox = await suDb.inbox.create({
+        data: {
+          tenantId,
+          chatwootInstanceId: instanceId,
+          chatwootInboxId: WIDGET_INBOX_ID,
+          name: "Site",
+          agentId,
+        },
+      });
+      await suDb.agent.update({
+        where: { id: agentId },
+        data: {
+          settings: {
+            channelRedirect: {
+              enabled: true,
+              entryInboxId: INBOX_ID,
+              widgetInboxId: WIDGET_INBOX_ID,
+            },
+          },
+        },
       });
       const widgetThread = `${tenantId}:${instanceId}:44`;
       await suDb.conversation.create({
         data: {
           tenantId,
           chatwootInstanceId: instanceId,
-          inboxId: contact.inboxId,
-          contactId: contact.contactId,
+          inboxId: widgetInbox.id,
+          contactId: mine.contactId,
           chatwootConversationId: 44,
           contactInboxId: 304,
           status: "pending",
           threadId: widgetThread,
         },
       });
-      await suDb.schedulerJob.create({
-        data: {
-          tenantId,
-          kind: "REDIRECT_FOLLOWUP",
-          dedupeKey: `redirect-followup:${widgetThread}`,
-          runAt: new Date(Date.now() + 3_600_000),
-          payload: { stage: "closing", widgetThreadId: widgetThread },
-        },
-      });
-      const cw = fakeChatwoot();
-      globalThis.fetch = cw.impl;
-      // Typed on the ENTRY conversation, whose own key was never enqueued.
-      await sendReset();
+      try {
+        await run(44, widgetThread);
+      } finally {
+        await suDb.schedulerJob.deleteMany({ where: { tenantId } });
+        await suDb.conversation.deleteMany({
+          where: { tenantId, chatwootConversationId: 44 },
+        });
+        await suDb.inbox.delete({ where: { id: widgetInbox.id } });
+        await suDb.agent.update({
+          where: { id: agentId },
+          data: { settings: {} },
+        });
+      }
+    };
 
-      const job = await suDb.schedulerJob.findFirstOrThrow({
-        where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
-        select: { status: true },
-      });
-      expect(job.status).toBe("DONE");
-      await suDb.schedulerJob.deleteMany({ where: { tenantId } });
-      await suDb.conversation.deleteMany({
-        where: { tenantId, chatwootConversationId: 44 },
+    // The ladder is keyed by the WIDGET thread, and its stages act on BOTH sides of the pair: stage 2
+    // re-sends the link on the WhatsApp ENTRY conversation, stage 3 closes and resolves both. So the
+    // entry conversation — which is where `redirectCount` lives, and therefore where the operator
+    // re-runs the funnel from — cannot reach it by its own thread id. Cancelling only that key left
+    // the previous episode's ladder free to message and resolve the conversation just cleared.
+    test("the redirect ladder is cancelled from the entry side of the pair", async () => {
+      await withRedirectPair(async (_convId, widgetThread) => {
+        await suDb.schedulerJob.create({
+          data: {
+            tenantId,
+            kind: "REDIRECT_FOLLOWUP",
+            dedupeKey: `redirect-followup:${widgetThread}`,
+            runAt: new Date(Date.now() + 3_600_000),
+            payload: { stage: "closing", widgetThreadId: widgetThread },
+          },
+        });
+        const cw = fakeChatwoot();
+        globalThis.fetch = cw.impl;
+        // Typed on the ENTRY conversation, whose own key was never enqueued.
+        await sendReset();
+
+        const job = await suDb.schedulerJob.findFirstOrThrow({
+          where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
+          select: { status: true },
+        });
+        expect(job.status).toBe("DONE");
       });
     });
 
-    // The fence on that widening. A Contact is unique per TENANT, not per Chatwoot instance, so a
-    // tenant running two accounts shares one contact row across both — and the ladder key is built
-    // from THIS instance's id plus the conversation id, which on another instance is just some other
-    // conversation's number. Without the instance predicate the reset reaches across and cancels a
-    // ladder belonging to a conversation nobody touched.
-    test("the ladder cancel does not reach the contact's other Chatwoot instance", async () => {
-      const mine = await suDb.conversation.findFirstOrThrow({
-        where: { tenantId, chatwootConversationId: CONV_ID },
-        select: { contactId: true },
-      });
-      const other = await seedChatwootInstance(suDb, {
-        tenantId,
-        accountId: 2,
-        baseUrl: "https://203.0.113.11:9",
-        adminToken: encryptJson(ADMIN_TOKEN),
-      });
-      const otherInbox = await suDb.inbox.create({
-        data: {
-          tenantId,
-          chatwootInstanceId: other.id,
-          chatwootInboxId: 8,
-          name: "Outra conta",
-        },
-      });
-      await suDb.conversation.create({
-        data: {
-          tenantId,
-          chatwootInstanceId: other.id,
-          inboxId: otherInbox.id,
-          contactId: mine.contactId,
-          chatwootConversationId: 46,
-          contactInboxId: 306,
-          status: "pending",
-          threadId: `${tenantId}:${other.id}:46`,
-        },
-      });
-      // Conversation 46 of THIS instance is a different conversation entirely, and this is its ladder.
-      await suDb.schedulerJob.create({
-        data: {
-          tenantId,
-          kind: "REDIRECT_FOLLOWUP",
-          dedupeKey: `redirect-followup:${tenantId}:${instanceId}:46`,
-          runAt: new Date(Date.now() + 3_600_000),
-          payload: { stage: "chat" },
-        },
-      });
-      const cw = fakeChatwoot();
-      globalThis.fetch = cw.impl;
-      await sendReset();
+    // The same pair, the other half of its state. `redirectClosedAt` is the CAS that makes the
+    // closing deliver at most once, and it lives on the WIDGET row — so clearing only the row the
+    // command was typed in left the funnel able to start again and unable to ever finish again:
+    // deliverRedirectClosing returns `already-closed` and the ladder ends in silence.
+    test("the paired conversation's redirect anchors are cleared too", async () => {
+      await withRedirectPair(async () => {
+        await suDb.conversation.updateMany({
+          where: { tenantId, chatwootConversationId: 44 },
+          data: {
+            redirectLinkedAt: new Date(),
+            redirectClosedAt: new Date(),
+            // Not an anchor of the episode: this one describes the widget conversation itself and
+            // the operator did not reset it.
+            testNoticeSentAt: new Date(),
+          },
+        });
+        const cw = fakeChatwoot();
+        globalThis.fetch = cw.impl;
+        await sendReset();
 
-      const job = await suDb.schedulerJob.findFirstOrThrow({
-        where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
-        select: { status: true },
+        const widget = await suDb.conversation.findFirstOrThrow({
+          where: { tenantId, chatwootConversationId: 44 },
+          select: {
+            redirectLinkedAt: true,
+            redirectClosedAt: true,
+            testNoticeSentAt: true,
+          },
+        });
+        expect(widget.redirectLinkedAt).toBeNull();
+        expect(widget.redirectClosedAt).toBeNull();
+        expect(widget.testNoticeSentAt).not.toBeNull();
       });
-      expect(job.status).toBe("PENDING");
-      await suDb.schedulerJob.deleteMany({ where: { tenantId } });
-      await suDb.conversation.deleteMany({
-        where: { tenantId, chatwootConversationId: 46 },
+    });
+
+    // The fence on the widening. Contact ids are account-wide and a tenant can run several agents on
+    // one Chatwoot instance, so "every ladder this contact is in" reaches a funnel nobody touched.
+    // The pair is whatever THIS agent's config says it is.
+    test("a reset leaves another agent's funnel for the same contact alone", async () => {
+      await withRedirectPair(async () => {
+        const mine = await suDb.conversation.findFirstOrThrow({
+          where: { tenantId, chatwootConversationId: CONV_ID },
+          select: { contactId: true },
+        });
+        const otherAgent = await suDb.agent.create({
+          data: {
+            tenantId,
+            name: "Outro funil",
+            systemPrompt: "x",
+            settings: {
+              channelRedirect: {
+                enabled: true,
+                entryInboxId: 10,
+                widgetInboxId: 11,
+              },
+            },
+          },
+        });
+        const otherWidget = await suDb.inbox.create({
+          data: {
+            tenantId,
+            chatwootInstanceId: instanceId,
+            chatwootInboxId: 11,
+            name: "Site do outro",
+            agentId: otherAgent.id,
+          },
+        });
+        const otherThread = `${tenantId}:${instanceId}:47`;
+        await suDb.conversation.create({
+          data: {
+            tenantId,
+            chatwootInstanceId: instanceId,
+            inboxId: otherWidget.id,
+            contactId: mine.contactId,
+            chatwootConversationId: 47,
+            contactInboxId: 307,
+            status: "pending",
+            threadId: otherThread,
+          },
+        });
+        await suDb.schedulerJob.create({
+          data: {
+            tenantId,
+            kind: "REDIRECT_FOLLOWUP",
+            dedupeKey: `redirect-followup:${otherThread}`,
+            runAt: new Date(Date.now() + 3_600_000),
+            payload: { stage: "chat", widgetThreadId: otherThread },
+          },
+        });
+        const cw = fakeChatwoot();
+        globalThis.fetch = cw.impl;
+        await sendReset();
+
+        const job = await suDb.schedulerJob.findFirstOrThrow({
+          where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
+          select: { status: true },
+        });
+        expect(job.status).toBe("PENDING");
+        await suDb.conversation.deleteMany({
+          where: { tenantId, chatwootConversationId: 47 },
+        });
+        await suDb.inbox.delete({ where: { id: otherWidget.id } });
+        await suDb.agent.delete({ where: { id: otherAgent.id } });
       });
-      await suDb.inbox.delete({ where: { id: otherInbox.id } });
-      await suDb.chatwootInstance.delete({ where: { id: other.id } });
+    });
+
+    // The command names ONE conversation, and the pair it belongs to is that conversation's — not
+    // any pair the same agent happens to run for the same contact. An agent can own a third inbox
+    // (support, overflow), and a /reset typed there was silently resetting the funnel's two
+    // conversations, which the operator never named.
+    test("a reset outside the pair leaves the pair alone", async () => {
+      await withRedirectPair(async (_convId, widgetThread) => {
+        const mine = await suDb.conversation.findFirstOrThrow({
+          where: { tenantId, chatwootConversationId: CONV_ID },
+          select: { contactId: true, inbox: { select: { agentId: true } } },
+        });
+        const thirdInbox = await suDb.inbox.create({
+          data: {
+            tenantId,
+            chatwootInstanceId: instanceId,
+            chatwootInboxId: 12,
+            name: "Suporte",
+            agentId: mine.inbox?.agentId,
+          },
+        });
+        await suDb.conversation.create({
+          data: {
+            tenantId,
+            chatwootInstanceId: instanceId,
+            inboxId: thirdInbox.id,
+            contactId: mine.contactId,
+            chatwootConversationId: 48,
+            contactInboxId: 308,
+            status: "pending",
+            threadId: `${tenantId}:${instanceId}:48`,
+            testActivatedAt: new Date(),
+          },
+        });
+        await suDb.conversation.updateMany({
+          where: { tenantId, chatwootConversationId: 44 },
+          data: { redirectClosedAt: new Date() },
+        });
+        await suDb.schedulerJob.create({
+          data: {
+            tenantId,
+            kind: "REDIRECT_FOLLOWUP",
+            dedupeKey: `redirect-followup:${widgetThread}`,
+            runAt: new Date(Date.now() + 3_600_000),
+            payload: { stage: "chat", widgetThreadId: widgetThread },
+          },
+        });
+        const cw = fakeChatwoot();
+        globalThis.fetch = cw.impl;
+        // Typed on the THIRD conversation: neither side of the funnel.
+        await sendReset("/reset", 48, { inboxId: 12 });
+
+        const job = await suDb.schedulerJob.findFirstOrThrow({
+          where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
+          select: { status: true },
+        });
+        expect(job.status).toBe("PENDING");
+        const widget = await suDb.conversation.findFirstOrThrow({
+          where: { tenantId, chatwootConversationId: 44 },
+          select: { redirectClosedAt: true },
+        });
+        expect(widget.redirectClosedAt).not.toBeNull();
+        await suDb.conversation.deleteMany({
+          where: { tenantId, chatwootConversationId: 48 },
+        });
+        await suDb.inbox.delete({ where: { id: thirdInbox.id } });
+      });
+    });
+
+    // Which conversation is "the widget side" when the contact has been through the funnel before.
+    // The live one: an old widget conversation is a previous episode, and its ladder was retired when
+    // it resolved. Picking it instead would cancel nothing and leave the running ladder armed.
+    test("the pair resolves to the live conversation of each side", async () => {
+      await withRedirectPair(async (_convId, widgetThread) => {
+        const widget = await suDb.conversation.findFirstOrThrow({
+          where: { tenantId, chatwootConversationId: 44 },
+          select: { inboxId: true, contactId: true },
+        });
+        await suDb.conversation.updateMany({
+          where: { tenantId, chatwootConversationId: 44 },
+          data: { lastEventAt: new Date(Date.now() - 86_400_000) },
+        });
+        // A newer widget conversation on the same inbox: this episode's real chat.
+        const liveThread = `${tenantId}:${instanceId}:49`;
+        await suDb.conversation.create({
+          data: {
+            tenantId,
+            chatwootInstanceId: instanceId,
+            inboxId: widget.inboxId,
+            contactId: widget.contactId,
+            chatwootConversationId: 49,
+            contactInboxId: 309,
+            status: "pending",
+            threadId: liveThread,
+            lastEventAt: new Date(),
+          },
+        });
+        await suDb.schedulerJob.createMany({
+          data: [
+            {
+              tenantId,
+              kind: "REDIRECT_FOLLOWUP",
+              dedupeKey: `redirect-followup:${liveThread}`,
+              runAt: new Date(Date.now() + 3_600_000),
+              payload: { stage: "chat", widgetThreadId: liveThread },
+            },
+            {
+              tenantId,
+              kind: "REDIRECT_FOLLOWUP",
+              dedupeKey: `redirect-followup:${widgetThread}`,
+              runAt: new Date(Date.now() + 3_600_000),
+              payload: { stage: "chat", widgetThreadId: widgetThread },
+            },
+          ],
+        });
+        const cw = fakeChatwoot();
+        globalThis.fetch = cw.impl;
+        await sendReset();
+
+        const jobs = await suDb.schedulerJob.findMany({
+          where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
+          select: { dedupeKey: true, status: true },
+          orderBy: { dedupeKey: "asc" },
+        });
+        expect(
+          jobs.find((j) => j.dedupeKey === `redirect-followup:${liveThread}`)
+            ?.status,
+        ).toBe("DONE");
+        await suDb.conversation.deleteMany({
+          where: { tenantId, chatwootConversationId: 49 },
+        });
+      });
+    });
+
+    // And the fence one level out. A Contact is unique per TENANT, not per Chatwoot instance, so a
+    // tenant running two accounts shares one contact row across both — and an inbox id repeats freely
+    // between accounts. Without the instance predicate the pair resolves to the other account's
+    // conversation, and the ladder key built from it names some unrelated conversation here.
+    test("the pair does not reach the contact's other Chatwoot instance", async () => {
+      await withRedirectPair(async () => {
+        const mine = await suDb.conversation.findFirstOrThrow({
+          where: { tenantId, chatwootConversationId: CONV_ID },
+          select: { contactId: true },
+        });
+        // The widget side of THIS instance goes away, so the only candidate left is the other
+        // account's — which is exactly what the predicate has to refuse.
+        await suDb.conversation.deleteMany({
+          where: { tenantId, chatwootConversationId: 44 },
+        });
+        const other = await seedChatwootInstance(suDb, {
+          tenantId,
+          accountId: 2,
+          baseUrl: "https://203.0.113.11:9",
+          adminToken: encryptJson(ADMIN_TOKEN),
+        });
+        const otherInbox = await suDb.inbox.create({
+          data: {
+            tenantId,
+            chatwootInstanceId: other.id,
+            chatwootInboxId: WIDGET_INBOX_ID,
+            name: "Site da outra conta",
+          },
+        });
+        await suDb.conversation.create({
+          data: {
+            tenantId,
+            chatwootInstanceId: other.id,
+            inboxId: otherInbox.id,
+            contactId: mine.contactId,
+            chatwootConversationId: 46,
+            contactInboxId: 306,
+            status: "pending",
+            threadId: `${tenantId}:${other.id}:46`,
+          },
+        });
+        // Conversation 46 of THIS instance is a different conversation entirely, and this is its
+        // ladder.
+        await suDb.schedulerJob.create({
+          data: {
+            tenantId,
+            kind: "REDIRECT_FOLLOWUP",
+            dedupeKey: `redirect-followup:${tenantId}:${instanceId}:46`,
+            runAt: new Date(Date.now() + 3_600_000),
+            payload: { stage: "chat" },
+          },
+        });
+        const cw = fakeChatwoot();
+        globalThis.fetch = cw.impl;
+        await sendReset();
+
+        const job = await suDb.schedulerJob.findFirstOrThrow({
+          where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
+          select: { status: true },
+        });
+        expect(job.status).toBe("PENDING");
+        await suDb.conversation.deleteMany({
+          where: { tenantId, chatwootConversationId: 46 },
+        });
+        await suDb.inbox.delete({ where: { id: otherInbox.id } });
+        await suDb.chatwootInstance.delete({ where: { id: other.id } });
+      });
     });
 
     // And the opposite fence on the reminders. They are keyed `reminder:<eventId>:<offset>`, so the

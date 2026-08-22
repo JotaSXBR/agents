@@ -35,9 +35,9 @@ import {
 import { linkRedirectConversations } from "@/modules/channel-redirect/cross-link";
 import {
   armRedirectChatFollowUp,
-  cancelContactRedirectFollowUps,
   deliverRedirectClosing,
   followUpDedupeKey,
+  resolveRedirectEpisode,
 } from "@/modules/channel-redirect/followup";
 import { runRedirectGate } from "@/modules/channel-redirect/gate";
 import {
@@ -1029,6 +1029,45 @@ async function maybeConsumeCommandOrGate(params: {
       }
     };
 
+    // The redirect episode this conversation belongs to, resolved ONCE for the two steps that need
+    // it. The funnel spans a PAIR — the entry conversation holds `redirectSentAt`/`redirectCount`,
+    // the widget one holds `redirectLinkedAt`/`redirectClosedAt`, and the ladder job is keyed by the
+    // widget thread while its stages act on both — so a command that only names this conversation
+    // reaches half of it. Which half depends on where the operator typed it, and the entry side is
+    // the one the funnel is re-run from.
+    //
+    // Resolved from the CONFIG rather than from the contact: contact ids are account-wide, so "every
+    // ladder this contact is in" also cancels another agent's live funnel. `sibling` stays null when
+    // the redirect is off, when the contact is unmirrored, or when this conversation is not one of
+    // the two sides — and then every step below falls back to naming this conversation alone, which
+    // is all it can honestly claim.
+    let redirectSibling: number | null = null;
+    let ladderConversationId = conversationId;
+    if (ctx.conv.contactId !== null && ctx.agentSettings != null) {
+      const contactDbId = ctx.conv.contactId;
+      const redirectCfg = readChannelRedirectConfig(ctx.agentSettings);
+      await step(
+        "resolve the redirect episode",
+        "episódio de redirecionamento",
+        async () => {
+          const ep = await resolveRedirectEpisode(
+            tenantId,
+            instanceId,
+            contactDbId,
+            redirectCfg,
+            base,
+          );
+          const isEntry = ep.entryConversationId === conversationId;
+          const isWidget = ep.widgetConversationId === conversationId;
+          if (!isEntry && !isWidget) return;
+          redirectSibling = isEntry
+            ? ep.widgetConversationId
+            : ep.entryConversationId;
+          ladderConversationId = ep.widgetConversationId ?? conversationId;
+        },
+      );
+    }
+
     // Clear the agent's memory thread (per contact-inbox / channel), the AgentThread marker (the
     // divider's last-conversation + the ingestion watermark) AND the compacted memory of past
     // attendances, so a reset truly starts this channel's conversation over. Only THIS channel's memory is cleared (the contact's other channels keep
@@ -1199,6 +1238,19 @@ async function maybeConsumeCommandOrGate(params: {
     // `failureNoticeSentAt` is the coalescing anchor for the "a human has to take over" note, so
     // without clearing it a fresh failure after a reset cannot announce itself — the same reasoning
     // that already clears `testNoticeSentAt`.
+    // The redirect anchors go to BOTH sides, and everything else stays on this one. The split is the
+    // whole point: `lastInboundAt`, the three notice watermarks and the failure state describe THIS
+    // conversation and mean nothing about its sibling, while the four redirect anchors describe the
+    // EPISODE and happen to be stored one pair of columns per side. Clearing only this row left
+    // `redirectClosedAt` set on the widget conversation, so the re-armed ladder's closing returned
+    // `already-closed` and the funnel could be run again but never finished again.
+    const redirectAnchors = {
+      redirectSentAt: null,
+      // A counter, so it goes back to zero rather than to null.
+      redirectCount: 0,
+      redirectLinkedAt: null,
+      redirectClosedAt: null,
+    };
     await step("clear the conversation's watermarks", "marcadores", () =>
       runScopedOn(base, sysCtx(tenantId), (db) =>
         db.conversation.update({
@@ -1209,11 +1261,7 @@ async function maybeConsumeCommandOrGate(params: {
             testNoticeSentAt: null,
             outOfHoursNoticeSentAt: null,
             awayMessageSentAt: null,
-            redirectSentAt: null,
-            // A counter, so it goes back to zero rather than to null.
-            redirectCount: 0,
-            redirectLinkedAt: null,
-            redirectClosedAt: null,
+            ...redirectAnchors,
             lastError: null,
             lastErrorAt: null,
             failureNoticeSentAt: null,
@@ -1221,35 +1269,41 @@ async function maybeConsumeCommandOrGate(params: {
         }),
       ),
     );
+    if (redirectSibling !== null) {
+      const siblingId = redirectSibling;
+      await step("clear the paired conversation's anchors", "marcadores", () =>
+        runScopedOn(base, sysCtx(tenantId), (db) =>
+          db.conversation.updateMany({
+            where: {
+              chatwootInstanceId: instanceId,
+              chatwootConversationId: siblingId,
+            },
+            data: redirectAnchors,
+          }),
+        ),
+      );
+    }
     // The other two per-conversation job kinds this episode can arm. FOLLOWUP and MEMORY_COMPACT are
     // already cancelled above; these carry exactly the same argument and were left running, so a
     // reminder from a test booking would fire at the customer referring to an episode the operator
     // believes is erased.
     //
-    // The redirect ladder is cancelled by CONTACT, not by this conversation's thread: it is keyed by
-    // the WIDGET thread while its stages message and resolve BOTH sides of the pair, so the entry
-    // conversation — where `redirectCount` lives, and therefore where the funnel is re-run from —
-    // cannot reach it by its own key. The reasoning lives with the helper. A conversation with no
-    // mirrored contact keeps the single-key cancel, which is all its thread can name.
+    // The ladder is cancelled by the key that ARMED it, which is the WIDGET side's thread — not this
+    // conversation's, unless this conversation is the widget one. Its stages message and resolve both
+    // sides of the pair, so a /reset on the entry conversation (the side the funnel is re-run from)
+    // was cancelling a key that had never been enqueued.
     await step(
       "cancel redirect follow-up",
       "follow-up de redirecionamento",
-      (): Promise<number | boolean> =>
-        ctx.conv.contactId !== null
-          ? cancelContactRedirectFollowUps(
-              tenantId,
-              instanceId,
-              ctx.conv.contactId,
-              base,
-            )
-          : cancelPendingJob(
-              tenantId,
-              "REDIRECT_FOLLOWUP",
-              followUpDedupeKey(
-                chatwootThreadId(tenantId, instanceId, conversationId),
-              ),
-              base,
-            ),
+      () =>
+        cancelPendingJob(
+          tenantId,
+          "REDIRECT_FOLLOWUP",
+          followUpDedupeKey(
+            chatwootThreadId(tenantId, instanceId, ladderConversationId),
+          ),
+          base,
+        ),
     );
     await step("cancel appointment reminders", "lembretes de agendamento", () =>
       cancelThreadAppointmentReminders(

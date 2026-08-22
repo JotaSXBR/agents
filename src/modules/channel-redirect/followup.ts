@@ -1,7 +1,6 @@
 import type { PrismaClient } from "@/../generated/prisma/client";
 import logger from "@/api/lib/logger";
 import basePrisma from "@/api/lib/prisma";
-import { chatwootThreadId } from "@/graph/checkpointer";
 import { type AgentNudge, parseThreadId, runAgentNudge } from "@/graph/nudge";
 import type { RuntimeDeps } from "@/graph/runtime";
 import { runScopedOn, type TenantContext } from "@/lib/tenancy";
@@ -47,46 +46,65 @@ export function followUpDedupeKey(widgetThreadId: string): string {
   return `redirect-followup:${widgetThreadId}`;
 }
 
-// Cancel every redirect ladder armed for a CONTACT — both sides of the pair at once.
+// The two conversations one redirect episode spans, for a contact.
 //
-// The job is keyed by the WIDGET thread (that is the conversation whose idleness the ladder measures),
-// but its stages act on BOTH conversations: stage 2 re-sends the link on the WhatsApp ENTRY
-// conversation, and stage 3 posts the closing on both and resolves both. So "cancel the ladder this
-// episode armed" cannot be asked from one conversation's thread id: a /reset typed on the entry
-// conversation — which is exactly where the funnel is re-run from, since `redirectSentAt` and
-// `redirectCount` live there — would cancel a key that was never enqueued, and the previous episode's
-// ladder would go on to message and resolve the conversation the operator just cleared.
+// The funnel is not a per-conversation thing and its state does not live in one row: the entry
+// (official WhatsApp) conversation carries `redirectSentAt`/`redirectCount`, the widget conversation
+// carries `redirectLinkedAt`/`redirectClosedAt`, and the ladder job is keyed by the WIDGET thread
+// while its stages message and resolve BOTH sides. So anything that wants to act on "this episode" —
+// /reset is the caller — has to name the pair, and neither this conversation's thread id nor the
+// contact alone can: the thread reaches one side, and the contact reaches every funnel the contact
+// was ever in, including another agent's active one (contact ids are account-wide, and a tenant can
+// run several agents on the same instance).
 //
-// The contact is the unit the funnel actually chases: one lead, two conversations. Keys that were
-// never armed simply match nothing, so the widening costs one query and cancels nothing extra.
-// Returns the number of pending ladders cancelled.
-export async function cancelContactRedirectFollowUps(
+// The pair is whatever the CONFIG says it is: the contact's most recently active conversation on the
+// configured entry inbox, and the same on the configured widget inbox. Two agents with different
+// inbox pairs resolve to disjoint episodes, which is the fence. `null` on a side means the contact
+// has no conversation there.
+export interface RedirectEpisode {
+  entryConversationId: number | null;
+  widgetConversationId: number | null;
+}
+
+export async function resolveRedirectEpisode(
   tenantId: bigint,
   instanceId: bigint,
   contactId: bigint,
+  cfg: ChannelRedirectConfig,
   base: PrismaClient = basePrisma,
-): Promise<number> {
+): Promise<RedirectEpisode> {
+  const sides = [cfg.entryInboxId, cfg.widgetInboxId].filter(
+    (id): id is number => id !== null,
+  );
+  if (sides.length === 0)
+    return { entryConversationId: null, widgetConversationId: null };
   return runScopedOn(base, sysCtx(tenantId), async (db) => {
     const convs = await db.conversation.findMany({
-      where: { contactId, chatwootInstanceId: instanceId },
-      select: { chatwootConversationId: true },
-    });
-    if (convs.length === 0) return 0;
-    const res = await db.schedulerJob.updateMany({
       where: {
-        kind: "REDIRECT_FOLLOWUP",
-        status: "PENDING",
-        dedupeKey: {
-          in: convs.map((c) =>
-            followUpDedupeKey(
-              chatwootThreadId(tenantId, instanceId, c.chatwootConversationId),
-            ),
-          ),
-        },
+        contactId,
+        chatwootInstanceId: instanceId,
+        // A narrowing, not the fence: `sideOf` below is what decides which conversation is which
+        // side, and it re-checks the inbox id. This only keeps the read off a contact's unrelated
+        // conversations.
+        inbox: { chatwootInboxId: { in: sides } },
       },
-      data: { status: "DONE" },
+      select: {
+        chatwootConversationId: true,
+        inbox: { select: { chatwootInboxId: true } },
+      },
+      // Most recently active first, so `find` below picks the live conversation of each side rather
+      // than a long-resolved one. Mirrors resolveWhatsAppSibling.
+      orderBy: { lastEventAt: "desc" },
     });
-    return res.count;
+    const sideOf = (inboxId: number | null): number | null =>
+      inboxId === null
+        ? null
+        : (convs.find((c) => c.inbox?.chatwootInboxId === inboxId)
+            ?.chatwootConversationId ?? null);
+    return {
+      entryConversationId: sideOf(cfg.entryInboxId),
+      widgetConversationId: sideOf(cfg.widgetInboxId),
+    };
   });
 }
 
