@@ -1119,6 +1119,11 @@ model Quote {
 
   @@unique([tenantId, idempotencyKey])
   @@index([tenantId])
+  // `send_quote` reads the thread's newest quote on the customer-facing path, so it filters by
+  // thread on every call. Without this it is the tenant index plus a filter, i.e. a scan of the
+  // tenant's whole quote history for a conversation that has two rows in it. The ordering is not in
+  // the index on purpose: one thread holds a handful of quotes, and sorting those is free.
+  @@index([tenantId, threadId])
   @@map("quotes")
 }
 

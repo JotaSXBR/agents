@@ -155,8 +155,35 @@ export async function generateQuote(
           idempotencyKey: params.idempotencyKey,
         },
       },
-      select: { id: true, status: true, pdfStorageKey: true, snapshot: true },
+      select: {
+        id: true,
+        status: true,
+        pdfStorageKey: true,
+        snapshot: true,
+        threadId: true,
+        conversationId: true,
+      },
     });
+    // A row that already existed keeps whatever it was born with, and `skipDuplicates` means the
+    // resolution above reached nothing: a quote created before delivery existed, or one whose first
+    // attempt ran while the conversation was not mirrored yet, would stay unbound forever and the
+    // obvious operator move — retry the same idempotency key — would not heal it. Binding it here
+    // does. The value is a pure function of (tenant, conversation), so writing it is not a change of
+    // the quote's content, which is what idempotency protects.
+    //
+    // Guarded on the conversation matching: reusing ONE key for a different conversation gets the
+    // original quote back, as promised, and must not also re-point it at the caller that lost.
+    if (
+      quote &&
+      quote.threadId === null &&
+      threadId !== null &&
+      quote.conversationId === (params.conversationId ?? null)
+    ) {
+      await db.quote.updateMany({
+        where: { id: quote.id, threadId: null },
+        data: { threadId },
+      });
+    }
     const tenant = await db.tenant.findFirst({ select: { name: true } });
     return { quote, tenantName: tenant?.name ?? "" };
   });

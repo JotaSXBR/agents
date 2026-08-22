@@ -225,6 +225,67 @@ describe.skipIf(!dbUp)("sending a quote to the customer", () => {
       expect(row.threadId).toBeNull();
     });
 
+    // `skipDuplicates` means a second call with the same key reaches an EXISTING row, so the
+    // resolution above would land nowhere and a quote first generated while the conversation was
+    // not mirrored yet — or before this path existed at all — would stay undeliverable forever.
+    // Retrying the same key is the obvious operator move, and it has to heal the binding.
+    test("retrying the same key binds a quote that was generated unbound", async () => {
+      const conv = convSeq++;
+      const first = await quoteFor(conv, "bind-heals");
+      expect(
+        (
+          await suDb.quote.findUniqueOrThrow({
+            where: { id: BigInt(first.id) },
+            select: { threadId: true },
+          })
+        ).threadId,
+      ).toBeNull();
+
+      await seedConversation(instanceA, conv);
+      const again = await quoteFor(conv, "bind-heals");
+      expect(again.id).toBe(first.id);
+      const row = await suDb.quote.findUniqueOrThrow({
+        where: { id: BigInt(first.id) },
+        select: { threadId: true },
+      });
+      expect(row.threadId).toBe(thread(instanceA, conv));
+    });
+
+    // Idempotency promises the ORIGINAL quote back, and that has to include the conversation it was
+    // always for: a caller reusing one key for a second conversation must not re-point the first
+    // customer's document at the second one.
+    test("reusing one key for another conversation does not re-point the quote", async () => {
+      const first = await freshConversation();
+      const second = await freshConversation();
+      const q = await generateQuote({
+        tenantId,
+        idempotencyKey: "bind-reuse",
+        snapshot: SNAPSHOT,
+        conversationId: BigInt(first),
+        base: appDb,
+        storageDir: DIR,
+      });
+      await suDb.quote.update({
+        where: { id: BigInt(q.id) },
+        data: { threadId: null },
+      });
+      const again = await generateQuote({
+        tenantId,
+        idempotencyKey: "bind-reuse",
+        snapshot: SNAPSHOT,
+        conversationId: BigInt(second),
+        base: appDb,
+        storageDir: DIR,
+      });
+      expect(again.id).toBe(q.id);
+      const row = await suDb.quote.findUniqueOrThrow({
+        where: { id: BigInt(q.id) },
+        select: { threadId: true, conversationId: true },
+      });
+      expect(row.threadId).toBeNull();
+      expect(row.conversationId).toBe(BigInt(first));
+    });
+
     test("a caller who names the thread outright is believed", async () => {
       const q = await generateQuote({
         tenantId,

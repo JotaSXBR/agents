@@ -1259,6 +1259,14 @@ function sendQuoteTool(ctx: ToolCtx) {
       // Queued, not sent, for the same reason as send_image: delivery happens after the turn's
       // gates, so a turn that is superseded, taken over or blocked must not have already put a
       // priced document in front of the customer.
+      //
+      // NOTE: Deliberately checked HERE and not again at delivery. This call is the moment the turn
+      // commits to the document, and the model writes the rest of its answer around it ("segue o
+      // orçamento") — a revocation landing during the seconds that follow would, with a re-check,
+      // drop the file and leave a message promising an attachment that never arrives. The one place
+      // the queue IS dropped is the output guardrail, and there the reply text is replaced in the
+      // same breath, so the pair stays consistent. Same shape as the deferred resolve: the intent is
+      // decided when the tool runs.
       const turnState = ctx.turnState;
       if (!turnState) {
         return "Não é possível anexar o orçamento neste momento (mensagem proativa). Diga ao cliente que ele será enviado na conversa.";
