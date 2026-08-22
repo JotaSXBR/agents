@@ -354,7 +354,7 @@ export async function appointmentReminderHandler(
     return stamped;
   };
 
-  // Asked TWICE, and the two calls buy different things. Here it saves the Google round trip, which
+  // NOTE: Asked TWICE, and the two calls buy different things. Here it saves the Google round trip, which
   // holds this handler for up to ten seconds. After it — see below — is where the window actually
   // closes, because a /reset arriving during that call would otherwise find the answer already read.
   if (await retired()) return { outcome: "done" };
@@ -380,7 +380,7 @@ export async function appointmentReminderHandler(
     }
   }
 
-  // The boundary that matters: the last thing before the customer hears from us. The check above
+  // NOTE: The boundary that matters: the last thing before the customer hears from us. The check above
   // ran before a network call long enough for the reset to land inside it.
   if (await retired()) return { outcome: "done" };
 

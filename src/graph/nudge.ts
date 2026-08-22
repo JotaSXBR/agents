@@ -445,7 +445,7 @@ export async function runAgentNudge(
   const stillWanted = async (): Promise<boolean> =>
     params.stillWanted === undefined || (await params.stillWanted());
 
-  // Asked HERE, alongside the live gate and for its reason: before any model spend. It buys more
+  // NOTE: Asked HERE, alongside the live gate and for its reason: before any model spend. It buys more
   // than the money, though — an invoked graph writes the proactive turn into the conversation's
   // thread, so a retired job asked only at the send boundary would still leave memory of a message
   // nobody received.
@@ -1013,7 +1013,7 @@ export async function runAgentNudge(
       await applyPostActions();
       return "silent";
     }
-    // Asked again over the same stretch the ownership and the window are re-asked over: the judge's
+    // NOTE: Asked again over the same stretch the ownership and the window are re-asked over: the judge's
     // model call. Nothing has reached the customer yet, so aborting here costs nothing — and this is
     // the last point before it does.
     if (!(await stillWanted())) return "stale";
@@ -1037,6 +1037,12 @@ export async function runAgentNudge(
     // below already knows what to do with either: `canMessagePost` carries the first, and the
     // second is answered by asking again.
   }
+
+  // NOTE: The terminal deliveries — template, the outside-window note, and the plain note below — are the
+  // three ends this function has that the guardrail branch does not cover, and they are reached
+  // AFTER the turn's own model call. The check inside that branch answers for the judge's call; this
+  // one answers for the generation, which every path pays for whether guardrails are on or not.
+  if (!(await stillWanted())) return "stale";
 
   if (canMessagePre && canMessagePost) {
     if (sendModeNow() === "template") {

@@ -328,9 +328,16 @@ async function resolveWhatsAppSibling(
   });
 }
 
-export type WhatsAppFollowUpOutcome = "sent" | "no-sibling" | "misconfigured";
+export type WhatsAppFollowUpOutcome =
+  | "retired"
+  | "sent"
+  | "no-sibling"
+  | "misconfigured";
 
 export interface SendWhatsAppFollowUpParams {
+  // Asked immediately before the send, after the sibling lookup and the token mint — both of which
+  // are round trips a /reset can land inside. Absent, the answer is yes.
+  stillWanted?: () => Promise<boolean>;
   tenantId: bigint;
   instanceId: bigint;
   agentId: bigint;
@@ -379,6 +386,9 @@ export async function sendWhatsAppFollowUp(
     base: p.base,
     botToken: bot?.accessToken,
   });
+  // NOTE: The link mint above is an HTTP round trip to Chatwoot, so the answer the caller had is older than
+  // this line. Nothing has left yet, which makes this the last free place to stop.
+  if (p.stillWanted && !(await p.stillWanted())) return "retired";
   const sw = readServiceWindowConfig(p.settings);
   const mode = proactiveSendMode(sw, sibling.lastInboundAt, p.now, {
     channelType: sibling.channelType,
@@ -514,13 +524,14 @@ export async function redirectFollowUpHandler(
   }
 
   if (payload.stage === "whatsapp") {
-    // The two stages below send FIXED text rather than a nudge, so `stillWanted` never reaches them:
+    // NOTE: The two stages below send FIXED text rather than a nudge, so `stillWanted` never reaches them:
     // the question is asked here instead, immediately before the send. Both cross channels — this one
     // messages the WhatsApp sibling, the closing messages and RESOLVES both — so a stamp that landed
     // while the config and the sibling were being resolved has to be seen.
     if (await retired()) return { outcome: "done" };
     if (cfg.waFollowupEnabled && entryInboxId !== null) {
       const outcome = await sendWhatsAppFollowUp({
+        stillWanted: async () => !(await retired()),
         tenantId,
         instanceId: parsed.instanceId,
         agentId,
@@ -553,6 +564,7 @@ export async function redirectFollowUpHandler(
   if (await retired()) return { outcome: "done" };
   if (cfg.closingEnabled && entryInboxId !== null) {
     await deliverRedirectClosing({
+      stillWanted: async () => !(await retired()),
       tenantId,
       instanceId: parsed.instanceId,
       widgetConversationId: parsed.conversationId,
@@ -594,6 +606,10 @@ async function deliverClosing(
 }
 
 export interface DeliverRedirectClosingParams {
+  // Asked twice inside: before the watermark is claimed (a retired ladder must not burn the
+  // at-most-once anchor) and again before the sends, after the reads and the client build. Absent,
+  // the answer is yes — the resolve-transition caller has no job to retire.
+  stillWanted?: () => Promise<boolean>;
   tenantId: bigint;
   instanceId: bigint;
   // The WIDGET conversation's chatwootConversationId. The closing watermark lives on this row; the agent
@@ -624,20 +640,6 @@ export async function deliverRedirectClosing(
 ): Promise<DeliverRedirectClosingOutcome> {
   const base = p.base ?? basePrisma;
   const now = new Date();
-  // Claim the closing: set the watermark only if still unset. rowcount 1 ⇒ we own this delivery.
-  const won = await runScopedOn(base, sysCtx(p.tenantId), async (db) => {
-    const res = await db.conversation.updateMany({
-      where: {
-        tenantId: p.tenantId,
-        chatwootInstanceId: p.instanceId,
-        chatwootConversationId: p.widgetConversationId,
-        redirectClosedAt: null,
-      },
-      data: { redirectClosedAt: now },
-    });
-    return res.count === 1;
-  });
-  if (!won) return "already-closed";
 
   // Everything the sends need — the agent (bot token), the widget conv's channel + lastInboundAt, and the
   // service-window config — derived from the widget conversation. Both channels post via THIS agent's bot.
@@ -662,8 +664,8 @@ export async function deliverRedirectClosing(
     });
     return { widget, agentId: widget.inbox.agentId, settings: agent?.settings };
   });
-  // No agent bound to the widget inbox (shouldn't happen once redirect is live): the watermark is set,
-  // nothing to post.
+  // NOTE: No agent bound to the widget inbox (shouldn't happen once redirect is live): nothing to post, and
+  // now nothing claimed either — the anchor stays free for a trigger that CAN deliver.
   if (!cx) return "delivered";
 
   const bot = await loadAgentBot(p.tenantId, p.instanceId, cx.agentId, base);
@@ -673,6 +675,28 @@ export async function deliverRedirectClosing(
     makeClient: p.deps?.makeClient,
   });
   const sw = readServiceWindowConfig(cx.settings);
+
+  // NOTE: The retirement fence and the CLAIM sit together, here rather than at the top, and the ordering is
+  // the point: everything above is a read, and claiming before them meant a ladder retired mid-read
+  // burned the at-most-once anchor on a closing it then refused to deliver — leaving a funnel that
+  // could never close again. Claiming last costs a loser of the race a few reads it will discard,
+  // which is the cheaper side of the trade.
+  if (p.stillWanted && !(await p.stillWanted())) return "already-closed";
+
+  // Claim the closing: set the watermark only if still unset. rowcount 1 ⇒ we own this delivery.
+  const won = await runScopedOn(base, sysCtx(p.tenantId), async (db) => {
+    const res = await db.conversation.updateMany({
+      where: {
+        tenantId: p.tenantId,
+        chatwootInstanceId: p.instanceId,
+        chatwootConversationId: p.widgetConversationId,
+        redirectClosedAt: null,
+      },
+      data: { redirectClosedAt: now },
+    });
+    return res.count === 1;
+  });
+  if (!won) return "already-closed";
 
   // Chat (website widget): post the goodbye + resolve. Skipped on the resolve-path, where the chat is
   // already being resolved by the trigger. A web widget has no 24h window → proactiveSendMode → freeform.

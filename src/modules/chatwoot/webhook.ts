@@ -867,7 +867,7 @@ async function maybeConsumeCommandOrGate(params: {
           select: { enabled: true },
         }),
       );
-      // A row that is GONE is not an agent that can answer, so the hand-back is refused rather than
+      // NOTE: A row that is GONE is not an agent that can answer, so the hand-back is refused rather than
       // falling back to what the lookup said before it was deleted. Only `findUnique` on a deleted
       // row lands here, which is narrow — and it is the same harm this whole predicate exists to
       // prevent, so the narrow case gets the same answer as the loud one.
@@ -1341,7 +1341,7 @@ async function maybeConsumeCommandOrGate(params: {
         ),
       );
     }
-    // The other two per-conversation job kinds this episode can arm. FOLLOWUP and MEMORY_COMPACT are
+    // NOTE: The other two per-conversation job kinds this episode can arm. FOLLOWUP and MEMORY_COMPACT are
     // already cancelled above; these carry exactly the same argument and were left running, so a
     // reminder from a test booking would fire at the customer referring to an episode the operator
     // believes is erased.
@@ -1360,7 +1360,7 @@ async function maybeConsumeCommandOrGate(params: {
           base,
         ),
     );
-    // Both sides of the pair, for the same reason the ladder is cancelled by the widget's key: in a
+    // NOTE: Both sides of the pair, for the same reason the ladder is cancelled by the widget's key: in a
     // redirect episode the AI does not serve the entry conversation at all — the gate answers there
     // with a fixed message and no model, and every turn (so every booking) happens in the widget
     // (docs/channel-redirect.md). A /reset typed on the entry side would therefore cancel reminders
@@ -1908,7 +1908,7 @@ export async function processChatwootDelivery(
   // Hoisted so the ingestion pass below can tell an out-of-hours-silenced incoming (consumed) from an
   // answered one. Stays false on every path that never runs the gate.
   let consumed = false;
-  // `act || commandActive`, and the second half is the whole point: a control command is the
+  // NOTE: `act || commandActive`, and the second half is the whole point: a control command is the
   // OPERATOR driving the tooling, not the agent speaking, so bot ownership is not its business. The
   // conversation a human took over is exactly where /reset has to work, and it is the state `act`
   // refuses — measured, not assumed: with a `User` assignee neither /teste nor /reset produced a

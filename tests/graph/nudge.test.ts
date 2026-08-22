@@ -1414,6 +1414,44 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
     );
   });
 
+  // The third read, and the one that covers the deliveries the branch above never reaches: the
+  // template, the outside-window note, and the plain note to the operator. A conversation a human
+  // holds takes that last one, and it is a write to Chatwoot like any other — so a retire that
+  // landed while the turn was generating must stop it too.
+  test("work retired while the turn generates is not even noted", async () => {
+    const threadId = `${tenantId}:${instanceId}:9982`;
+    await seedConv(9982, "User");
+    const s = stub();
+    // The predicate itself is the clock: yes on the read that precedes the turn, no on the one the
+    // terminal deliveries take. There is no other hook between them on this path — the fake model
+    // reports no usage, so `persistUsage` never fires, and the client is built before generation.
+    let asks = 0;
+    const outcome = await runAgentNudge({
+      tenantId,
+      threadId,
+      nudge: { source: "followup", kind: "inactivity", step: 1 },
+      postActions: { assignLabels: ["follow-up"], resolve: true },
+      stillWanted: async () => {
+        asks += 1;
+        return asks < 2;
+      },
+      base: appDb,
+      deps: {
+        makeModel: (() =>
+          new FakeListChatModel({ responses: ["Ainda por aí?"] })) as never,
+        makeClient: s.makeClient,
+        checkpointer: new MemorySaver(),
+        persistUsage: async () => {},
+      },
+    });
+    expect(outcome).toBe("stale");
+    expect(asks).toBe(2);
+    expect(s.notes).toEqual([]);
+    expect(s.messages).toEqual([]);
+    expect(s.resolved).toEqual([]);
+    expect(s.labelSets).toEqual([]);
+  });
+
   // And the first read, which buys something the second cannot: the turn is never RUN. Asking only
   // at the send boundary would still invoke the graph, and an invoked graph writes the proactive
   // turn into the conversation's thread — memory nobody was messaged about.
