@@ -169,26 +169,25 @@ export async function cancelAppointmentReminders(
 // The calendar event itself is deliberately NOT touched. Deleting a real booking is not what the
 // operator asked for by typing /reset, and it is not undoable.
 //
+// UNCONDITIONAL, and that is why the caller runs it BEFORE its slow work rather than after. /reset is
+// not atomic with the conversation: a turn arriving during the cleanup can book or reschedule, and
+// retiring what that turn armed loses reminders for real appointments (the command also clears
+// `lastInboundAt`, so nothing re-arms them). Sparing them by age does not work — enqueueJob upserts on
+// `reminder:<eventId>:<offset>`, so a reschedule keeps the row's `created_at` and a claim moves its
+// `updated_at`; both columns answer a question about the ROW, not about the arm. Ordering answers it
+// instead: retire first, and an arm that lands afterwards revives its own row, because that same
+// upsert writes `status: PENDING` with a fresh payload and run time. What is left is the window
+// between reading the command and this statement committing, where "before or after the command" has
+// no answer to get right.
+//
 // Returns the number of rows retired.
 export async function cancelThreadAppointmentReminders(
   tenantId: bigint,
   threadId: string,
   base: PrismaClient = basePrisma,
-  // NOTE: Only rows CREATED at or before this instant. /reset is the caller and it is not atomic with
-  // the conversation: a customer message arriving during the cleanup runs a turn, and that turn can
-  // BOOK something. Retiring unconditionally then cancels reminders for an appointment made after
-  // the command was typed — and since the command also clears `lastInboundAt`, nothing re-arms them,
-  // so a real booking silently loses its reminders. A new booking is new rows (the key carries the
-  // event id), so the cutoff spares exactly it.
-  //
-  // `created_at` and never `updated_at`: the scheduler stamps the latter when it CLAIMS a row, so a
-  // reminder armed long before the command but picked up during it would read as new and be spared —
-  // the worst direction, since that is precisely the in-flight reminder the tombstone exists to stop.
-  armedBefore?: Date,
 ): Promise<number> {
   return runScopedOn(base, sysCtx(tenantId), async (db) => {
     const stamp = JSON.stringify({ cancelledAt: new Date().toISOString() });
-    const cutoff = armedBefore ?? new Date(8_640_000_000_000_000);
     return db.$executeRaw`
       UPDATE scheduler_jobs
          SET status = 'DONE',
@@ -197,8 +196,7 @@ export async function cancelThreadAppointmentReminders(
              updated_at = now()
        WHERE tenant_id = ${tenantId}
          AND kind = 'APPOINTMENT_REMINDER'
-         AND payload->>'threadId' = ${threadId}
-         AND created_at <= ${cutoff}`;
+         AND payload->>'threadId' = ${threadId}`;
   });
 }
 

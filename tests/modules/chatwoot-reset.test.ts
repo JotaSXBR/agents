@@ -18,6 +18,7 @@ import {
   processChatwootDelivery,
   receiveChatwootWebhook,
 } from "@/modules/chatwoot/webhook";
+import { enqueueJob } from "@/modules/scheduler/service";
 import { generateRouteToken } from "@/modules/webhooks/inbound/route-token";
 import { seedChatwootInstance } from "../utils/chatwoot";
 
@@ -1636,35 +1637,36 @@ describe.skipIf(!dbUp)(
     });
 
     // The conversation stays actionable while the command runs, so a customer message arriving in
-    // that window runs a turn — and that turn can BOOK something. Retiring unconditionally cancels
-    // reminders for an appointment made after the command was typed, and since the command also
-    // clears `lastInboundAt` nothing re-arms them: a real booking silently loses its reminders. The
-    // Chatwoot double is the rendezvous; the new reminder is armed mid-cleanup.
-    test("work armed while the reset runs belongs to the next episode", async () => {
+    // that window runs a turn — and that turn can RESCHEDULE, which re-arms the very rows the reset
+    // is about to reach. This is the case no age test can tell apart: enqueueJob upserts on
+    // `reminder:<eventId>:<offset>`, so the re-armed row is the SAME row, with the same `created_at`.
+    // What saves it is the ordering — the retirement runs before this cleanup, so the upsert lands
+    // after the tombstone and revives its own row. The Chatwoot double is the rendezvous, and the
+    // re-arm goes through the real enqueueJob because the `status: PENDING` it writes is the fact the
+    // whole ordering rests on.
+    test("a reschedule during the cleanup keeps its reminders", async () => {
       const threadId = `${tenantId}:${instanceId}:${CONV_ID}`;
-      await suDb.schedulerJob.create({
-        data: {
-          tenantId,
-          kind: "APPOINTMENT_REMINDER",
-          dedupeKey: "reminder:evt-old:60",
-          runAt: new Date(Date.now() + 3_600_000),
-          payload: { threadId, eventId: "evt-old", calendarId: "c" },
-        },
+      await enqueueJob({
+        tenantId,
+        kind: "APPOINTMENT_REMINDER",
+        dedupeKey: "reminder:evt-1:60",
+        runAt: new Date(Date.now() + 3_600_000),
+        payload: { threadId, eventId: "evt-1", calendarId: "c" },
+        base: suDb,
       });
       const cw = fakeChatwoot();
       const inner = cw.impl;
-      let armed = false;
+      let rearmed = false;
       globalThis.fetch = (async (input, init) => {
-        if (!armed && String(input).includes("/kanban/tasks/")) {
-          armed = true;
-          await suDb.schedulerJob.create({
-            data: {
-              tenantId,
-              kind: "APPOINTMENT_REMINDER",
-              dedupeKey: "reminder:evt-new:60",
-              runAt: new Date(Date.now() + 3_600_000),
-              payload: { threadId, eventId: "evt-new", calendarId: "c" },
-            },
+        if (!rearmed && String(input).includes("/kanban/tasks/")) {
+          rearmed = true;
+          await enqueueJob({
+            tenantId,
+            kind: "APPOINTMENT_REMINDER",
+            dedupeKey: "reminder:evt-1:60",
+            runAt: new Date(Date.now() + 7_200_000),
+            payload: { threadId, eventId: "evt-1", calendarId: "c" },
+            base: suDb,
           });
         }
         return inner(input, init);
@@ -1672,28 +1674,75 @@ describe.skipIf(!dbUp)(
       try {
         await sendReset();
 
-        expect(armed).toBe(true);
-        const rows = await suDb.schedulerJob.findMany({
-          where: { tenantId, kind: "APPOINTMENT_REMINDER" },
-          select: { dedupeKey: true, status: true },
-          orderBy: { dedupeKey: "asc" },
+        expect(rearmed).toBe(true);
+        const row = await suDb.schedulerJob.findFirstOrThrow({
+          where: { tenantId, dedupeKey: "reminder:evt-1:60" },
+          select: { status: true, payload: true },
         });
-        expect(rows.map((r) => [r.dedupeKey, r.status])).toEqual([
-          // Armed before the command: retired with the episode it belongs to.
-          ["reminder:evt-new:60", "PENDING"],
-          ["reminder:evt-old:60", "DONE"],
-        ]);
+        // Live again, and the tombstone gone with the payload the upsert replaced: the handler that
+        // eventually claims this row has nothing telling it to stand down.
+        expect(row.status).toBe("PENDING");
+        expect(
+          (row.payload as { cancelledAt?: string })?.cancelledAt,
+        ).toBeUndefined();
       } finally {
         globalThis.fetch = originalFetch;
         await suDb.schedulerJob.deleteMany({ where: { tenantId } });
       }
     });
 
-    // The cutoff reads the IMMUTABLE column. `updated_at` is the scheduler's own bookkeeping — a
-    // CLAIM stamps it — so a reminder armed long before the command but picked up by a worker while
-    // it runs would read as newly armed and be spared: exactly the in-flight reminder the tombstone
-    // exists to stop, walking away from the reset that was supposed to retire it.
-    test("a reminder claimed mid-reset is still work the command was asked about", async () => {
+    // The same window on the other kind. The ladder's row is permanent (one per widget thread), so a
+    // widget message during the cleanup re-arms THE row the reset is about to retire.
+    test("a redirect ladder re-armed during the cleanup survives", async () => {
+      const threadId = `${tenantId}:${instanceId}:${CONV_ID}`;
+      await enqueueJob({
+        tenantId,
+        kind: "REDIRECT_FOLLOWUP",
+        dedupeKey: `redirect-followup:${threadId}`,
+        runAt: new Date(Date.now() + 3_600_000),
+        payload: { stage: "chat", widgetThreadId: threadId },
+        base: suDb,
+      });
+      const cw = fakeChatwoot();
+      const inner = cw.impl;
+      let rearmed = false;
+      globalThis.fetch = (async (input, init) => {
+        if (!rearmed && String(input).includes("/kanban/tasks/")) {
+          rearmed = true;
+          await enqueueJob({
+            tenantId,
+            kind: "REDIRECT_FOLLOWUP",
+            dedupeKey: `redirect-followup:${threadId}`,
+            runAt: new Date(Date.now() + 7_200_000),
+            payload: { stage: "chat", widgetThreadId: threadId },
+            base: suDb,
+          });
+        }
+        return inner(input, init);
+      }) as typeof fetch;
+      try {
+        await sendReset();
+
+        expect(rearmed).toBe(true);
+        const row = await suDb.schedulerJob.findFirstOrThrow({
+          where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
+          select: { status: true, payload: true },
+        });
+        expect(row.status).toBe("PENDING");
+        expect(
+          (row.payload as { cancelledAt?: string })?.cancelledAt,
+        ).toBeUndefined();
+      } finally {
+        globalThis.fetch = originalFetch;
+        await suDb.schedulerJob.deleteMany({ where: { tenantId } });
+      }
+    });
+
+    // No status filter on the retirement, and that is deliberate: a row a worker has ALREADY claimed
+    // is precisely the in-flight reminder the tombstone exists to stop. Only the stamp reaches it —
+    // the handler re-reads it mid-run — so a retirement that skipped CLAIMED rows would let the one
+    // reminder that is actively on its way to the customer walk away from the reset.
+    test("a reminder already claimed is tombstoned too", async () => {
       const threadId = `${tenantId}:${instanceId}:${CONV_ID}`;
       await suDb.schedulerJob.create({
         data: {
@@ -1701,27 +1750,15 @@ describe.skipIf(!dbUp)(
           kind: "APPOINTMENT_REMINDER",
           dedupeKey: "reminder:evt-claimed:60",
           runAt: new Date(Date.now() + 3_600_000),
+          status: "CLAIMED",
           payload: { threadId, eventId: "evt-claimed", calendarId: "c" },
         },
       });
       const cw = fakeChatwoot();
-      const inner = cw.impl;
-      let claimed = false;
-      globalThis.fetch = (async (input, init) => {
-        if (!claimed && String(input).includes("/kanban/tasks/")) {
-          claimed = true;
-          // What claimWhere does to the row: status moves and `updated_at` goes with it.
-          await suDb.schedulerJob.updateMany({
-            where: { tenantId, dedupeKey: "reminder:evt-claimed:60" },
-            data: { status: "CLAIMED" },
-          });
-        }
-        return inner(input, init);
-      }) as typeof fetch;
+      globalThis.fetch = cw.impl as typeof fetch;
       try {
         await sendReset();
 
-        expect(claimed).toBe(true);
         const row = await suDb.schedulerJob.findFirstOrThrow({
           where: { tenantId, dedupeKey: "reminder:evt-claimed:60" },
           select: { payload: true },
