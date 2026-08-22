@@ -304,6 +304,69 @@ describe.skipIf(!dbUp)("sending a quote to the customer", () => {
     });
   });
 
+  // The upgrade path. Reads the migration's OWN SQL and runs it as the RLS-bound app role, because
+  // the failure this backfill has to avoid is not a wrong result, it is a silent empty one: `quotes`
+  // and `conversations` both carry FORCE ROW LEVEL SECURITY, so a migration role that is the table
+  // owner without being a superuser matches zero rows and reports success (issue #106). Running it
+  // as the superuser handle would prove nothing about the line that makes it work.
+  describe("the backfill for quotes that predate delivery", () => {
+    async function runBackfill() {
+      const sql = await Bun.file(
+        `${import.meta.dir}/../../prisma/migrations/20260822210000_quotes_thread_backfill/migration.sql`,
+      ).text();
+      const statements = sql
+        .split("\n")
+        .filter((l) => !l.trimStart().startsWith("--"))
+        .join("\n")
+        .split(";")
+        .map((st) => st.trim())
+        .filter(Boolean);
+      expect(statements.length).toBeGreaterThan(1);
+      // One connection for the whole script: `SET` is session state, and a pooled client is free to
+      // hand each statement a different connection.
+      await appDb.$transaction(async (tx) => {
+        for (const st of statements) await tx.$executeRawUnsafe(st);
+      });
+    }
+
+    test("an unbound quote whose conversation is mirrored gets its thread", async () => {
+      const conv = convSeq++;
+      const q = await quoteFor(conv, "backfill-bound");
+      await seedConversation(instanceA, conv);
+      await runBackfill();
+      const row = await suDb.quote.findUniqueOrThrow({
+        where: { id: BigInt(q.id) },
+        select: { threadId: true },
+      });
+      expect(row.threadId).toBe(thread(instanceA, conv));
+    });
+
+    // The same fail-closed rule generation applies, and the reason it exists: two accounts of one
+    // tenant number a conversation alike, and the two rows belong to two different people.
+    test("a conversation number two accounts share is left unbound", async () => {
+      const q = await quoteFor(SHARED, "backfill-ambiguous");
+      await runBackfill();
+      const row = await suDb.quote.findUniqueOrThrow({
+        where: { id: BigInt(q.id) },
+        select: { threadId: true },
+      });
+      expect(row.threadId).toBeNull();
+    });
+
+    test("a quote that is already bound is not rewritten", async () => {
+      const conv = await freshConversation();
+      const q = await quoteFor(conv, "backfill-idempotent");
+      const before = thread(instanceA, conv);
+      await runBackfill();
+      await runBackfill();
+      const row = await suDb.quote.findUniqueOrThrow({
+        where: { id: BigInt(q.id) },
+        select: { threadId: true },
+      });
+      expect(row.threadId).toBe(before);
+    });
+  });
+
   describe("which quote the conversation may send", () => {
     test("the thread's own quote comes back with its bytes and its file name", async () => {
       const conv = await freshConversation();
