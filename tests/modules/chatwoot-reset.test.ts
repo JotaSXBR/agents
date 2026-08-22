@@ -1635,6 +1635,110 @@ describe.skipIf(!dbUp)(
       });
     });
 
+    // The conversation stays actionable while the command runs, so a customer message arriving in
+    // that window runs a turn — and that turn can BOOK something. Retiring unconditionally cancels
+    // reminders for an appointment made after the command was typed, and since the command also
+    // clears `lastInboundAt` nothing re-arms them: a real booking silently loses its reminders. The
+    // Chatwoot double is the rendezvous; the new reminder is armed mid-cleanup.
+    test("work armed while the reset runs belongs to the next episode", async () => {
+      const threadId = `${tenantId}:${instanceId}:${CONV_ID}`;
+      await suDb.schedulerJob.create({
+        data: {
+          tenantId,
+          kind: "APPOINTMENT_REMINDER",
+          dedupeKey: "reminder:evt-old:60",
+          runAt: new Date(Date.now() + 3_600_000),
+          payload: { threadId, eventId: "evt-old", calendarId: "c" },
+        },
+      });
+      const cw = fakeChatwoot();
+      const inner = cw.impl;
+      let armed = false;
+      globalThis.fetch = (async (input, init) => {
+        if (!armed && String(input).includes("/kanban/tasks/")) {
+          armed = true;
+          await suDb.schedulerJob.create({
+            data: {
+              tenantId,
+              kind: "APPOINTMENT_REMINDER",
+              dedupeKey: "reminder:evt-new:60",
+              runAt: new Date(Date.now() + 3_600_000),
+              payload: { threadId, eventId: "evt-new", calendarId: "c" },
+            },
+          });
+        }
+        return inner(input, init);
+      }) as typeof fetch;
+      try {
+        await sendReset();
+
+        expect(armed).toBe(true);
+        const rows = await suDb.schedulerJob.findMany({
+          where: { tenantId, kind: "APPOINTMENT_REMINDER" },
+          select: { dedupeKey: true, status: true },
+          orderBy: { dedupeKey: "asc" },
+        });
+        expect(rows.map((r) => [r.dedupeKey, r.status])).toEqual([
+          // Armed before the command: retired with the episode it belongs to.
+          ["reminder:evt-new:60", "PENDING"],
+          ["reminder:evt-old:60", "DONE"],
+        ]);
+      } finally {
+        globalThis.fetch = originalFetch;
+        await suDb.schedulerJob.deleteMany({ where: { tenantId } });
+      }
+    });
+
+    // The ladder takes the same cutoff, and it needs it more: re-arming on every customer message IS
+    // the redirect's cancel-on-reply, so a lead who replies while the command runs re-arms the very
+    // ladder the command is about to retire.
+    test("a ladder re-armed while the reset runs survives it", async () => {
+      await withRedirectPair(async (_convId, widgetThread) => {
+        await suDb.schedulerJob.create({
+          data: {
+            tenantId,
+            kind: "REDIRECT_FOLLOWUP",
+            dedupeKey: `redirect-followup:${widgetThread}`,
+            runAt: new Date(Date.now() + 3_600_000),
+            payload: { stage: "chat", widgetThreadId: widgetThread },
+          },
+        });
+        const cw = fakeChatwoot();
+        const inner = cw.impl;
+        let rearmed = false;
+        globalThis.fetch = (async (input, init) => {
+          if (!rearmed && String(input).includes("/kanban/tasks/")) {
+            rearmed = true;
+            // What armRedirectChatFollowUp does on a reply: the same row, rewritten.
+            await suDb.schedulerJob.updateMany({
+              where: {
+                tenantId,
+                kind: "REDIRECT_FOLLOWUP",
+                dedupeKey: `redirect-followup:${widgetThread}`,
+              },
+              data: { runAt: new Date(Date.now() + 7_200_000) },
+            });
+          }
+          return inner(input, init);
+        }) as typeof fetch;
+        try {
+          await sendReset();
+
+          expect(rearmed).toBe(true);
+          const job = await suDb.schedulerJob.findFirstOrThrow({
+            where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
+            select: { status: true, payload: true },
+          });
+          expect(job.status).toBe("PENDING");
+          expect(
+            (job.payload as { cancelledAt?: string })?.cancelledAt,
+          ).toBeUndefined();
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+      });
+    });
+
     // And the opposite fence on the reminders. They are keyed `reminder:<eventId>:<offset>`, so the
     // command has to find them by the thread their payload carries — but going from that thread back
     // to the EVENT and cancelling the whole prefix reaches outside the conversation that typed the

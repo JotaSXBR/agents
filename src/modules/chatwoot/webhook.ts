@@ -1135,6 +1135,11 @@ async function maybeConsumeCommandOrGate(params: {
     //
     // The ASSIGNEE is what is compared, not the whole row: status moves on its own (an inbound
     // message reopens a resolved conversation) and that is not a takeover.
+    // NOTE: The instant the command was asked. Everything it retires is scoped to work that already
+    // existed then: a turn running alongside this cleanup — the conversation stays actionable
+    // throughout — can arm a ladder or book an appointment, and that work belongs to the episode
+    // that started after the command, not to the one it was told to erase.
+    const askedAt = new Date();
     const notOursAtStart = !(await stillOursOrUnknown());
     const holderAtStart = `${ctx.conv.assigneeType ?? ""}:${ctx.conv.assigneeId ?? ""}`;
     const heldBySameParty = async (): Promise<boolean> => {
@@ -1374,6 +1379,7 @@ async function maybeConsumeCommandOrGate(params: {
           tenantId,
           chatwootThreadId(tenantId, instanceId, ladderConversationId),
           base,
+          askedAt,
         ),
     );
     // NOTE: Both sides of the pair, for the same reason the ladder is cancelled by the widget's key: in a
@@ -1393,6 +1399,7 @@ async function maybeConsumeCommandOrGate(params: {
             tenantId,
             chatwootThreadId(tenantId, instanceId, convId),
             base,
+            askedAt,
           ),
       );
     }

@@ -174,9 +174,18 @@ export async function cancelThreadAppointmentReminders(
   tenantId: bigint,
   threadId: string,
   base: PrismaClient = basePrisma,
+  // NOTE: Only rows last written at or before this instant. /reset is the caller and it is not atomic
+  // with the conversation: a customer message arriving during the cleanup runs a turn, and that turn
+  // can BOOK something. Retiring unconditionally then cancels reminders for an appointment made
+  // after the command was typed — and since the command also clears `lastInboundAt`, nothing re-arms
+  // them, so a real booking silently loses its reminders. A re-arm rewrites the row (enqueueJob
+  // upserts), which moves `updated_at` past the cutoff, so re-armed work is spared for the same
+  // reason a newer takeover is: it happened after the command was asked.
+  armedBefore?: Date,
 ): Promise<number> {
   return runScopedOn(base, sysCtx(tenantId), async (db) => {
     const stamp = JSON.stringify({ cancelledAt: new Date().toISOString() });
+    const cutoff = armedBefore ?? new Date(8_640_000_000_000_000);
     return db.$executeRaw`
       UPDATE scheduler_jobs
          SET status = CASE WHEN status = 'PENDING' THEN 'DONE' ELSE status END,
@@ -184,7 +193,8 @@ export async function cancelThreadAppointmentReminders(
              updated_at = now()
        WHERE tenant_id = ${tenantId}
          AND kind = 'APPOINTMENT_REMINDER'
-         AND payload->>'threadId' = ${threadId}`;
+         AND payload->>'threadId' = ${threadId}
+         AND updated_at <= ${cutoff}`;
   });
 }
 

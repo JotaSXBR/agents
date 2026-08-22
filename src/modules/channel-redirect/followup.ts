@@ -154,9 +154,15 @@ export async function retireRedirectFollowUp(
   tenantId: bigint,
   widgetThreadId: string,
   base: PrismaClient = basePrisma,
+  // NOTE: Only a row last written at or before this instant — the same cutoff appointment reminders
+  // take, for the same reason. /reset is not atomic with the conversation, and a turn running
+  // alongside it re-arms this ladder on every customer message (that re-arm IS the cancel-on-reply).
+  // A ladder armed after the command was typed belongs to the episode that started after it.
+  armedBefore?: Date,
 ): Promise<number> {
   return runScopedOn(base, sysCtx(tenantId), async (db) => {
     const stamp = JSON.stringify({ cancelledAt: new Date().toISOString() });
+    const cutoff = armedBefore ?? new Date(8_640_000_000_000_000);
     return db.$executeRaw`
       UPDATE scheduler_jobs
          SET status = 'DONE',
@@ -165,7 +171,8 @@ export async function retireRedirectFollowUp(
              updated_at = now()
        WHERE tenant_id = ${tenantId}
          AND kind = 'REDIRECT_FOLLOWUP'
-         AND dedupe_key = ${followUpDedupeKey(widgetThreadId)}`;
+         AND dedupe_key = ${followUpDedupeKey(widgetThreadId)}
+         AND updated_at <= ${cutoff}`;
   });
 }
 
