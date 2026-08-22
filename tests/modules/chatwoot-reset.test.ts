@@ -711,6 +711,50 @@ describe.skipIf(!dbUp)(
       ).toContain("atribuição");
     });
 
+    // The hand-back undoes a handoff that was ALREADY there when the operator typed the command. A
+    // human who takes the conversation over DURING the cleanup is a newer fact than the command, and
+    // pulling it back from them is the round-1 harm pointing the other way. The Chatwoot double is
+    // the rendezvous again: the takeover lands on the card call, mid-cleanup.
+    test("a takeover that happens during the reset is not undone by it", async () => {
+      const cw = fakeChatwoot();
+      const inner = cw.impl;
+      let tookOver = false;
+      globalThis.fetch = (async (input, init) => {
+        if (!tookOver && String(input).includes("/kanban/tasks/")) {
+          tookOver = true;
+          await suDb.conversation.updateMany({
+            where: { tenantId, chatwootConversationId: CONV_ID },
+            data: { status: "open", assigneeType: "User", assigneeId: 4242 },
+          });
+        }
+        return inner(input, init);
+      }) as typeof fetch;
+      try {
+        // Bot-owned when the command starts: there is nothing for it to undo.
+        await sendReset();
+
+        expect(tookOver).toBe(true);
+        expect(
+          cw.calls.filter(
+            (c) =>
+              c.path.endsWith(`/conversations/${CONV_ID}/assignments`) ||
+              c.path.endsWith(`/conversations/${CONV_ID}/toggle_status`),
+          ),
+        ).toEqual([]);
+        const conv = await suDb.conversation.findFirstOrThrow({
+          where: { tenantId, chatwootConversationId: CONV_ID },
+          select: { assigneeType: true, assigneeId: true },
+        });
+        expect([conv.assigneeType, conv.assigneeId]).toEqual(["User", 4242]);
+      } finally {
+        globalThis.fetch = originalFetch;
+        await suDb.conversation.updateMany({
+          where: { tenantId, chatwootConversationId: CONV_ID },
+          data: { status: "pending", assigneeType: null, assigneeId: null },
+        });
+      }
+    });
+
     // The other half of the same rule: asked with `shouldBotHandle` so an ordinary reset does not
     // spend two admin calls undoing nothing. Without this the condition is unobservable — making the
     // return unconditional passes every other test in this file.

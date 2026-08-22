@@ -1125,6 +1125,13 @@ async function maybeConsumeCommandOrGate(params: {
     // because the attributes call above it had thrown). `failed` collects the PT-BR name of whatever
     // did not get cleared, so the confirmation below can stop claiming a full reset after a partial
     // one. `label` is what the customer-visible ack names; `what` is the English log wording.
+    // NOTE: The ownership the command was ASKED about, read before any cleanup runs. The hand-back
+    // exists to undo a handoff that was ALREADY in place when the operator typed /reset; a
+    // conversation the bot owned at that moment has nothing for it to undo. Without this, a human
+    // taking the conversation over DURING the cleanup — a dozen network calls long — is read by the
+    // fresh check at the end as "not ours" and unassigned, which is the round-1 harm pointing the
+    // other way: the command would steal a conversation from a human who had just claimed it.
+    const notOursAtStart = !(await stillOursOrUnknown());
     const failed: string[] = [];
     const step = async <T>(
       what: string,
@@ -1455,7 +1462,7 @@ async function maybeConsumeCommandOrGate(params: {
     // episode over before switching the agent back on is a reasonable thing to want — and says what
     // it did not do.
     const resetBlocker = await answerBlocker();
-    if (resetBlocker === "ownership") {
+    if (notOursAtStart && resetBlocker === "ownership") {
       await step("return the conversation to the agent", "atribuição", () =>
         returnConversationToAgent(sysCtx(tenantId), ctx.conv.id, {}, base),
       );
