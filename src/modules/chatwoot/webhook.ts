@@ -1125,13 +1125,34 @@ async function maybeConsumeCommandOrGate(params: {
     // because the attributes call above it had thrown). `failed` collects the PT-BR name of whatever
     // did not get cleared, so the confirmation below can stop claiming a full reset after a partial
     // one. `label` is what the customer-visible ack names; `what` is the English log wording.
-    // NOTE: The ownership the command was ASKED about, read before any cleanup runs. The hand-back
-    // exists to undo a handoff that was ALREADY in place when the operator typed /reset; a
-    // conversation the bot owned at that moment has nothing for it to undo. Without this, a human
-    // taking the conversation over DURING the cleanup — a dozen network calls long — is read by the
-    // fresh check at the end as "not ours" and unassigned, which is the round-1 harm pointing the
-    // other way: the command would steal a conversation from a human who had just claimed it.
+    // NOTE: The handoff the command was ASKED about, captured before any cleanup runs. The hand-back
+    // exists to undo a handoff that was ALREADY in place when the operator typed /reset, so two
+    // facts have to survive the cleanup — a dozen network calls long — for it to fire: the
+    // conversation was not the bot's then, and the SAME party still holds it now. A conversation the
+    // bot owned at that moment has nothing for the command to undo, and a party who claimed it
+    // meanwhile claimed it after the command was typed. Either way the command would be stealing a
+    // conversation from someone who took it later, which is the round-1 harm pointing the other way.
+    //
+    // The ASSIGNEE is what is compared, not the whole row: status moves on its own (an inbound
+    // message reopens a resolved conversation) and that is not a takeover.
     const notOursAtStart = !(await stillOursOrUnknown());
+    const holderAtStart = `${ctx.conv.assigneeType ?? ""}:${ctx.conv.assigneeId ?? ""}`;
+    const heldBySameParty = async (): Promise<boolean> => {
+      const now = await runScopedOn(base, sysCtx(tenantId), (db) =>
+        db.conversation.findUnique({
+          where: { id: ctx.conv.id },
+          select: { assigneeType: true, assigneeId: true },
+        }),
+      ).catch(() => null);
+      // Unreadable answers "unchanged", the same direction every other fence here falls: the
+      // irreversible act is the hand-back, and an unknown must not be the thing that triggers it —
+      // but here it is the START state that already said "not ours", so standing on it is standing
+      // on the answer the command was given.
+      if (!now) return true;
+      return (
+        `${now.assigneeType ?? ""}:${now.assigneeId ?? ""}` === holderAtStart
+      );
+    };
     const failed: string[] = [];
     const step = async <T>(
       what: string,
@@ -1288,16 +1309,23 @@ async function maybeConsumeCommandOrGate(params: {
       // three scopes and this command cleared one, so the agent kept every structured fact it had
       // extracted from the memory that was just wiped, and did not ask again. The card carries no
       // tension here — it belongs to this conversation and the reset already edits it.
-      await step("clear kanban card dates", "card do kanban", async () => {
-        const taskId = await client.kanbanTaskIdForConversation(conversationId);
-        if (taskId != null) {
-          await client.updateKanbanTask(taskId, {
-            startDate: null,
-            dueDate: null,
-          });
-          await client.setKanbanTaskCustomAttributes(taskId, {});
-        }
-      });
+      //
+      // Two steps, not one, for the reason every other cleanup here gets its own: they are
+      // independent endpoints, and sharing a try meant a failure on the dates skipped the attributes
+      // entirely — the exact shape of #79, where the first failure silently ended the reset.
+      const taskId = await step(
+        "resolve the kanban card",
+        "card do kanban",
+        () => client.kanbanTaskIdForConversation(conversationId),
+      );
+      if (taskId != null) {
+        await step("clear kanban card dates", "card do kanban", () =>
+          client.updateKanbanTask(taskId, { startDate: null, dueDate: null }),
+        );
+        await step("clear kanban card attributes", "card do kanban", () =>
+          client.setKanbanTaskCustomAttributes(taskId, {}),
+        );
+      }
     }
     // The contact's Chatwoot attributes are deliberately NOT cleared, and the acknowledgement below
     // says why without having to: it promises the attributes of THIS CONVERSATION. Contact
@@ -1462,7 +1490,11 @@ async function maybeConsumeCommandOrGate(params: {
     // episode over before switching the agent back on is a reasonable thing to want — and says what
     // it did not do.
     const resetBlocker = await answerBlocker();
-    if (notOursAtStart && resetBlocker === "ownership") {
+    if (
+      notOursAtStart &&
+      resetBlocker === "ownership" &&
+      (await heldBySameParty())
+    ) {
       await step("return the conversation to the agent", "atribuição", () =>
         returnConversationToAgent(sysCtx(tenantId), ctx.conv.id, {}, base),
       );

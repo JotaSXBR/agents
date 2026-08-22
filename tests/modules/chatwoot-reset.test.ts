@@ -755,6 +755,117 @@ describe.skipIf(!dbUp)(
       }
     });
 
+    // And what an unreadable holder decides: nothing. The command already has an answer — the one it
+    // was given when it started — and a transient failure must not be the thing that withdraws it.
+    test("an unreadable holder leaves the hand-back on the answer it started with", async () => {
+      const blind = appDb.$extends({
+        query: {
+          conversation: {
+            findUnique({ args, query }) {
+              const sel = (args.select ?? {}) as Record<string, unknown>;
+              // The holder comparison asks for exactly these two columns; the ownership fence asks
+              // for three.
+              if (
+                Object.keys(sel).length === 2 &&
+                sel.assigneeType === true &&
+                sel.assigneeId === true
+              ) {
+                return Promise.reject(new Error("connection reset"));
+              }
+              return query(args);
+            },
+          },
+        },
+      }) as unknown as PrismaClient;
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl;
+      await sendReset("/reset", CONV_ID, {
+        status: "open",
+        assigneeType: "User",
+        base: blind,
+      });
+
+      expect(
+        cw.calls
+          .filter((c) =>
+            c.path.endsWith(`/conversations/${CONV_ID}/assignments`),
+          )
+          .map((c) => c.body),
+      ).toEqual([{ assignee_id: 0 }]);
+    });
+
+    // The card's dates and its attributes are independent endpoints, so a failure on the first must
+    // not silently end the card cleanup — the shape of #79, where one failure ended the whole reset.
+    test("the card's attributes are cleared even when its dates fail", async () => {
+      const cw = fakeChatwoot();
+      const inner = cw.impl;
+      let firstCardCall = true;
+      globalThis.fetch = (async (input, init) => {
+        if (firstCardCall && String(input).includes("/kanban/tasks/")) {
+          firstCardCall = false;
+          return new Response("{}", { status: 500 });
+        }
+        return inner(input, init);
+      }) as typeof fetch;
+      try {
+        await sendReset();
+
+        const card = cw.calls.find(
+          (c) =>
+            c.method === "PATCH" &&
+            c.path.endsWith(`/kanban/tasks/${KANBAN_TASK_ID}`) &&
+            (c.body as { task?: { custom_attributes?: unknown } })?.task
+              ?.custom_attributes !== undefined,
+        );
+        expect(card?.body).toEqual({ task: { custom_attributes: {} } });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    // The same rule when the conversation was ALREADY a human's: if a DIFFERENT party claims it while
+    // the cleanup runs, that claim is newer than the command too. The command undoes the handoff it
+    // was asked about, not whichever one happens to be there when it finishes.
+    test("a second human who takes over mid-reset keeps it", async () => {
+      await suDb.conversation.updateMany({
+        where: { tenantId, chatwootConversationId: CONV_ID },
+        data: { status: "open", assigneeType: "User", assigneeId: 111 },
+      });
+      const cw = fakeChatwoot();
+      const inner = cw.impl;
+      let swapped = false;
+      globalThis.fetch = (async (input, init) => {
+        if (!swapped && String(input).includes("/kanban/tasks/")) {
+          swapped = true;
+          await suDb.conversation.updateMany({
+            where: { tenantId, chatwootConversationId: CONV_ID },
+            data: { assigneeId: 222 },
+          });
+        }
+        return inner(input, init);
+      }) as typeof fetch;
+      try {
+        await sendReset("/reset", CONV_ID, {
+          status: "open",
+          assigneeType: "User",
+          assigneeId: 111,
+        });
+
+        expect(swapped).toBe(true);
+        expect(
+          cw.calls.filter((c) =>
+            c.path.endsWith(`/conversations/${CONV_ID}/assignments`),
+          ),
+        ).toEqual([]);
+      } finally {
+        globalThis.fetch = originalFetch;
+        await suDb.conversation.updateMany({
+          where: { tenantId, chatwootConversationId: CONV_ID },
+          data: { status: "pending", assigneeType: null, assigneeId: null },
+        });
+      }
+    });
+
     // The other half of the same rule: asked with `shouldBotHandle` so an ordinary reset does not
     // spend two admin calls undoing nothing. Without this the condition is unobservable — making the
     // return unconditional passes every other test in this file.
