@@ -839,6 +839,19 @@ async function maybeConsumeCommandOrGate(params: {
     );
   };
 
+  // Why the agent would not answer in this conversation right now. Two independent reasons, and the
+  // three texts below have to name the right one: the conversation is not the agent's (a human or
+  // another persona holds it, or it is not `pending`), or the agent is switched OFF entirely.
+  //
+  // Kept apart from `stillOurs`, which answers ownership and nothing else. Folding "disabled" into it
+  // would invert /reset: that command returns the conversation precisely when the answer is "not
+  // ours", and a disabled agent would then be handed a conversation it will never answer in.
+  //
+  // `disabled` wins the tie because it is the reason /reset cannot help: the command returns a
+  // conversation, it does not switch an agent back on.
+  const answerBlocker = async (): Promise<"none" | "ownership" | "disabled"> =>
+    !ctx.agentEnabled ? "disabled" : (await stillOurs()) ? "none" : "ownership";
+
   // Returns whether the message actually left. Whoever records that it was sent has to read this: the
   // away message would otherwise burn the day it just claimed, and the redirect gate would close its
   // one-shot and spend a resend on a link nobody received. The two command acks ignore it on purpose —
@@ -991,10 +1004,15 @@ async function maybeConsumeCommandOrGate(params: {
     //
     // Diagnosed here, ACTED ON in /reset: silently pulling a conversation away from an agent who
     // legitimately took it is a bigger surprise than a clear message.
+    const testeBlocker = await answerBlocker();
     await postAcknowledgement(
-      (await stillOurs())
+      testeBlocker === "none"
         ? "🧪 Modo teste ativado para esta conversa."
-        : "🧪 Modo teste ativado para esta conversa. Mas ela não está com este agente, então ele ainda não vai responder. Envie /reset para devolvê-la ao agente.",
+        : testeBlocker === "ownership"
+          ? "🧪 Modo teste ativado para esta conversa. Mas ela não está com este agente, então ele ainda não vai responder. Envie /reset para devolvê-la ao agente."
+          : // No command is named: /reset returns a conversation and this agent is switched off, so
+            // it would be the same wrong instruction one variant up, one layer deeper.
+            "🧪 Modo teste ativado para esta conversa. Mas este agente está desativado, então ele não vai responder.",
     );
     logger.info("chatwoot: /teste activated (conv=%s)", String(conversationId));
     return true;
@@ -1337,7 +1355,15 @@ async function maybeConsumeCommandOrGate(params: {
     // `returnConversationToAgent` and not a local unassign+toggle: the ORDER is load-bearing and
     // documented there, the two cannot collapse into one `toggle_status`, and it mirrors the write
     // so the very next delivery passes the gate instead of waiting for a Chatwoot event.
-    if (!(await stillOurs())) {
+    //
+    // Only when the blocker is OWNERSHIP. A disabled agent is the one case where returning the
+    // conversation makes things worse than leaving them: the runtime refuses to run a disabled agent
+    // (the away-message branch says so in as many words), so an unassign would take the human off a
+    // conversation nothing is left to answer. The command still clears everything else — starting the
+    // episode over before switching the agent back on is a reasonable thing to want — and says what
+    // it did not do.
+    const resetBlocker = await answerBlocker();
+    if (resetBlocker === "ownership") {
       await step("return the conversation to the agent", "atribuição", () =>
         returnConversationToAgent(sysCtx(tenantId), ctx.conv.id, {}, base),
       );
@@ -1346,10 +1372,17 @@ async function maybeConsumeCommandOrGate(params: {
     // typed /reset to get a clean slate, and acting on a conversation that is not clean is worse than
     // knowing what survived.
     const distinctFailed = [...new Set(failed)];
+    // The assignment is the one thing the operator can SEE not happening, so silence about it would
+    // read as the command failing. Only when it was actually withheld: a conversation the agent
+    // already owned has nothing to explain.
+    const heldBack =
+      resetBlocker === "disabled" && !(await stillOurs())
+        ? " Este agente está desativado, então a conversa continua com quem a atendia."
+        : "";
     await postAcknowledgement(
       distinctFailed.length === 0
-        ? "🔄 Memória, preferência de áudio e etiquetas/atributos desta conversa foram limpos."
-        : `⚠️ Reset parcial: não consegui limpar ${distinctFailed.join(", ")}. O restante foi limpo.`,
+        ? `🔄 Memória, preferência de áudio e etiquetas/atributos desta conversa foram limpos.${heldBack}`
+        : `⚠️ Reset parcial: não consegui limpar ${distinctFailed.join(", ")}. O restante foi limpo.${heldBack}`,
     );
     logger.info(
       "chatwoot: /reset (conv=%s failed=%s)",
@@ -1374,17 +1407,20 @@ async function maybeConsumeCommandOrGate(params: {
   if (ctx.mode === "test" && ctx.conv.testActivatedAt === null) {
     // One-shot private note (operator-only) so whoever watches the inbox knows WHY the bot is quiet
     // and how to activate it. Anti-spam: posted once per conversation (testNoticeSentAt watermark).
+    const noticeBlocker = await answerBlocker();
     if (
       ctx.conv.testNoticeSentAt === null &&
       (await postPrivateNote(
-        (await stillOurs())
+        noticeBlocker === "none"
           ? "🧪 Este agente está em modo teste. Ele não responde automaticamente nesta conversa. Envie /teste para ativar as respostas aqui."
-          : // This notice fires ONLY while the conversation has never been activated, and `/reset`
-            // needs `testActivatedAt` to run (shouldRunReset) — so pointing at it alone would send
-            // the operator down the same no-op path, and the one-shot watermark would then suppress
-            // any further guidance. Both commands, in the order that works: /teste lifts the
-            // test-mode silence, /reset returns the conversation to the agent.
-            "🧪 Este agente está em modo teste e esta conversa não está com ele, então ele não vai responder. Envie /teste para ativar as respostas aqui e, em seguida, /reset para devolver a conversa ao agente.",
+          : noticeBlocker === "ownership"
+            ? // This notice fires ONLY while the conversation has never been activated, and `/reset`
+              // needs `testActivatedAt` to run (shouldRunReset) — so pointing at it alone would send
+              // the operator down the same no-op path, and the one-shot watermark would then suppress
+              // any further guidance. Both commands, in the order that works: /teste lifts the
+              // test-mode silence, /reset returns the conversation to the agent.
+              "🧪 Este agente está em modo teste e esta conversa não está com ele, então ele não vai responder. Envie /teste para ativar as respostas aqui e, em seguida, /reset para devolver a conversa ao agente."
+            : "🧪 Este agente está desativado, então ele não vai responder nesta conversa.",
       ))
     ) {
       try {

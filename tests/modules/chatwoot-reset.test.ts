@@ -657,6 +657,30 @@ describe.skipIf(!dbUp)(
         assigneeType: null,
         assigneeId: null,
       });
+
+      // The acknowledgement reports what happened and nothing else: the conversation WAS handed
+      // back, so the sentence that explains withholding it has no business here.
+      const ack = ackCalls(cw.calls)
+        .map((c) => (c.body as { content?: string })?.content ?? "")
+        .join(" ");
+      expect(ack).not.toContain("desativado");
+    });
+
+    // The other way the conversation can still be a human's when the reset ends: the assignment call
+    // itself failed. The command has to name THAT — a partial reset — and not the switch, which is on.
+    test("a failed hand-back is reported as a failure, not as a disabled agent", async () => {
+      const cw = fakeChatwoot(/\/assignments$/);
+      globalThis.fetch = cw.impl;
+      await sendReset("/reset", CONV_ID, {
+        status: "open",
+        assigneeType: "User",
+      });
+
+      const ack = ackCalls(cw.calls)
+        .map((c) => (c.body as { content?: string })?.content ?? "")
+        .join(" ");
+      expect(ack).toContain("atribuição");
+      expect(ack).not.toContain("desativado");
     });
 
     // The other half of the same rule: asked with `shouldBotHandle` so an ordinary reset does not
@@ -1415,6 +1439,133 @@ describe.skipIf(!dbUp)(
       expect(ack).toContain("não está com este agente");
       expect(ack).toContain("/reset");
       await suDb.agent.delete({ where: { id: otherAgentId } });
+    });
+
+    // Switching an agent off switches off everything it says to the customer — the runtime refuses to
+    // run it, and the away-message branch already says so. /reset was the one path that acted anyway:
+    // it took the human off the conversation and set it back to pending, leaving the customer with
+    // neither. Clearing the episode is still fine; handing the conversation over is not.
+    const withDisabledAgent = async (
+      run: () => Promise<void>,
+    ): Promise<void> => {
+      const inbox = await suDb.inbox.findFirstOrThrow({
+        where: { tenantId, chatwootInboxId: INBOX_ID },
+        select: { agentId: true },
+      });
+      const agentId = inbox.agentId as bigint;
+      await suDb.agent.update({
+        where: { id: agentId },
+        data: { enabled: false },
+      });
+      try {
+        await run();
+      } finally {
+        await suDb.agent.update({
+          where: { id: agentId },
+          data: { enabled: true },
+        });
+      }
+    };
+
+    test("a disabled agent does not get a conversation a human is holding", async () => {
+      await withDisabledAgent(async () => {
+        const cw = fakeChatwoot();
+        globalThis.fetch = cw.impl;
+        await sendReset("/reset", CONV_ID, {
+          status: "open",
+          assigneeType: "User",
+        });
+
+        expect(
+          cw.calls.filter(
+            (c) =>
+              c.path.endsWith(`/conversations/${CONV_ID}/assignments`) ||
+              c.path.endsWith(`/conversations/${CONV_ID}/toggle_status`),
+          ),
+        ).toEqual([]);
+        // The memory clear still ran — this is a reset, not a refusal.
+        expect(
+          cw.calls.some((c) => c.path.endsWith("/custom_attributes")),
+        ).toBe(true);
+        // And the operator is told, because the assignment is the one part they can see not happening.
+        const ack = ackCalls(cw.calls)
+          .map((c) => (c.body as { content?: string })?.content ?? "")
+          .join(" ");
+        expect(ack).toContain("desativado");
+        expect(ack).toContain("continua com quem a atendia");
+      });
+    });
+
+    // The same question in the two texts that answer it. Naming /reset to an operator whose agent is
+    // switched off is the round-1 defect one layer deeper: the command runs and still cannot help.
+    test("a disabled agent names no command it cannot honour", async () => {
+      await withDisabledAgent(async () => {
+        const cw = fakeChatwoot();
+        globalThis.fetch = cw.impl;
+        await sendReset("/teste", CONV_ID, {
+          status: "open",
+          assigneeType: "User",
+        });
+        const ack = ackCalls(cw.calls)
+          .map((c) => (c.body as { content?: string })?.content ?? "")
+          .join(" ");
+        expect(ack).toContain("desativado");
+        expect(ack).not.toContain("/reset");
+
+        // And on a conversation the agent DOES own: the switch still decides. "Modo teste ativado"
+        // on its own would be the round-1 defect restated — activation is not the same as being
+        // able to answer, and here nothing can. Ownership is set explicitly, because with it absent
+        // the two reasons agree and the test would prove nothing about which one is asked first.
+        await suDb.conversation.updateMany({
+          where: { tenantId, chatwootConversationId: CONV_ID },
+          data: { status: "pending", assigneeType: null, assigneeId: null },
+        });
+        const cw2 = fakeChatwoot();
+        globalThis.fetch = cw2.impl;
+        await sendReset("/teste");
+        expect(
+          ackCalls(cw2.calls)
+            .map((c) => (c.body as { content?: string })?.content ?? "")
+            .join(" "),
+        ).toContain("desativado");
+      });
+    });
+
+    // And the third text that answers it: the one-shot note on a conversation nobody ever activated.
+    // It has one shot, so naming the wrong reason there costs the operator every later chance.
+    test("the un-activated notice names the switch, not the assignment", async () => {
+      await withDisabledAgent(async () => {
+        await suDb.conversation.create({
+          data: {
+            tenantId,
+            chatwootInstanceId: instanceId,
+            inboxId: (
+              await suDb.inbox.findFirstOrThrow({
+                where: { tenantId, chatwootInboxId: INBOX_ID },
+                select: { id: true },
+              })
+            ).id,
+            chatwootConversationId: 50,
+            contactInboxId: 310,
+            status: "open",
+            threadId: `${tenantId}:${instanceId}:50`,
+            testActivatedAt: null,
+          },
+        });
+        const cw = fakeChatwoot();
+        globalThis.fetch = cw.impl;
+        await sendReset("/reset", 50, { status: "open", assigneeType: "User" });
+
+        const notes = cw.calls
+          .filter((c) => c.method === "POST" && c.path.endsWith("/messages"))
+          .map((c) => (c.body as { content?: string })?.content ?? "")
+          .join(" ");
+        expect(notes).toContain("desativado");
+        expect(notes).not.toContain("/reset");
+        await suDb.conversation.deleteMany({
+          where: { tenantId, chatwootConversationId: 50 },
+        });
+      });
     });
 
     // The notice fires only while the conversation was NEVER activated, and /reset needs
