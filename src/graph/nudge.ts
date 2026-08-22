@@ -872,6 +872,19 @@ export async function runAgentNudge(
     return ours ? "ours" : "not-ours";
   };
 
+  // NOTE: Answers for the GENERATION, which every path pays for whether guardrails are on or not — and it
+  // sits here, before the ownership probe, because everything below this line WRITES to the
+  // conversation. Six ends reach `applyPostActions`, and three of them (the promised handoff line,
+  // the agent staying silent, the guardrail suppressing the reply) post no message at all, so a
+  // check placed among the SENDS missed them: a follow-up retired mid-generation still relabelled
+  // and resolved the conversation /reset had just cleared, and `followUpHandler` wrote its watermark
+  // back because the outcome was not "stale". Before the probe rather than after, so a retired run
+  // neither spends the round trip nor returns the retry that `live-unavailable` asks for.
+  //
+  // The later checks answer for later model calls — the guardrail judge's, and the screening inside
+  // deliverPromisedLine — not for this one.
+  if (!(await stillWanted())) return "stale";
+
   let canMessagePost: boolean;
   if (handedOff) {
     canMessagePost = true;
@@ -1018,14 +1031,17 @@ export async function runAgentNudge(
       canMessagePost = owned === "ours";
     }
 
+    // NOTE: Asked again over the same stretch the ownership and the window are re-asked over: the judge's
+    // model call. Nothing has reached the customer yet, so aborting here costs nothing.
+    //
+    // ABOVE the suppression branch, for the reason the check outside this block sits above the silent
+    // one: suppression posts no message but still fires the post-actions, so a check placed after it
+    // guards only the sends and lets the judge's stretch of time reach the labels and the resolve.
+    if (!(await stillWanted())) return "stale";
     if (screened === null) {
       await applyPostActions();
       return "silent";
     }
-    // NOTE: Asked again over the same stretch the ownership and the window are re-asked over: the judge's
-    // model call. Nothing has reached the customer yet, so aborting here costs nothing — and this is
-    // the last point before it does.
-    if (!(await stillWanted())) return "stale";
     // The window is asked again for the same reason the ownership is, and about the same stretch of
     // time: the judge's model call. Both were read before it and are spent here. A mode that has
     // gone stale sends a free-form message the provider now refuses, and this is the last point
@@ -1046,12 +1062,6 @@ export async function runAgentNudge(
     // below already knows what to do with either: `canMessagePost` carries the first, and the
     // second is answered by asking again.
   }
-
-  // NOTE: The terminal deliveries — template, the outside-window note, and the plain note below — are the
-  // three ends this function has that the guardrail branch does not cover, and they are reached
-  // AFTER the turn's own model call. The check inside that branch answers for the judge's call; this
-  // one answers for the generation, which every path pays for whether guardrails are on or not.
-  if (!(await stillWanted())) return "stale";
 
   if (canMessagePre && canMessagePost) {
     if (sendModeNow() === "template") {

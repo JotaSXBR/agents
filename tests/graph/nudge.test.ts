@@ -883,7 +883,110 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
     // The handoff's own `open` still happened — that is the transfer, and it is not this fence's to
     // reverse. What must not follow it is the resolve.
     expect(s.resolved).toEqual([9983]);
-    expect(outcome).toBe("silent");
+    // "stale" and not "silent", which is the difference between ending the episode and continuing
+    // it: `followUpHandler` stamps `lastFollowUpAt` on a silent turn AND reschedules the next step,
+    // so a retired job returning "silent" wrote its watermark onto the conversation /reset had just
+    // cleared and re-armed the sequence the command ended.
+    expect(outcome).toBe("stale");
+  });
+
+  // The end that posts NOTHING, which is the one a fence placed among the sends misses. The agent
+  // answering [[SKIP]] still fires the deterministic post-actions — that is the point of them, "no
+  // reply on the last step: label + resolve" — so a job retired during the generation relabelled and
+  // RESOLVED the conversation /reset had just cleared, and returned an outcome that made
+  // followUpHandler stamp its watermark and arm the next step.
+  test("a job retired during a silent turn applies no post-actions", async () => {
+    await seedConv(9985, null);
+    const s = stub();
+    let asks = 0;
+    const outcome = await runAgentNudge({
+      tenantId,
+      threadId: `${tenantId}:${instanceId}:9985`,
+      nudge: { source: "followup", kind: "inactivity", step: 1 },
+      postActions: { assignLabels: ["follow-up"], resolve: true },
+      // Yes on the read before the turn, no by the time the generation comes back.
+      stillWanted: async () => {
+        asks += 1;
+        return asks < 2;
+      },
+      base: appDb,
+      deps: {
+        makeModel: () =>
+          new FakeListChatModel({ responses: [FOLLOWUP_SKIP_SENTINEL] }),
+        makeClient: s.makeClient,
+        checkpointer: new MemorySaver(),
+        persistUsage: async () => {},
+      },
+    });
+    expect(outcome).toBe("stale");
+    expect(s.messages).toEqual([]);
+    expect(s.notes).toEqual([]);
+    expect(s.labelSets).toEqual([]);
+    expect(s.resolved).toEqual([]);
+  });
+
+  // The judge's own stretch of time, ending on the branch that posts nothing. A `silent` action
+  // suppresses the reply and the post-actions fire anyway, so a check placed after the suppression
+  // guarded only the sends: a job retired while the judge read still resolved the conversation.
+  test("a job retired while the judge reads applies no post-actions", async () => {
+    await withGuardrails(
+      {
+        enabled: true,
+        provider: "openai",
+        model: GUARD_MODEL,
+        input: { enabled: false },
+        output: {
+          enabled: true,
+          action: "silent",
+          checks: {
+            toxicity: true,
+            unsafeContent: false,
+            competitorMentions: false,
+            promptAdherence: false,
+          },
+        },
+      },
+      async () => {
+        await seedConv(9986, null);
+        const s = stub();
+        let wanted = true;
+        const outcome = await runAgentNudge({
+          tenantId,
+          threadId: `${tenantId}:${instanceId}:9986`,
+          nudge: { source: "followup", kind: "inactivity", step: 1 },
+          postActions: { assignLabels: ["follow-up"], resolve: true },
+          stillWanted: async () => wanted,
+          base: appDb,
+          deps: {
+            makeModel: ((cfg: { model: string }) =>
+              cfg.model === GUARD_MODEL
+                ? guardrailModel(async () => {
+                    // The retire lands inside the judge's call, after the answer taken before it.
+                    wanted = false;
+                    return {
+                      content: JSON.stringify({
+                        violated: true,
+                        categories: ["toxicity"],
+                        rationale: "",
+                        suggestedReply: null,
+                      }),
+                    };
+                  })
+                : new FakeListChatModel({
+                    responses: ["Oi! Ainda posso ajudar?"],
+                  })) as never,
+            makeClient: s.makeClient,
+            checkpointer: new MemorySaver(),
+            persistUsage: async () => {},
+          },
+        });
+        expect(wanted).toBe(false);
+        expect(outcome).toBe("stale");
+        expect(s.messages).toEqual([]);
+        expect(s.labelSets).toEqual([]);
+        expect(s.resolved).toEqual([]);
+      },
+    );
   });
 
   // And the window inside the handoff path: the closing line is screened by the guardrail before it
