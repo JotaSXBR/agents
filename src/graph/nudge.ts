@@ -123,6 +123,12 @@ export interface RunAgentNudgeParams {
   // this; event nudges (payment received etc.) keep the mirror-only gate — for those, a private
   // note on a human-owned or even resolved conversation is still useful signal.
   requireLiveBotOwnership?: boolean;
+  // NOTE: Opt-in "is this work still wanted?", asked at the SAME two points as the ownership probe:
+  // before any proactive work, and again after the guardrail's model call. A scheduler job that was
+  // retired while it sat CLAIMED is the caller: cancelling a job reaches PENDING rows only, so the
+  // handler runs on regardless and the only thing that can stop it is asking. Answering false aborts
+  // with "stale", which is what it is — the state the job was armed for is gone.
+  stillWanted?: () => Promise<boolean>;
   base?: PrismaClient;
   deps?: RuntimeDeps;
 }
@@ -434,6 +440,16 @@ export async function runAgentNudge(
     if (pre === "unavailable") return "live-unavailable";
     if (pre === "not-owned") return "stale";
   }
+
+  // Absent, the answer is yes: every caller that does not schedule work has nothing to retire.
+  const stillWanted = async (): Promise<boolean> =>
+    params.stillWanted === undefined || (await params.stillWanted());
+
+  // Asked HERE, alongside the live gate and for its reason: before any model spend. It buys more
+  // than the money, though — an invoked graph writes the proactive turn into the conversation's
+  // thread, so a retired job asked only at the send boundary would still leave memory of a message
+  // nobody received.
+  if (!(await stillWanted())) return "stale";
 
   // Pre-invoke gate: may we message the customer (bot owns it), or only note (human owns it)?
   // When the live gate ran, it already proved bot ownership with FRESH data (and reconciled the
@@ -997,6 +1013,10 @@ export async function runAgentNudge(
       await applyPostActions();
       return "silent";
     }
+    // Asked again over the same stretch the ownership and the window are re-asked over: the judge's
+    // model call. Nothing has reached the customer yet, so aborting here costs nothing — and this is
+    // the last point before it does.
+    if (!(await stillWanted())) return "stale";
     // The window is asked again for the same reason the ownership is, and about the same stretch of
     // time: the judge's model call. Both were read before it and are spent here. A mode that has
     // gone stale sends a free-form message the provider now refuses, and this is the last point

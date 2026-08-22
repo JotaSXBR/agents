@@ -1347,6 +1347,104 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
     );
   });
 
+  // `stillWanted` is the same shape of question as the ownership above, asked by a caller that
+  // schedules work: a scheduler job retired while it sat CLAIMED. Cancelling a job reaches PENDING
+  // rows only, so the handler runs on regardless and asking is the only thing that can stop it.
+  //
+  // Two reads, and this proves the SECOND: the answer flips inside the judge's own call, which is
+  // exactly the stretch the first read cannot cover.
+  test("work retired while the guardrail reads is not sent, nor resolved", async () => {
+    await withGuardrails(
+      {
+        enabled: true,
+        provider: "openai",
+        model: GUARD_MODEL,
+        input: { enabled: false },
+        output: {
+          enabled: true,
+          action: "template",
+          checks: {
+            toxicity: true,
+            unsafeContent: false,
+            competitorMentions: false,
+            promptAdherence: false,
+          },
+          templateMessage: "TEMPLATE-NUDGE",
+        },
+      },
+      async () => {
+        await seedConv(9980, null);
+        const s = stub();
+        let wanted = true;
+        const outcome = await runAgentNudge({
+          tenantId,
+          threadId: `${tenantId}:${instanceId}:9980`,
+          nudge: { source: "followup", kind: "inactivity", step: 1 },
+          postActions: { assignLabels: ["follow-up"], resolve: true },
+          stillWanted: async () => wanted,
+          base: appDb,
+          deps: {
+            makeModel: ((cfg: { model: string }) =>
+              cfg.model === GUARD_MODEL
+                ? guardrailModel(async () => {
+                    // The retire lands here, between the two reads.
+                    wanted = false;
+                    return {
+                      content: JSON.stringify({
+                        violated: false,
+                        categories: [],
+                        rationale: "",
+                        suggestedReply: null,
+                      }),
+                    };
+                  })
+                : new FakeListChatModel({
+                    responses: ["Ainda por aí?"],
+                  })) as never,
+            makeClient: s.makeClient,
+            checkpointer: new MemorySaver(),
+            persistUsage: async () => {},
+          },
+        });
+        expect(outcome).toBe("stale");
+        expect(s.messages).toEqual([]);
+        expect(s.resolved).toEqual([]);
+        expect(s.labelSets).toEqual([]);
+      },
+    );
+  });
+
+  // And the first read, which buys something the second cannot: the turn is never RUN. Asking only
+  // at the send boundary would still invoke the graph, and an invoked graph writes the proactive
+  // turn into the conversation's thread — memory nobody was messaged about.
+  test("work already retired does not even write a turn", async () => {
+    const threadId = `${tenantId}:${instanceId}:9981`;
+    await seedConv(9981, null);
+    const s = stub();
+    const saver = new MemorySaver();
+    const outcome = await runAgentNudge({
+      tenantId,
+      threadId,
+      nudge: { source: "followup", kind: "inactivity", step: 1 },
+      postActions: { assignLabels: ["follow-up"], resolve: true },
+      stillWanted: async () => false,
+      base: appDb,
+      deps: {
+        makeModel: (() =>
+          new FakeListChatModel({ responses: ["Ainda por aí?"] })) as never,
+        makeClient: s.makeClient,
+        checkpointer: saver,
+        persistUsage: async () => {},
+      },
+    });
+    expect(outcome).toBe("stale");
+    expect(
+      await saver.getTuple({ configurable: { thread_id: threadId } }),
+    ).toBeUndefined();
+    expect(s.messages).toEqual([]);
+    expect(s.resolved).toEqual([]);
+  });
+
   // The sibling of the test above, and the reason the recheck sits above the verdict instead of
   // inside the branch that sends: a suppressed reply still runs the post-actions, and those resolve.
   test("a suppressed follow-up does not resolve a conversation a human just took", async () => {

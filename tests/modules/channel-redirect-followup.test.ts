@@ -275,6 +275,7 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
   let instanceId = 0n;
   let agentId = 0n;
   const WIDGET_CONV = 7171;
+  const ENTRY_CONV = 7172;
   let widgetThread = "";
 
   const stubClient = () => {
@@ -306,10 +307,13 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
       data: { name: "LAD", slug: `lad-${process.pid}` },
     });
     tenantId = t.id;
+    // TEST-NET-3 on the discard port: an IP literal keeps the SSRF guard off DNS (a hostname here
+    // makes every outbound call die in resolution before it can be observed), and nothing is dialed
+    // because globalThis.fetch is the double below.
     const inst = await seedChatwootInstance(suDb, {
       tenantId,
       accountId: 11,
-      baseUrl: "https://chat.example.com",
+      baseUrl: "https://203.0.113.12:9",
       adminToken: encryptJson("ADMIN"),
     });
     instanceId = inst.id;
@@ -334,6 +338,12 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
             entryInboxId: 110,
             widgetInboxId: 111,
             chatFollowupEnabled: true,
+            // Stage 2 is a no-op unless it is switched on and has something to say, and a stage that
+            // does nothing would pass its own fence's test without ever reaching it.
+            waFollowupEnabled: true,
+            waFollowupMessage: "Ainda dá tempo: {link}",
+            closingEnabled: true,
+            closingMessage: "Vamos encerrar por aqui.",
           },
         },
       },
@@ -360,11 +370,39 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
         agentId: agent.id,
       },
     });
+    // Both sides of the pair: stages 2 and 3 message the WhatsApp sibling, and stage 3 resolves both,
+    // so without the entry side those stages have nothing to do and prove nothing.
+    const contact = await suDb.contact.create({
+      data: { tenantId, chatwootContactId: 991, name: "Cliente" },
+    });
+    const entryInbox = await suDb.inbox.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        chatwootInboxId: 110,
+        name: "WhatsApp",
+        agentId: agent.id,
+      },
+    });
+    await suDb.conversation.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        inboxId: entryInbox.id,
+        contactId: contact.id,
+        chatwootConversationId: ENTRY_CONV,
+        status: "pending",
+        threadId: `${tenantId}:${instanceId}:${ENTRY_CONV}`,
+        lastEventAt: new Date(),
+        lastInboundAt: new Date(),
+      },
+    });
     await suDb.conversation.create({
       data: {
         tenantId,
         chatwootInstanceId: instanceId,
         inboxId: inbox.id,
+        contactId: contact.id,
         chatwootConversationId: WIDGET_CONV,
         status: "pending",
         threadId: widgetThread,
@@ -374,14 +412,33 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
     });
   });
 
+  // Stage 2 builds its OWN Chatwoot client (it is not routed through deps.makeClient), so the only
+  // place to see whether it sent anything is the wire.
+  const originalFetch = globalThis.fetch;
+  const wire: string[] = [];
+  const httpDouble = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    wire.push(url);
+    const body = url.includes("/redirect_tokens")
+      ? { token: "tok-1" }
+      : { id: 1, payload: {} };
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
   afterAll(async () => {
+    globalThis.fetch = originalFetch;
     if (!dbUp) return;
     await suDb.tenant.delete({ where: { id: tenantId } }).catch(() => {});
   });
 
-  const claimed = async (): Promise<ClaimedJob> => {
+  const claimed = async (
+    stage: "chat" | "whatsapp" | "closing" = "chat",
+  ): Promise<ClaimedJob> => {
     const payload = {
-      stage: "chat",
+      stage,
       widgetThreadId: widgetThread,
       agentId: agentId.toString(),
       entryInboxId: 110,
@@ -434,6 +491,119 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
     // Not just "no message": a retired ladder must not advance either, or the next stage — the one
     // that resolves BOTH conversations — is simply postponed.
     expect(result).toEqual({ outcome: "done" });
+    expect(s.sent).toEqual([]);
+    expect(s.resolved).toEqual([]);
+  });
+
+  // The window INSIDE the stage. The ladder advances by replacing the row's payload, which would
+  // wipe the very stamp that retires it — so a /reset landing mid-stage would be undone by the stage
+  // it interrupted, and the ladder would go on to its closing. The rendezvous is the fence's own
+  // read: the retire runs right after the first answer, which is where the stage's work sits.
+  test("a retire that lands mid-stage does not get undone by the reschedule", async () => {
+    const job = await claimed();
+    let reads = 0;
+    const racing = appDb.$extends({
+      query: {
+        schedulerJob: {
+          async findUnique({ args, query }) {
+            const res = await query(args);
+            reads += 1;
+            if (reads === 1) {
+              await retireRedirectFollowUp(tenantId, widgetThread, appDb);
+            }
+            return res;
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+    const s = stubClient();
+
+    const result = await redirectFollowUpHandler(job, racing, {
+      ...deps(),
+      makeClient: s.makeClient,
+    });
+
+    // Ended, not advanced — and the stamp is still on the row, so a later claim would stand down too.
+    expect(result).toEqual({ outcome: "done" });
+    // Nor did the stage's own nudge slip out while it was being generated.
+    expect(s.sent).toEqual([]);
+    const row = await suDb.schedulerJob.findFirstOrThrow({
+      where: { tenantId, kind: "REDIRECT_FOLLOWUP" },
+      select: { payload: true },
+    });
+    expect((row.payload as { cancelledAt?: string })?.cancelledAt).toBeString();
+  });
+
+  // The two stages that send FIXED text rather than a nudge, so the nudge's own `stillWanted` never
+  // reaches them. Each is asked immediately before its send, and each crosses channels: the WhatsApp
+  // stage messages the sibling, the closing messages BOTH and resolves BOTH. The rendezvous is the
+  // fence's own read — the retire lands right after the handler's first answer, which is where the
+  // config load and the sibling lookup sit.
+  const racingDb = (onFirstRead: () => Promise<void>) => {
+    let reads = 0;
+    return appDb.$extends({
+      query: {
+        schedulerJob: {
+          async findUnique({ args, query }) {
+            const res = await query(args);
+            reads += 1;
+            if (reads === 1) await onFirstRead();
+            return res;
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+  };
+
+  test("a retire mid-stage stops the WhatsApp escalation", async () => {
+    const job = await claimed("whatsapp");
+    const s = stubClient();
+    wire.length = 0;
+    globalThis.fetch = httpDouble;
+    try {
+      await redirectFollowUpHandler(
+        job,
+        racingDb(async () => {
+          await retireRedirectFollowUp(tenantId, widgetThread, appDb);
+        }),
+        { ...deps(), makeClient: s.makeClient },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    // Nothing left for the sibling: not the link mint, not the message.
+    expect(wire).toEqual([]);
+    expect(s.sent).toEqual([]);
+  });
+
+  // The control: the same stage, un-retired, does reach the wire — otherwise the assertion above
+  // would pass on a stage that never does anything.
+  test("an un-retired WhatsApp stage does escalate", async () => {
+    const job = await claimed("whatsapp");
+    const s = stubClient();
+    wire.length = 0;
+    globalThis.fetch = httpDouble;
+    try {
+      await redirectFollowUpHandler(job, appDb, {
+        ...deps(),
+        makeClient: s.makeClient,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(wire.length).toBeGreaterThan(0);
+  });
+
+  test("a retire mid-stage stops the closing, and the resolve with it", async () => {
+    const job = await claimed("closing");
+    const s = stubClient();
+    await redirectFollowUpHandler(
+      job,
+      racingDb(async () => {
+        await retireRedirectFollowUp(tenantId, widgetThread, appDb);
+      }),
+      { ...deps(), makeClient: s.makeClient },
+    );
     expect(s.sent).toEqual([]);
     expect(s.resolved).toEqual([]);
   });

@@ -413,28 +413,31 @@ export async function redirectFollowUpHandler(
   //
   // A read that fails does NOT retire the job: an unknown answer must not silently drop work that
   // was legitimately armed.
-  const stamped = await runScopedOn(base, sysCtx(job.tenantId), (db) =>
-    db.schedulerJob.findUnique({
-      where: { id: job.id },
-      select: { payload: true },
-    }),
-  ).catch((err) => {
-    logger.warn(
-      "channel-redirect: could not re-read the cancellation stamp (job=%s): %s",
-      String(job.id),
-      err instanceof Error ? err.message : String(err),
-    );
-    return null;
-  });
-  if (
-    (stamped?.payload as { cancelledAt?: unknown } | null)?.cancelledAt != null
-  ) {
-    logger.info(
-      "channel-redirect: ladder retired while claimed, standing down (job=%s)",
-      String(job.id),
-    );
-    return { outcome: "done" };
-  }
+  const retired = async (): Promise<boolean> => {
+    const row = await runScopedOn(base, sysCtx(job.tenantId), (db) =>
+      db.schedulerJob.findUnique({
+        where: { id: job.id },
+        select: { payload: true },
+      }),
+    ).catch((err) => {
+      logger.warn(
+        "channel-redirect: could not re-read the cancellation stamp (job=%s): %s",
+        String(job.id),
+        err instanceof Error ? err.message : String(err),
+      );
+      return null;
+    });
+    const stamped =
+      (row?.payload as { cancelledAt?: unknown } | null)?.cancelledAt != null;
+    if (stamped) {
+      logger.info(
+        "channel-redirect: ladder retired while claimed, standing down (job=%s)",
+        String(job.id),
+      );
+    }
+    return stamped;
+  };
+  if (await retired()) return { outcome: "done" };
   const parsed = parseThreadId(payload.widgetThreadId);
   if (!parsed || parsed.tenantId !== job.tenantId) return { outcome: "done" };
   const tenantId = job.tenantId;
@@ -460,20 +463,27 @@ export async function redirectFollowUpHandler(
 
   // Reschedule this same job to the next stage after its configured delay. The payload is authoritative
   // on re-enqueue, so this advances the ladder on the SAME row (mirrors the two-stage original).
-  const rescheduleTo = (
+  // Advancing the ladder REPLACES the row's payload (enqueueJob's upsert is authoritative), which
+  // would wipe the very stamp that retires it — a /reset landing mid-stage would be undone by the
+  // stage it interrupted, and the ladder would go on to its closing. So the question is asked once
+  // more here: a retired ladder ends, it does not advance.
+  const rescheduleTo = async (
     stage: RedirectFollowUpStage,
     value: number,
     unit: RedirectDelayUnit,
-  ): JobResult => ({
-    outcome: "reschedule",
-    runAt: minutesFromNow(redirectDelayMinutes(value, unit), new Date()),
-    payload: {
-      stage,
-      widgetThreadId: payload.widgetThreadId,
-      agentId: payload.agentId,
-      entryInboxId,
-    },
-  });
+  ): Promise<JobResult> =>
+    (await retired())
+      ? { outcome: "done" }
+      : {
+          outcome: "reschedule",
+          runAt: minutesFromNow(redirectDelayMinutes(value, unit), new Date()),
+          payload: {
+            stage,
+            widgetThreadId: payload.widgetThreadId,
+            agentId: payload.agentId,
+            entryInboxId,
+          },
+        };
 
   if (payload.stage === "chat") {
     if (cfg.chatFollowupEnabled) {
@@ -482,18 +492,19 @@ export async function redirectFollowUpHandler(
         threadId: payload.widgetThreadId,
         nudge: chatFollowupNudge(cfg.chatFollowupInstructions),
         base,
+        stillWanted: async () => !(await retired()),
         deps,
       });
     }
     if (cfg.waFollowupEnabled) {
-      return rescheduleTo(
+      return await rescheduleTo(
         "whatsapp",
         cfg.waFollowupDelayValue,
         cfg.waFollowupDelayUnit,
       );
     }
     if (cfg.closingEnabled) {
-      return rescheduleTo(
+      return await rescheduleTo(
         "closing",
         cfg.closingDelayValue,
         cfg.closingDelayUnit,
@@ -503,6 +514,11 @@ export async function redirectFollowUpHandler(
   }
 
   if (payload.stage === "whatsapp") {
+    // The two stages below send FIXED text rather than a nudge, so `stillWanted` never reaches them:
+    // the question is asked here instead, immediately before the send. Both cross channels — this one
+    // messages the WhatsApp sibling, the closing messages and RESOLVES both — so a stamp that landed
+    // while the config and the sibling were being resolved has to be seen.
+    if (await retired()) return { outcome: "done" };
     if (cfg.waFollowupEnabled && entryInboxId !== null) {
       const outcome = await sendWhatsAppFollowUp({
         tenantId,
@@ -524,7 +540,7 @@ export async function redirectFollowUpHandler(
       }
     }
     if (cfg.closingEnabled) {
-      return rescheduleTo(
+      return await rescheduleTo(
         "closing",
         cfg.closingDelayValue,
         cfg.closingDelayUnit,
@@ -534,6 +550,7 @@ export async function redirectFollowUpHandler(
   }
 
   // stage === "closing" — the ladder's terminal give-up: post the closing on BOTH channels + resolve, once.
+  if (await retired()) return { outcome: "done" };
   if (cfg.closingEnabled && entryInboxId !== null) {
     await deliverRedirectClosing({
       tenantId,

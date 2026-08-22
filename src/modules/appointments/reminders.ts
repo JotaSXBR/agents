@@ -387,6 +387,10 @@ export async function appointmentReminderHandler(
   await runAgentNudge({
     tenantId,
     threadId,
+    // And once more inside, where the nudge re-asks its own questions across the model call. Three
+    // reads is not belt-and-braces: each covers a different slow step (the Google fetch, the nudge's
+    // setup, the judge's call), and the stamp can land in any of them.
+    stillWanted: async () => !(await retired()),
     nudge: reminderNudge({
       isLast,
       askConfirmation,
