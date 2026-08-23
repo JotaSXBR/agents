@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { analyzeGuardrail, splitAnalyses } from "@/modules/guardrails/analyze";
-import { buildGuardrailGate } from "@/modules/guardrails/gate";
+import {
+  buildGuardrailGate,
+  chatwootNoteSink,
+  type GuardrailReport,
+  guardrailLeftAMark,
+  guardrailRan,
+} from "@/modules/guardrails/gate";
 import { buildGuardrailSystemPrompt } from "@/modules/guardrails/prompts";
 import {
   GUARDRAILS_DEFAULTS,
@@ -399,6 +405,22 @@ describe("splitAnalyses", () => {
     expect(relevance).not.toBeNull();
   });
 
+  // The playground's guardrail toggle publishes this ceiling to the operator, in a tooltip whose
+  // whole job is letting them decide whether to pay for the screening. It said one call per
+  // direction, which is what this table says only when relevance is off — so the number lives here,
+  // where changing the split changes the test, and the prose is copied from it.
+  test("the output direction costs two calls, and only answer relevance makes it two", () => {
+    const calls = (p: Parameters<typeof splitAnalyses>[0]) => {
+      const { policies, relevance } = splitAnalyses(p);
+      return (policies ? 1 : 0) + (relevance ? 1 : 0);
+    };
+    expect(calls(full)).toBe(2);
+    expect(
+      calls({ ...full, checks: { ...full.checks, answerRelevance: false } }),
+    ).toBe(1);
+    expect(calls({ ...full, direction: "input" as const })).toBe(1);
+  });
+
   // The operator's policy renders whether or not any check is on, so it alone keeps the call alive.
   test("a custom policy on its own still gets its call", () => {
     const { policies } = splitAnalyses({
@@ -754,9 +776,15 @@ describe("analyzeGuardrail", () => {
   // Fail-open is the right policy and it is also indistinguishable, from the outside, from a
   // guardrail that ran and approved. The verdict has to say which one happened, or an operator whose
   // credential expired keeps reading "no violations" forever. Same argument as `onModelRetry` (#63).
+  // The point is that it is REPORTED — a judge that could not run must not read as one that ran and
+  // approved. What it reports is a word of ours: the request under review is the customer's own
+  // message, so a refusal quoting it would put that message into the guardrail line (this `error`
+  // becomes `errorMessage` in `gate.ts`). See @/lib/provider-failure.
   test("a model error is reported as a failure to analyze, not as approval", async () => {
     const v = await analyzeProse(throwingModel, base);
-    expect(v.error).toContain("boom");
+    expect(v.violated).toBe(false);
+    expect(v.error).toBe("provider error");
+    expect(v.error).not.toContain("boom");
   });
 
   // Two different ways the output can be unusable, and they leave by different branches: no JSON
@@ -916,11 +944,6 @@ describe("buildGuardrailGate", () => {
       apiKey: "k",
     },
     {
-      name: "the guardrails agent has no credential",
-      cfg: enabledCfg(),
-      apiKey: "",
-    },
-    {
       name: "this direction is switched off",
       cfg: enabledCfg({
         output: { ...GUARDRAILS_DEFAULTS.output, enabled: false },
@@ -971,8 +994,7 @@ describe("buildGuardrailGate", () => {
         },
       }),
       apiKey: "k",
-      client,
-      conversationId: 1,
+      announce: chatwootNoteSink(client, 1),
       flow,
       makeModel: f.make,
     });
@@ -1009,8 +1031,7 @@ describe("buildGuardrailGate", () => {
         },
       }),
       apiKey: "k",
-      client,
-      conversationId: 1,
+      announce: chatwootNoteSink(client, 1),
       flow,
       makeModel: f.make,
     });
@@ -1026,8 +1047,7 @@ describe("buildGuardrailGate", () => {
       const gate = buildGuardrailGate({
         cfg: c.cfg,
         apiKey: c.apiKey,
-        client,
-        conversationId: 1,
+        announce: chatwootNoteSink(client, 1),
         flow,
         makeModel: f.make,
       });
@@ -1038,6 +1058,34 @@ describe("buildGuardrailGate", () => {
     });
   }
 
+  // A deleted or cross-tenant vault entry leaves `guardrailsApiKey` empty (prepare.ts), and the
+  // operator has no way to see that from the console: the editor still shows a credentialRef, so
+  // the toggle still reads as available. It used to report `not-run`, the same answer as "you
+  // switched this off", which is the one case of the three the issue names that stayed invisible.
+  test("a credential that did not resolve is unavailable, not switched off", async () => {
+    const f = countingFactory(() => {
+      throw new Error("should never be constructed");
+    });
+    const seen: GuardrailReport[] = [];
+    const gate = buildGuardrailGate({
+      cfg: enabledCfg(),
+      apiKey: "",
+      announce: (r) => {
+        seen.push(r);
+      },
+      flow,
+      makeModel: f.make,
+    });
+    expect(await gate("output", "olá")).toEqual({
+      kind: "unavailable",
+      modelRan: false,
+    });
+    // No key means no call to make, so nothing is built and nothing is billed — the difference
+    // from `not-run` is entirely in what the operator is told.
+    expect(f.calls()).toBe(0);
+    expect(seen).toEqual([{ direction: "output", outcome: "unavailable" }]);
+  });
+
   // The reason the check above is not just an optimization: createChatModel throws SYNCHRONOUSLY on
   // a configuration it cannot satisfy, and this gate is built on every turn and every follow-up.
   test("a model that cannot be constructed is fail-open, not a failed turn", async () => {
@@ -1047,15 +1095,110 @@ describe("buildGuardrailGate", () => {
     const gate = buildGuardrailGate({
       cfg: enabledCfg(),
       apiKey: "k",
-      client,
-      conversationId: 1,
+      announce: chatwootNoteSink(client, 1),
       flow,
       makeModel: f.make,
     });
     // Fail-open for the customer, and "unavailable" rather than "clean" for the operator: the warn
     // it just emitted is the mark a retry would repeat.
-    expect(await gate("output", "olá")).toEqual({ kind: "unavailable" });
+    expect(await gate("output", "olá")).toEqual({
+      kind: "unavailable",
+      modelRan: false,
+    });
     expect(f.calls()).toBe(1);
+  });
+
+  // `guardrailRan` answers ONE question — did seconds pass at a provider — and the proactive path
+  // spends a live Chatwoot read per `true`, then treats a read it cannot complete as "a human took
+  // over" and turns the follow-up into a private note. So the two ways to reach `unavailable` have
+  // to answer it differently: the analysis that errored had already made the call, and the gate
+  // that could not be set up never left this process. Written as a table because the alternative,
+  // `kind !== "not-run"`, is true for all three rows and was wrong on two of them.
+  describe("whether a model call was actually spent", () => {
+    const rows: {
+      name: string;
+      apiKey: string;
+      impl: () => BaseChatModel;
+      ran: boolean;
+    }[] = [
+      {
+        name: "the credential never resolved",
+        apiKey: "",
+        impl: () => {
+          throw new Error("should never be constructed");
+        },
+        ran: false,
+      },
+      {
+        name: "the model would not build",
+        apiKey: "k",
+        impl: () => {
+          throw new Error("openai-compatible provider requires a base URL");
+        },
+        ran: false,
+      },
+      {
+        name: "the analysis itself failed",
+        apiKey: "k",
+        impl: () =>
+          guardrailModel(async () => {
+            throw new Error("upstream 503");
+          }),
+        ran: true,
+      },
+    ];
+
+    for (const row of rows) {
+      test(`${row.name} → ran=${row.ran}`, async () => {
+        const f = countingFactory(row.impl);
+        const gate = buildGuardrailGate({
+          cfg: enabledCfg(),
+          apiKey: row.apiKey,
+          announce: chatwootNoteSink(client, 1),
+          flow,
+          makeModel: f.make,
+        });
+        const d = await gate("output", "olá");
+        // Every row here is fail-open and every row pages, which is exactly why the kind cannot
+        // carry the answer on its own.
+        expect(d).toEqual({ kind: "unavailable", modelRan: row.ran });
+        expect(guardrailLeftAMark(d)).toBe(true);
+        expect(guardrailRan(d)).toBe(row.ran);
+      });
+    }
+
+    // The other two answers, so the table covers the whole union rather than one corner of it.
+    test("a clean screening ran, and a switched-off one did not", async () => {
+      const clean = countingFactory(() =>
+        guardrailModel(async () => ({
+          content: JSON.stringify({
+            violated: false,
+            categories: [],
+            rationale: "",
+            suggestedReply: null,
+          }),
+        })),
+      );
+      const onGate = buildGuardrailGate({
+        cfg: enabledCfg(),
+        apiKey: "k",
+        announce: chatwootNoteSink(client, 1),
+        flow,
+        makeModel: clean.make,
+      });
+      expect(guardrailRan(await onGate("output", "olá"))).toBe(true);
+
+      const offGate = buildGuardrailGate({
+        cfg: { ...GUARDRAILS_DEFAULTS, enabled: false },
+        apiKey: "k",
+        announce: chatwootNoteSink(client, 1),
+        flow,
+        makeModel: countingFactory(() => {
+          throw new Error("should never be constructed");
+        }).make,
+      });
+      expect(guardrailRan(await offGate("output", "olá"))).toBe(false);
+    });
   });
 
   // What the trail and the operator note report is what the guardrail DID, not what it was
@@ -1074,12 +1217,14 @@ describe("buildGuardrailGate", () => {
         },
       }),
       apiKey: "k",
-      client: {
-        sendPrivateNote: async (_c: number, t: string) => {
-          notes.push(t);
-        },
-      } as never,
-      conversationId: 1,
+      announce: chatwootNoteSink(
+        {
+          sendPrivateNote: async (_c: number, t: string) => {
+            notes.push(t);
+          },
+        } as never,
+        1,
+      ),
       flow,
       makeModel: (() =>
         guardrailModel(async () => ({
@@ -1100,6 +1245,38 @@ describe("buildGuardrailGate", () => {
     expect(notes[0]).not.toContain("generated");
   });
 
+  // The gate announces EVERY outcome so the playground can annotate a clean screening (issue #136);
+  // the conversation must not receive a note for each one. The filter is what keeps the inbox's
+  // behaviour where it was after the announcement stopped being written inline.
+  test("only a trip reaches the conversation as a private note", async () => {
+    const notes: string[] = [];
+    const sink = chatwootNoteSink(
+      {
+        sendPrivateNote: async (_c: number, t: string) => {
+          notes.push(t);
+        },
+      } as never,
+      1,
+    );
+    await sink({ direction: "output", outcome: "clean" });
+    await sink({ direction: "input", outcome: "unavailable" });
+    expect(notes).toEqual([]);
+    await sink({
+      direction: "output",
+      outcome: "replaced",
+      action: "template",
+      categories: ["toxicity"],
+      rationale: "rude",
+    });
+    expect(notes).toHaveLength(1);
+    await sink({
+      direction: "output",
+      outcome: "suppressed",
+      action: "silent",
+    });
+    expect(notes).toHaveLength(2);
+  });
+
   test("a construction that failed is not retried on the next call", async () => {
     const f = countingFactory(() => {
       throw new Error("nope");
@@ -1107,8 +1284,7 @@ describe("buildGuardrailGate", () => {
     const gate = buildGuardrailGate({
       cfg: enabledCfg(),
       apiKey: "k",
-      client,
-      conversationId: 1,
+      announce: chatwootNoteSink(client, 1),
       flow,
       makeModel: f.make,
     });
@@ -1134,8 +1310,7 @@ describe("buildGuardrailGate", () => {
     const gate = buildGuardrailGate({
       cfg: enabledCfg(),
       apiKey: "k",
-      client,
-      conversationId: 1,
+      announce: chatwootNoteSink(client, 1),
       flow,
       makeModel: f.make,
     });

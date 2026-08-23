@@ -1,4 +1,8 @@
-import type { BaseMessage } from "@langchain/core/messages";
+import {
+  AIMessage,
+  type BaseMessage,
+  HumanMessage,
+} from "@langchain/core/messages";
 import type { PrismaClient } from "@/../generated/prisma/client";
 import logger from "@/api/lib/logger";
 import basePrisma from "@/api/lib/prisma";
@@ -11,11 +15,13 @@ import {
   type TraceEntry,
   type TraceSource,
 } from "@/graph/trace";
+
 import { NotFoundError } from "@/lib/errors";
 import { runScopedOn, type TenantContext } from "@/lib/tenancy";
 import { documentToolName } from "@/modules/documents/templates";
 import { listThreadMedia } from "./media";
 import { isValidPlaygroundThread } from "./thread";
+import { type LoadedTurnNote, listThreadTurnNotes } from "./turn-notes";
 
 // Server-side playground session history. The PlaygroundSession table holds ONLY metadata
 // (threadId + title + timestamps, tenant-scoped + RLS); the conversation itself lives in the
@@ -128,6 +134,10 @@ export interface RebuiltTurn {
   messageId?: string;
   // Persisted media attached to this turn (recorded audio / uploaded file / TTS reply).
   media?: RebuiltMedia[];
+  // The guardrail removed a reply the agent DID write. Only meaningful on a follow-up, where the
+  // client renders a suppression note instead of an empty bubble, because "nothing was sent" and
+  // "the agent chose silence" are different statements.
+  suppressed?: boolean;
   trace: TraceEntry[];
   sources: TraceSource[];
 }
@@ -224,6 +234,152 @@ export function rebuildPlaygroundTurns(
     i = j;
   }
   return turns;
+}
+
+// Folds the transcript notes over the checkpointer-derived turns (issue #136).
+//
+// A note WITH a message id overrides the reply that message produced. A note without one is a whole
+// turn the thread never received (the input block). And a third case joins them rather than forming
+// a mechanism of its own: an override whose message the rebuild DROPPED, which happens whenever the
+// agent's own reply was empty. Every one of those asks the same question of an id — does the
+// transcript still show it? — and the answer decides between overriding in place and being placed.
+//
+// Getting that question wrong in either direction loses a turn, so the placements share one loop
+// and one guarantee: a target that no longer resolves still renders, at the end. Losing the turn
+// entirely is the failure this whole store exists to prevent.
+// Where a placement goes, for both shapes that need placing. `after` is the message it follows;
+// `whenUnanchored` is what a NULL after means, and the two shapes mean opposite things by it: an
+// input block with no anchor happened on an empty thread and belongs first, while an annotation
+// whose user message was never recorded has no known home and belongs at the end. An `after` that
+// is set but never seen falls to the end either way.
+interface Placement {
+  after: string | null;
+  whenUnanchored: "start" | "end";
+  render: () => RebuiltTurn[];
+}
+
+// Direction IS position: the input screening ran before the graph and the output one after, so
+// appending both would report an execution sequence the turn never had.
+function verdictsAround(note: LoadedTurnNote, own: TraceEntry[]): TraceEntry[] {
+  const before = note.guardrails.filter((g) => g.direction === "input");
+  const after = note.guardrails.filter((g) => g.direction !== "input");
+  return [...before, ...own, ...after];
+}
+
+// A reply the guardrail EMPTIED, which is not the same as an agent that had nothing to say. Read
+// off the verdicts rather than off the text, or a turn the agent ended in silence would be
+// reported as moderated.
+function suppressedByGuardrail(note: LoadedTurnNote): boolean {
+  return note.guardrails.some((g) => g.outcome === "suppressed");
+}
+
+// The turn the operator should read, in place of the one the thread produced.
+function annotated(note: LoadedTurnNote, turn: RebuiltTurn): RebuiltTurn {
+  return {
+    ...turn,
+    text: note.reply,
+    ...(suppressedByGuardrail(note) ? { suppressed: true } : {}),
+    trace: verdictsAround(note, turn.trace),
+  };
+}
+
+// The same turn when the thread has none to override: the agent's reply was empty, so the rebuild
+// dropped it, and the verdict would go with it.
+function annotatedReply(note: LoadedTurnNote): RebuiltTurn {
+  return {
+    role: "assistant",
+    text: note.reply,
+    ...(suppressedByGuardrail(note) ? { suppressed: true } : {}),
+    trace: verdictsAround(note, []),
+    sources: [],
+  };
+}
+
+export function applyTurnNotes(
+  turns: RebuiltTurn[],
+  notes: LoadedTurnNote[],
+): RebuiltTurn[] {
+  if (notes.length === 0) return turns;
+  // What the transcript actually shows. An id the rebuild kept can be overridden in place; anything
+  // else has to be placed, however it was stored.
+  const shown = new Set(
+    turns.map((t) => t.messageId).filter((id): id is string => !!id),
+  );
+  const overrides = new Map<string, LoadedTurnNote>();
+  const placements: Placement[] = [];
+  for (const n of notes) {
+    if (n.messageId && shown.has(n.messageId)) {
+      overrides.set(n.messageId, n);
+    } else if (n.messageId) {
+      // The reply this annotates was empty, so the rebuild dropped it (an AI message with no text
+      // adds no bubble). The verdict still has to reach the operator, next to the message it judged.
+      placements.push({
+        after: n.userMessageId,
+        whenUnanchored: "end",
+        render: () => [annotatedReply(n)],
+      });
+    } else {
+      // A turn the thread never received at all. A null anchor is a statement, not a failure: the
+      // thread was empty when it happened, so it goes first.
+      placements.push({
+        after: n.anchorMessageId,
+        whenUnanchored: "start",
+        render: () => blockedTurns(n),
+      });
+    }
+  }
+  // A turn the thread never received is rebuilt through the SAME renderer as every other turn, from
+  // the two messages it would have been. Building it by hand is what lost the audio/file unwrapping
+  // and the media join: the marker text rendered as a plain bubble, and there was no message id to
+  // hang the recording on. The verdict lands on the last turn of the pair, which is the one the
+  // operator reads it against.
+  const blockedTurns = (n: LoadedTurnNote): RebuiltTurn[] => {
+    const msgs: BaseMessage[] = [
+      new HumanMessage({
+        content: n.userText ?? "",
+        ...(n.userMessageId ? { id: n.userMessageId } : {}),
+      }),
+    ];
+    if (n.reply) msgs.push(new AIMessage({ content: n.reply }));
+    const built = rebuildPlaygroundTurns(msgs);
+    // A `silent` action leaves no reply, and the renderer drops an empty AI message by design (a
+    // follow-up the agent declined adds nothing). Here it has to stay visible: the client discards
+    // a user turn's trace, so hanging the verdict there loses it, and the operator is left with a
+    // bare message and no sign that anything blocked it.
+    if (!n.reply) {
+      built.push({
+        role: "assistant",
+        text: "",
+        suppressed: true,
+        trace: [...n.guardrails],
+        sources: [],
+      });
+      return built;
+    }
+    const last = built[built.length - 1];
+    if (last) last.trace = [...last.trace, ...n.guardrails];
+    return built;
+  };
+  const out: RebuiltTurn[] = [];
+  const placed = new Set<Placement>();
+  for (const pl of placements) {
+    if (pl.after === null && pl.whenUnanchored === "start") {
+      out.push(...pl.render());
+      placed.add(pl);
+    }
+  }
+  for (const turn of turns) {
+    const note = turn.messageId ? overrides.get(turn.messageId) : undefined;
+    out.push(note && turn.role === "assistant" ? annotated(note, turn) : turn);
+    for (const pl of placements) {
+      if (!placed.has(pl) && pl.after !== null && pl.after === turn.messageId) {
+        out.push(...pl.render());
+        placed.add(pl);
+      }
+    }
+  }
+  for (const pl of placements) if (!placed.has(pl)) out.push(...pl.render());
+  return out;
 }
 
 // Upsert the session metadata after a turn. Best-effort: a history-write hiccup must never break the
@@ -324,12 +480,15 @@ export async function getPlaygroundSessionTurns(
       select: { documentTemplate: { select: { slug: true } } },
     }),
   );
-  const turns = rebuildPlaygroundTurns(
-    messages,
-    documentTools
-      .map((g) => g.documentTemplate?.slug)
-      .filter((slug): slug is string => !!slug)
-      .map(documentToolName),
+  const turns = applyTurnNotes(
+    rebuildPlaygroundTurns(
+      messages,
+      documentTools
+        .map((g) => g.documentTemplate?.slug)
+        .filter((slug): slug is string => !!slug)
+        .map(documentToolName),
+    ),
+    await listThreadTurnNotes(base, tenantId, threadId),
   );
 
   // Join persisted media onto the turns by message id (best-effort replay — if the checkpointer
@@ -352,15 +511,31 @@ export async function getPlaygroundSessionTurns(
   return turns;
 }
 
-// Remove a session from history. Only our metadata row is deleted; the checkpointer thread is left
-// to LangGraph (it becomes unreachable from the UI, which is sufficient for a test surface).
+// Remove a session from history, thread and all — which is what the endpoint has always said it
+// does. Leaving the checkpointer thread behind used to be harmless, because the transcript WAS the
+// thread; now the annotations that explain it live in rows of ours, and the turn endpoint accepts
+// any thread id that passes the fence below. So a caller holding a deleted id could open a turn on
+// it and get the old conversation back with the moderation deleted: the raw replies a guardrail
+// replaced, presented as the agent's own (issue #136).
 export async function deletePlaygroundSession(
   tenantId: bigint,
   agentId: bigint,
   threadId: string,
   base: PrismaClient = basePrisma,
 ): Promise<void> {
-  await runScopedOn(base, sysCtx(tenantId), (db) =>
-    db.playgroundSession.deleteMany({ where: { agentId, threadId } }),
-  );
+  // The fence is what makes the line below safe to run at all: `deleteThread` is scoped by nothing,
+  // and every Chatwoot conversation is a thread in the same checkpointer.
+  if (!isValidPlaygroundThread(threadId, tenantId, agentId)) {
+    throw new NotFoundError("session not found", "errors.sessionNotFound");
+  }
+  // First, and not swallowed: a delete that dropped our rows and left the thread would leave
+  // exactly the state described above. Failing here leaves the session whole instead.
+  const checkpointer = await getCheckpointer();
+  await checkpointer.deleteThread(threadId);
+  await runScopedOn(base, sysCtx(tenantId), async (db) => {
+    // The transcript notes go with it. Left behind they would be orphans, and pruned separately
+    // they would put a still-reloadable session back to the raw reply (issue #136).
+    await db.playgroundTurnNote.deleteMany({ where: { agentId, threadId } });
+    await db.playgroundSession.deleteMany({ where: { agentId, threadId } });
+  });
 }

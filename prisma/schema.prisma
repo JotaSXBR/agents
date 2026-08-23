@@ -121,6 +121,7 @@ model Tenant {
   knowledgeDocuments            KnowledgeDocument[]
   playgroundSessions            PlaygroundSession[]
   playgroundMedia               PlaygroundMedia[]
+  playgroundTurnNotes           PlaygroundTurnNote[]
   approvalQueueItems            ApprovalQueueItem[]
   vaultEntries                  VaultEntry[]
   toolDefinitions               ToolDefinition[]
@@ -783,6 +784,53 @@ model PlaygroundSession {
   @@map("playground_sessions")
 }
 
+// What the OPERATOR saw for one playground turn, when that differs from what the agent remembers.
+// The transcript and the agent's memory are two different things, and moderation is the first
+// feature where they legitimately diverge: production keeps the raw reply in the graph thread and
+// posts the screened one to Chatwoot, and a turn the input guardrail blocked never enters the
+// thread at all (issue #136). The playground rebuilds its transcript from the checkpointer, so
+// without this row a reload shows the reply the guardrail took away, with no sign it ever acted.
+//
+// Registered in TENANT_SCOPED_MODELS (src/lib/tenancy/multi-tenant.ts), like every table with a
+// tenant_id that is not global/identity: the extension supplies the tenant on insert and overrides
+// a caller-supplied one. A guard in tests/lib/tenancy.test.ts reads both sides, because that list
+// is kept by hand and this row joined it one review round late.
+//
+// Every turn the guardrail RAN on gets a row, the clean verdicts included: the playground's toggle
+// is per turn, so a reload with no clean mark cannot tell an approved reply from one nothing ever
+// screened. A turn it never ran on has no row and still comes from the checkpointer alone.
+model PlaygroundTurnNote {
+  id       BigInt @id @default(autoincrement())
+  tenantId BigInt @map("tenant_id")
+  agentId  BigInt @map("agent_id")
+  threadId String @map("thread_id")
+  // The AIMessage this OVERRIDES, when the rebuilt transcript still shows it. Null for a turn the
+  // thread has no record of (the input block); set but no longer shown when the agent's reply was
+  // empty, since the rebuild drops an AI message with no text. Both of those are placed instead,
+  // by the two ids below.
+  messageId String? @map("message_id")
+  // Where a blocked turn goes: the last message the rebuilt transcript SHOWED when it happened, so
+  // it lands after that turn. Deliberately not the raw tail of the thread, which can be a message
+  // the rebuild drops. Null means the thread was empty, i.e. it goes first.
+  anchorMessageId String? @map("anchor_message_id")
+  // The human message of this turn, minted by the service for EVERY turn. Two readers: the media
+  // saved for a blocked turn joins back on it, and an annotation whose own reply was dropped is
+  // placed after it.
+  userMessageId String? @map("user_message_id")
+  // The customer's own text, carried only for a blocked turn (the thread never received it).
+  userText String? @map("user_text")
+  // What the operator saw in place of the model's reply. Empty for a suppressed one.
+  reply String
+  // The TraceGuardrail entries for this turn, as the live turn returned them.
+  guardrails Json
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, threadId])
+  @@map("playground_turn_notes")
+}
+
 // Binary media (recorded voice notes, generated TTS replies, uploaded files) for playground replay.
 // Linked to a turn by the LangChain message id (messageId) it belongs to, with a creation-order
 // fallback. The conversation transcript lives in the checkpointer; only the bytes live here.
@@ -888,23 +936,6 @@ model ToolDefinition {
   body             Json     @default("{}")
   credentialRef    String?  @map("credential_ref")
   enabled          Boolean  @default(true)
-  // NOTE: RETIRED (issue #137). `@ignore` is what retires it: the field leaves the generated client
-  // entirely, so no query this build sends NAMES the column and reading it is a compile error, while
-  // the column itself stays in the database and in the migration history (`migrate diff` across this
-  // attribute is an empty migration).
-  //
-  // Not naming it is the point, and it is a stronger condition than not reading it: a Prisma query
-  // without an explicit `select` asks for every scalar column of the model, and so does a relation
-  // pulled in as `toolDefinition: true`, so a call site that never touches the field still puts it
-  // in the SQL. An older image running such a query after the column is dropped answers
-  // `undefined_column`. Measured on v1.9.0 against a database with the column already gone: the
-  // agent export and saving a tool both failed, and only the one read with an explicit select kept
-  // working, which is the opposite of what auditing the SELECT lists suggests (issue #149).
-  //
-  // So the drop belongs one release after THIS attribute, not one release after #137: rolling back
-  // now lands on a build that still asks for the column. Dropping it is then this line's removal
-  // plus the migration `migrate diff` already writes.
-  riskTier         String   @default("medium") @map("risk_tier") @ignore
   // HTTP statuses this tool declares as RESULTS rather than integration failures. Empty (the
   // default) keeps issue #40's behavior, where every non-2xx is logged warn and reaches the alert
   // channels. A declarative lookup that answers 404 for "no record" lists it here so a healthy turn

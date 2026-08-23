@@ -1,5 +1,6 @@
 import type { BaseMessage } from "@langchain/core/messages";
 import { redactSecretsDeep, redactSecretsInText, truncate } from "@/lib/redact";
+import type { GuardrailReport } from "@/modules/guardrails/gate";
 
 // Builds a sanitized, human-readable execution trace from the graph's final message list, for the
 // agent playground (UI + the agent_playground MCP tool). It is a DEBUG view: the sequence of tool
@@ -65,13 +66,60 @@ export interface TraceMedia {
   output: string; // redacted + truncated
 }
 
+// A moderation screening, which runs OUTSIDE the graph on both sides of it and so never lands in
+// the message-derived trace either. On the inbox path what the guardrail did is announced as a
+// private note on the conversation; the playground is not a conversation, and without this entry a
+// template reply is indistinguishable from an agent that answered badly (issue #136). `clean` and
+// `unavailable` are here for the reading the reply cannot give on its own: whether a guardrail ran
+// at all, which is what makes a misconfigured one visible where it is cheapest to notice.
+// It IS the gate's own report, tagged: the playground pushes one straight through. Re-declaring
+// the fields here would be the same union written twice, and the outcomes are exactly the decisions
+// the gate can reach minus the one that reports nothing. `action` is the action as it was CARRIED
+// OUT (a `generated` with no replacement in hand sends the template, and says template);
+// `categories` and `rationale` are model-written and present only on a trip, and are the operator's
+// whole explanation of why the reply they are reading is not the one the agent wrote.
+export interface TraceGuardrail extends GuardrailReport {
+  type: "guardrail";
+}
+
+// The one way a report becomes a trace row. `rationale` and `categories` are written by a model
+// that was shown the reply, so a token the reply leaked can come back quoted inside them — and this
+// row is returned over REST/MCP and persisted, exactly like the assistant text a few lines below,
+// which is redacted and bounded for that reason. Pushing the report through `...r` gave the judge's
+// prose a path into the trace that the agent's own prose does not have.
+export function traceGuardrail(r: GuardrailReport): TraceGuardrail {
+  return {
+    type: "guardrail",
+    direction: r.direction,
+    outcome: r.outcome,
+    ...(r.action ? { action: r.action } : {}),
+    ...(r.categories?.length
+      ? {
+          // Bounded in count as well as in length: the list is model-written, so nothing upstream
+          // limits how many labels come back.
+          categories: r.categories
+            .slice(0, CATEGORIES_MAX)
+            .map((c) => redactSecretsInText(truncate(c, CATEGORY_MAX))),
+        }
+      : {}),
+    ...(r.rationale
+      ? { rationale: redactSecretsInText(truncate(r.rationale, OUTPUT_MAX)) }
+      : {}),
+  };
+}
+
 export type TraceEntry =
   | TraceToolCall
   | TraceToolResult
   | TraceAssistant
-  | TraceMedia;
+  | TraceMedia
+  | TraceGuardrail;
 
 const OUTPUT_MAX = 2000;
+// A category is a label ("toxicity", "competitor_mention"), not prose, and the operator reads the
+// whole list at a glance.
+const CATEGORIES_MAX = 12;
+const CATEGORY_MAX = 80;
 
 function msgType(m: BaseMessage): string {
   const anyM = m as unknown as {

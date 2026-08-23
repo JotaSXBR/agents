@@ -35,6 +35,7 @@ import {
 } from "@/modules/flowlog/service";
 import {
   buildGuardrailGate,
+  chatwootNoteSink,
   guardrailTripped,
   screenedText,
 } from "@/modules/guardrails/gate";
@@ -478,8 +479,7 @@ export async function runLoadedTurn(
     cfg: loaded.guardrails,
     apiKey: loaded.guardrailsApiKey,
     credentialBaseUrl: loaded.guardrailsCredentialBaseUrl,
-    client,
-    conversationId,
+    announce: chatwootNoteSink(client, conversationId),
     flow,
     systemPrompt: loaded.systemPrompt,
     // The raw inbound text, not `turnText`: on the first turn of a new conversation the latter
