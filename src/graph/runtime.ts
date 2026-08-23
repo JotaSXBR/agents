@@ -356,12 +356,26 @@ export async function runLoadedTurn(
   // spending the rest of the turn on nobody.
   //
   // `stillWanted` first, and that is not the cheap-question-first reflex: `shouldPost` CLAIMS the
-  // burst, advancing the handled watermark as its CAS. Asked the other way round, a retired run
+  // burst, advancing the handled watermark as its CAS. Asked only the other way round, a retired run
   // would declare a burst handled on its way to standing down — messages nothing ever answered,
   // marked as if something had.
+  //
+  // And asked AGAIN on the way out, because the ask above is not the fence: `shouldPost` re-fetches
+  // the conversation from Chatwoot and then runs the CAS, so between the first answer and the
+  // caller's send sits a round trip — the same shape as every other place this PR closed. The
+  // supersede gate does not cover the window: a /reset typed on the ENTRY conversation retires the
+  // WIDGET's flush (webhook.ts sweeps both sides of the pair), and the re-fetch reads the widget's
+  // messages, where nothing new arrived.
+  //
+  // The second ask can only answer after the claim, so a burst retired in that window is consumed
+  // without being answered — the outcome the first ask exists to avoid, accepted here because the
+  // alternative is posting into a conversation the customer just reset. It is also not new: the
+  // output-guardrail path has returned "stale" past this same claim since the ask after that model
+  // call was added.
   const postBlocked = async (): Promise<"stale" | "superseded" | null> => {
     if (await writeCalledOff()) return "stale";
     if (params.shouldPost && !(await params.shouldPost())) return "superseded";
+    if (await writeCalledOff()) return "stale";
     return null;
   };
 

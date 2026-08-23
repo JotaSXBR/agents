@@ -1027,4 +1027,106 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
       await suDb.conversation.delete({ where: { id: decoy.id } });
     }
   });
+
+  test("a second entry that also redirected leaves the episode unnamed", async () => {
+    const FRESH_CONV = 7175;
+    const SECOND_ENTRY = 7176;
+    const widgetInbox = await suDb.inbox.findFirstOrThrow({
+      where: { tenantId, chatwootInboxId: 111 },
+    });
+    const entryInbox = await suDb.inbox.findFirstOrThrow({
+      where: { tenantId, chatwootInboxId: 110 },
+    });
+    const contact = await suDb.contact.findFirstOrThrow({
+      where: { tenantId, chatwootContactId: 991 },
+    });
+    // A SECOND funnel for the same contact, redirected more recently than the fixture's entry. Its
+    // link is the last one minted, and that is all it is: the fixture's token is a single-use token
+    // with a 24h TTL, so it is still live and may be the one the customer clicked.
+    const second = await suDb.conversation.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        inboxId: entryInbox.id,
+        contactId: contact.id,
+        chatwootConversationId: SECOND_ENTRY,
+        status: "open",
+        threadId: `${tenantId}:${instanceId}:${SECOND_ENTRY}`,
+        lastEventAt: new Date(),
+        redirectSentAt: new Date(),
+      },
+    });
+    const fresh = await suDb.conversation.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        inboxId: widgetInbox.id,
+        contactId: contact.id,
+        chatwootConversationId: FRESH_CONV,
+        status: "pending",
+        threadId: `${tenantId}:${instanceId}:${FRESH_CONV}`,
+        lastEventAt: new Date(),
+      },
+    });
+    wire.length = 0;
+    globalThis.fetch = httpDouble;
+    try {
+      await linkRedirectConversations({
+        tenantId,
+        instanceId,
+        agentId,
+        mode: "production",
+        cfg: {
+          ...CHANNEL_REDIRECT_DEFAULTS,
+          enabled: true,
+          entryInboxId: 110,
+          widgetInboxId: 111,
+        },
+        widgetConv: {
+          id: fresh.id,
+          displayId: FRESH_CONV,
+          testActivatedAt: null,
+          contactId: contact.id,
+        },
+        base: appDb,
+      });
+
+      const row = await suDb.conversation.findUniqueOrThrow({
+        where: { id: fresh.id },
+        select: {
+          redirectLinkedAt: true,
+          redirectEntryConversationId: true,
+        },
+      });
+      // The one-shot still fired, so it never re-runs or re-spams.
+      expect(row.redirectLinkedAt).not.toBeNull();
+      // But the pair is not named, and nothing downstream will act on a guess.
+      expect(row.redirectEntryConversationId).toBeNull();
+      expect(
+        await resolveRedirectEpisode(
+          tenantId,
+          instanceId,
+          contact.id,
+          FRESH_CONV,
+          {
+            ...CHANNEL_REDIRECT_DEFAULTS,
+            enabled: true,
+            entryInboxId: 110,
+            widgetInboxId: 111,
+          },
+          appDb,
+        ),
+      ).toEqual({ side: "widget", siblingConversationId: null });
+      // The operator still gets both cross-link notes, pointed at the latest redirect. That guess
+      // costs a human one click on the wrong tab; the identity above would have cost a goodbye and a
+      // RESOLVE on a conversation this chat never opened from.
+      expect(
+        wire.some((u) => u.includes(`/conversations/${SECOND_ENTRY}/messages`)),
+      ).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await suDb.conversation.delete({ where: { id: fresh.id } });
+      await suDb.conversation.delete({ where: { id: second.id } });
+    }
+  });
 });

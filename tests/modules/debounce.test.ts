@@ -7,6 +7,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/../generated/prisma/client";
 import { encryptJson } from "@/api/lib/crypto";
 import { chatwootThreadId, contactInboxThreadId } from "@/graph/checkpointer";
+import type { ResolvedModelConfig } from "@/graph/models";
 import {
   clearMediaAnnotations,
   stashMediaAnnotation,
@@ -29,6 +30,7 @@ import {
 import { seedChatwootInstance } from "../utils/chatwoot";
 import {
   EmptyThenReplyModel,
+  guardrailModel,
   ResolveThenReplyModel,
   SideEffectModel,
 } from "../utils/scripted-models";
@@ -1465,5 +1467,132 @@ describe.skipIf(!dbUp)("debounce", () => {
     expect(model.seen[0]).toContain(
       "<mensagem-de-audio>vim do meta do fork</mensagem-de-audio>",
     );
+  });
+  // The post gate is not one question. `shouldPost` re-fetches the conversation from Chatwoot and
+  // THEN runs the watermark CAS, so a /reset landing inside that round trip arrives after the ask
+  // that precedes it — and the input-guardrail reply is the send that sits closest to the gate, with
+  // nothing in between to ask again.
+  //
+  // The supersede half cannot stand in for the ask, and the redirect pair is why: a /reset typed on
+  // the ENTRY conversation retires the WIDGET's flush (webhook.ts sweeps both sides), while the
+  // re-fetch reads the widget's own messages, where nothing new arrived. The gate sees a quiet
+  // conversation and claims the burst.
+  describe("with an input guardrail that answers", () => {
+    const GUARD_MODEL = "guard-sentinel";
+    let previousSettings: unknown = null;
+
+    beforeAll(async () => {
+      const before = await suDb.agent.findUniqueOrThrow({
+        where: { id: agentDbId },
+        select: { settings: true },
+      });
+      previousSettings = before.settings;
+      const key = await suDb.vaultEntry.findFirstOrThrow({
+        where: { tenantId, name: "llm-key" },
+        select: { id: true },
+      });
+      await suDb.agent.update({
+        where: { id: agentDbId },
+        data: {
+          settings: {
+            ...(before.settings as object),
+            guardrails: {
+              enabled: true,
+              provider: "openai",
+              model: GUARD_MODEL,
+              credentialRef: `vault:${key.id}`,
+              input: {
+                enabled: true,
+                action: "template",
+                checks: {
+                  toxicity: true,
+                  unsafeContent: false,
+                  competitorMentions: false,
+                  promptAdherence: false,
+                },
+                templateMessage: "TEMPLATE-IN",
+              },
+              output: { enabled: false },
+            },
+          },
+        },
+      });
+    });
+
+    afterAll(async () => {
+      await suDb.agent.update({
+        where: { id: agentDbId },
+        data: { settings: previousSettings as object },
+      });
+    });
+
+    test("a burst retired inside the post gate is not answered", async () => {
+      await seedConversation(862);
+      const thread = threadOf(862);
+      const row = await suDb.schedulerJob.create({
+        data: {
+          tenantId,
+          kind: "DEBOUNCE",
+          dedupeKey: debounceDedupeKey(thread),
+          status: "CLAIMED",
+          runAt: new Date(),
+          payload: { threadId: thread, agentBotId: 9, burstStartedAt: 1 },
+        },
+        select: { id: true, claimSeq: true },
+      });
+      const sent: Array<[number, string]> = [];
+      // `getMessages` runs twice on this path: the burst fetch, then the supersede re-fetch inside
+      // the gate. The command lands in the SECOND, which is the window the asks around it leave.
+      let fetches = 0;
+      const client = {
+        getMessages: async () => {
+          fetches += 1;
+          if (fetches === 2) {
+            await retireJobsByDedupeKey(
+              tenantId,
+              "DEBOUNCE",
+              debounceDedupeKey(thread),
+              suDb,
+            );
+          }
+          return page([{ id: 1, content: "vocês são uns inúteis" }]);
+        },
+        sendMessage: async (conversationId: number, content: string) => {
+          sent.push([conversationId, content]);
+          return {};
+        },
+        sendPrivateNote: async () => ({}),
+        toggleTyping: async () => ({}),
+      } as unknown as ChatwootClient;
+      const verdict = JSON.stringify({
+        violated: true,
+        categories: ["toxicity"],
+        rationale: "abuse",
+      });
+
+      const out = await flushDebounceJob({
+        job: { ...jobFor(862), id: row.id, claimSeq: row.claimSeq },
+        base: appDb,
+        deps: {
+          makeModel: (cfg: ResolvedModelConfig) =>
+            cfg.model === GUARD_MODEL
+              ? guardrailModel(async () => ({ content: verdict }))
+              : fakeModel(),
+          makeClient: async () => client,
+          checkpointer: new MemorySaver(),
+        },
+      });
+
+      expect(out).toEqual({ outcome: "done" });
+      // The gate was actually reached — otherwise this test would pass on a turn that stood down
+      // somewhere harmless upstream.
+      expect(fetches).toBe(2);
+      // And the customer got nothing after their reset, template included.
+      expect(sent).toEqual([]);
+      // The residual, asserted rather than left to be discovered: the only ask that can catch this
+      // window answers after the CAS, so the burst is marked handled without having been answered.
+      // The alternative is the send above.
+      expect(await watermarkOf(862)).toBe(1);
+    });
   });
 });

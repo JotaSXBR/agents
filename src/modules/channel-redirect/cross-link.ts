@@ -83,24 +83,20 @@ export async function linkRedirectConversations(
   const now = p.now ?? new Date();
   const entryInboxId = p.cfg.entryInboxId;
 
-  // The WhatsApp sibling: the conversation on the entry inbox that most recently SENT a redirect,
-  // which is the one this chat opened from.
+  // Every entry-inbox conversation of this contact that has ever SENT a redirect, most recent first.
+  // Two rows is all this needs: the first to work with, and a second whose mere existence answers
+  // the only question that matters below.
   //
-  // NOT the most recently active one, which is what this used to ask. Activity is mutable and says
-  // nothing about the funnel: a contact who writes into an OLD entry conversation before opening the
-  // chat makes that one the latest, and the id recorded below is permanent — the pair, the closing
-  // and /reset would all name a conversation the redirect never came from. `redirectSentAt` is the
-  // funnel's own fact, and the most recent one is this run's. (The old ordering also sorted NULLs
-  // FIRST, Postgres's default on DESC, so a conversation that never carried an event outranked the
-  // live one; the predicate below makes that unreachable rather than merely ordering around it.)
-  //
-  // Null when the contact has no redirect on that inbox, and that is honest: without one there is no
-  // episode to pair, to propagate test mode from, or to cross-link a note to.
-  const sibling =
+  // NOT ordered by activity, which is what this used to ask. Activity is mutable and says nothing
+  // about the funnel: a contact who writes into an OLD entry conversation before opening the chat
+  // makes that one the latest. (The old ordering also sorted NULLs FIRST, Postgres's default on
+  // DESC, so a conversation that never carried an event outranked the live one; the predicate makes
+  // that unreachable rather than merely ordering around it.)
+  const candidates =
     p.widgetConv.contactId === null || entryInboxId === null
-      ? null
+      ? []
       : await runScopedOn(base, sysCtx(p.tenantId), (db) =>
-          db.conversation.findFirst({
+          db.conversation.findMany({
             where: {
               contactId: p.widgetConv.contactId,
               chatwootInstanceId: p.instanceId,
@@ -109,8 +105,33 @@ export async function linkRedirectConversations(
             },
             select: { chatwootConversationId: true, testActivatedAt: true },
             orderBy: { redirectSentAt: "desc" },
+            take: 2,
           }),
         );
+
+  // The best guess, and it is only ever used for things a human reads or a test mode toggles: which
+  // conversation the cross-link notes point at, and where a /teste carries over from. Null when the
+  // contact has no redirect on that inbox, and that is honest — without one there is no episode to
+  // pair, to propagate test mode from, or to cross-link a note to.
+  const sibling = candidates[0] ?? null;
+
+  // The episode's IDENTITY, and it is not the same answer as the guess above, because the bar is not
+  // the same. This id is permanent and machines act on it destructively: the closing sends to it, and
+  // a /reset tombstones its ladder and its appointment reminders. So it is written only where the
+  // rows PROVE it, which is exactly one candidate — whichever token opened this chat, it came from
+  // the only conversation that ever sent one.
+  //
+  // With several candidates the most recent send does not prove origin: a redirect link is a
+  // single-use token with a fixed 24h TTL (docs/channel-redirect.md), so an older, unconsumed one is
+  // still live and the customer may have clicked THAT — the newer conversation's token is simply the
+  // one we happened to mint last. Nothing in this repo can tell the two apart: the token is resolved
+  // inside Chatwoot and what comes back identifies the CONTACT, not the conversation it was minted
+  // from. Guessing wrong here is silent and permanent, so an unknown pair stays unknown and the
+  // callers act on one conversation alone, which is what they did before this column existed.
+  const entryConversationId =
+    sibling !== null && candidates.length === 1
+      ? sibling.chatwootConversationId
+      : null;
 
   const propagate = shouldPropagateTestMode(
     p.mode,
@@ -124,13 +145,11 @@ export async function linkRedirectConversations(
       where: { id: p.widgetConv.id },
       data: {
         redirectLinkedAt: now,
-        // The episode's identity, written HERE because here is the only moment the two sides are
-        // known to belong together: this widget chat opened from the link that conversation sent,
-        // minutes ago. Everything downstream that asks "which entry is this widget's" reads this
-        // instead of comparing anchors, because the anchors admit any LATER episode's widget too.
-        // Null when the contact has no conversation on the entry inbox, which is honest: there is no
-        // pair, and the callers then act on one conversation alone.
-        redirectEntryConversationId: sibling?.chatwootConversationId ?? null,
+        // Written HERE because here is the only moment the two sides are known to belong together:
+        // this widget chat opened from a link one of those conversations sent, minutes ago.
+        // Everything downstream that asks "which entry is this widget's" reads this instead of
+        // comparing anchors, because the anchors admit any LATER episode's widget too.
+        redirectEntryConversationId: entryConversationId,
         ...(propagate ? { testActivatedAt: now } : {}),
       },
     }),

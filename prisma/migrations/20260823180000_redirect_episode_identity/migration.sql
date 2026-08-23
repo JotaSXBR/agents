@@ -24,22 +24,18 @@ SET app.is_super_admin = 'on';
 -- find the conversation they message and resolve, so an upgrade that left every existing episode
 -- unpaired would stop those two stages for funnels already in flight.
 --
--- The rule is PROVABILITY, and only two shapes prove anything.
+-- The rule is PROVABILITY, and exactly one shape proves anything: a contact with exactly ONE
+-- conversation that ever redirected on this instance. Whichever token opened that chat, it came from
+-- the only conversation that ever sent one. It has to be read that way rather than by timestamp,
+-- because `redirect_sent_at` is OVERWRITTEN by a resend rather than appended to, so an entry that
+-- redirected again after its chat was linked now carries a timestamp AFTER the link.
 --
--- The first is a contact with exactly ONE conversation that ever redirected on this instance: that
--- conversation is the entry, whatever its timestamp says. It has to be read that way because
--- `redirect_sent_at` is OVERWRITTEN by a resend rather than appended to, so an entry that redirected
--- again after its chat was linked now carries a timestamp AFTER the link.
---
--- The second is several candidates NONE of which carries a post-link timestamp. Only then is "the
--- last redirect at or before the link" a proof rather than a guess: with a post-link timestamp
--- anywhere in the set, that conversation could be the true entry with its stamp moved, and the older
--- one the ordering would pick could be an unrelated earlier funnel. Both readings fit the rows
--- equally, and the rows are all a migration has.
---
--- Everything else stays null. That is the fail-closed direction — a funnel stage that does not fire
--- — and the alternative is a goodbye and a RESOLVE landing on somebody else's conversation, which is
--- the harm the identity column exists to prevent.
+-- With several candidates the timestamps prove nothing, in either ordering. A redirect link is a
+-- single-use token with a fixed 24h TTL (docs/channel-redirect.md), so an older, unconsumed one is
+-- still live and the customer may have clicked THAT rather than the last one minted. Picking the
+-- latest send is therefore a guess, and this column is the input to a goodbye and a RESOLVE landing
+-- on a conversation — a wrong guess is silent, permanent and destructive, where an unknown pair only
+-- costs a funnel stage that does not fire. Everything else stays null.
 --
 -- Only same tenant, same Chatwoot instance and same contact, which is the whole reach one episode
 -- can have. It does NOT check the inbox pair, because a migration does not have the agent's config:
@@ -49,44 +45,20 @@ SET app.is_super_admin = 'on';
 -- unpaired.
 --
 -- A correlated subquery in SET, not a LATERAL join: the UPDATE target is not a FROM item, so
--- Postgres refuses to let a LATERAL reference it (42P10).
+-- Postgres refuses to let a LATERAL reference it (42P10). HAVING with no GROUP BY yields a row when
+-- the condition holds and none when it does not, which is how one statement answers only where a
+-- single candidate exists. The aggregate is there because HAVING needs one — over a single row MAX
+-- and MIN are the same value, so it expresses no ordering.
 UPDATE "conversations" w
-SET "redirect_entry_conversation_id" = COALESCE(
-  -- One candidate. HAVING with no GROUP BY yields a row when the condition holds and none when it
-  -- does not, so this answers only where a single candidate exists.
-  (
-    SELECT MAX(c."chatwoot_conversation_id")
-    FROM "conversations" c
-    WHERE c."tenant_id" = w."tenant_id"
-      AND c."chatwoot_instance_id" = w."chatwoot_instance_id"
-      AND c."contact_id" = w."contact_id"
-      AND c."id" <> w."id"
-      AND c."redirect_sent_at" IS NOT NULL
-    HAVING COUNT(*) = 1
-  ),
-  -- Several candidates, and none of them redirected after this chat was linked, so no timestamp in
-  -- the set can have moved past it and the ordering is sound.
-  (
-    SELECT c."chatwoot_conversation_id"
-    FROM "conversations" c
-    WHERE c."tenant_id" = w."tenant_id"
-      AND c."chatwoot_instance_id" = w."chatwoot_instance_id"
-      AND c."contact_id" = w."contact_id"
-      AND c."id" <> w."id"
-      AND c."redirect_sent_at" IS NOT NULL
-      AND c."redirect_sent_at" <= w."redirect_linked_at"
-      AND NOT EXISTS (
-        SELECT 1
-        FROM "conversations" x
-        WHERE x."tenant_id" = w."tenant_id"
-          AND x."chatwoot_instance_id" = w."chatwoot_instance_id"
-          AND x."contact_id" = w."contact_id"
-          AND x."id" <> w."id"
-          AND x."redirect_sent_at" > w."redirect_linked_at"
-      )
-    ORDER BY c."redirect_sent_at" DESC
-    LIMIT 1
-  )
+SET "redirect_entry_conversation_id" = (
+  SELECT MAX(c."chatwoot_conversation_id")
+  FROM "conversations" c
+  WHERE c."tenant_id" = w."tenant_id"
+    AND c."chatwoot_instance_id" = w."chatwoot_instance_id"
+    AND c."contact_id" = w."contact_id"
+    AND c."id" <> w."id"
+    AND c."redirect_sent_at" IS NOT NULL
+  HAVING COUNT(*) = 1
 )
 WHERE w."redirect_linked_at" IS NOT NULL
   AND w."contact_id" IS NOT NULL;

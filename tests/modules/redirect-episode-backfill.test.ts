@@ -45,9 +45,11 @@ let waInboxId = 0n;
 let widgetInboxId = 0n;
 
 // What the backfill has to decide, from rows alone, for funnels that were already running when the
-// identity column did not exist. It answers with `redirect_sent_at`, and that column is OVERWRITTEN
-// by a resend rather than appended to — so the reading has to survive an entry conversation whose
-// timestamp moved past the link it produced.
+// identity column did not exist. It answers by COUNTING candidates, never by ordering them: a
+// redirect link is a single-use token with a 24h TTL, so with more than one candidate an older
+// unconsumed token is still live and the latest send is a guess. `redirect_sent_at` would not carry
+// the ordering anyway — it is OVERWRITTEN by a resend rather than appended to, so an entry that
+// redirected again after its chat was linked now carries a timestamp AFTER the link.
 describe.skipIf(!dbUp)("the redirect identity backfill", () => {
   beforeAll(async () => {
     const t = await suDb.tenant.create({
@@ -148,7 +150,7 @@ describe.skipIf(!dbUp)("the redirect identity backfill", () => {
     return row.redirectEntryConversationId;
   };
 
-  test("it pairs each widget with the redirect it opened from", async () => {
+  test("it pairs a widget only where a single candidate proves the entry", async () => {
     const now = Date.now();
     // The ordinary shape: one redirect, then the chat.
     const plain = await episode(
@@ -156,31 +158,22 @@ describe.skipIf(!dbUp)("the redirect identity backfill", () => {
       new Date(now - 119_000),
     );
     // The resend: the SAME entry conversation redirected again after the chat was linked, so its
-    // timestamp now sits AFTER the link. Reading the order alone would lose it.
+    // timestamp now sits AFTER the link. Still paired, because being the only conversation that ever
+    // redirected is what proves it — no reading of the timestamp is involved.
     const resent = await episode(
       [{ sentAt: new Date(now + 60_000) }],
       new Date(now - 119_000),
     );
-    // Two funnels for one contact, both redirects before this chat was linked. No timestamp in the
-    // set can have moved past the link, so the ordering is a proof and the later one is the entry.
-    const ordered = await episode(
+    // Two funnels for one contact, BOTH redirects before this chat was linked, which is the shape an
+    // ordering answers most confidently and cannot actually settle: the older token had not expired
+    // when the chat opened, so the customer may have clicked it and the later send is simply the one
+    // we minted last. Unpaired — a funnel stage that does not fire, rather than a goodbye and a
+    // RESOLVE on somebody else's conversation.
+    const twoFunnels = await episode(
       [
         { sentAt: new Date(now - 300_000) },
         { sentAt: new Date(now - 200_000) },
       ],
-      new Date(now - 100_000),
-    );
-    // The shape the ordering CANNOT settle: one redirect before the link and one after it. The later
-    // one could be this chat's entry with its stamp moved by a resend, and the earlier one an
-    // unrelated funnel — both readings fit the rows equally, so the answer is none. A funnel stage
-    // that does not fire, rather than a goodbye and a RESOLVE on somebody else's conversation.
-    const ambiguous = await episode(
-      [{ sentAt: new Date(now - 200_000) }, { sentAt: new Date(now + 60_000) }],
-      new Date(now - 100_000),
-    );
-    // And with both after the link there is nothing to order at all.
-    const bothAfter = await episode(
-      [{ sentAt: new Date(now + 30_000) }, { sentAt: new Date(now + 60_000) }],
       new Date(now - 100_000),
     );
     // A contact who never redirected: nothing to pair.
@@ -190,12 +183,7 @@ describe.skipIf(!dbUp)("the redirect identity backfill", () => {
 
     expect(await identityOf(plain.widget)).toBe(plain.entryIds[0] as number);
     expect(await identityOf(resent.widget)).toBe(resent.entryIds[0] as number);
-    // The LATER of the two, not the first seeded one.
-    expect(await identityOf(ordered.widget)).toBe(
-      ordered.entryIds[1] as number,
-    );
-    expect(await identityOf(ambiguous.widget)).toBeNull();
-    expect(await identityOf(bothAfter.widget)).toBeNull();
+    expect(await identityOf(twoFunnels.widget)).toBeNull();
     expect(await identityOf(unrelated.widget)).toBeNull();
   });
 });

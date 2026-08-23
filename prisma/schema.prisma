@@ -539,12 +539,15 @@ model Conversation {
   // = not yet linked; a non-null value stops the one-shot from re-running / re-spamming.
   redirectLinkedAt       DateTime? @map("redirect_linked_at")
   // WHICH entry conversation this widget chat opened from (only on the widget conversation), captured
-  // at link time from the sibling the cross-link already resolved. It is the episode's identity, and
-  // the reason it is stored rather than inferred: the two anchors above only say "this widget was
-  // linked after that entry redirected", which is true of every LATER episode's widget too — so a
-  // /reset typed on an old entry conversation would pair with the live episode's widget and tombstone
-  // its ladder and its appointment reminders. NULL = linked before this column existed, or no sibling
-  // on the entry inbox; either way the pair is unknown and the callers act on one conversation alone.
+  // at link time. It is the episode's identity, and the reason it is stored rather than inferred: the
+  // two anchors above only say "this widget was linked after that entry redirected", which is true of
+  // every LATER episode's widget too — so a /reset typed on an old entry conversation would pair with
+  // the live episode's widget and tombstone its ladder and its appointment reminders.
+  // NULL wherever the origin is not PROVABLE, which is every case but one: linked before this column
+  // existed, no redirect on the entry inbox, or SEVERAL of them (a link is a single-use token with a
+  // 24h TTL, so an older unconsumed one is still live and the last one minted is a guess, not the
+  // answer). Unknown pair = the callers act on one conversation alone, which is what they did before
+  // this column existed; a wrong pair would be a goodbye and a RESOLVE on somebody else's chat.
   redirectEntryConversationId Int? @map("redirect_entry_conversation_id")
   // Closing watermark (only on the widget conversation). Set once, via a CAS, by whichever fires first:
   // the follow-up ladder's terminal "closing" stage OR the widget conversation being resolved. Guarantees

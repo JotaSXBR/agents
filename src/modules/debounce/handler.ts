@@ -238,6 +238,10 @@ export async function coalesceAndRunTurn(
   // re-answer this burst, while stale means the burst was withdrawn with the thread the command
   // cleared. Advancing on it would declare handled a set of messages nothing ever answered, and the
   // next inbound would arm a flush that starts after them.
+  // NOTE: Which this skip can only preserve where the CAS has not already run. A retirement that
+  // lands inside `shouldPost` is caught by the ask after it, and by then the claim has advanced —
+  // skipping here is a no-op for that one window. Accepted where it stands: the alternative is a
+  // reply posted into a conversation the customer just reset.
   if (outcome !== "superseded" && outcome !== "stale") {
     await advanceHandledWatermark({
       tenantId,
