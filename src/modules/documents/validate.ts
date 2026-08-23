@@ -360,7 +360,8 @@ export function parseTemplateContent(
 // alike. Returns the first token that would render as a blank, or null.
 type TokenFault =
   | { kind: "malformed"; text: string }
-  | { kind: "unknown"; name: string };
+  | { kind: "unknown"; name: string }
+  | { kind: "notScalar"; name: string };
 
 function unknownToken(
   text: string,
@@ -374,6 +375,14 @@ function unknownToken(
   const malformed = malformedTokenIn(text);
   if (malformed) return { kind: "malformed", text: malformed };
   for (const token of tokensIn(text)) {
+    // A lineItems field is DECLARED, so it passes the "is this a known name" test — and resolves to
+    // the empty string, because a table is not a token (see vars.ts). Accepting it here means
+    // authoring succeeds and the customer's document carries a blank exactly where the operator
+    // expected their items. It is refused with its own reason: the fix is a lineItems BLOCK, not a
+    // different token.
+    if (byName.get(token)?.type === "lineItems") {
+      return { kind: "notScalar", name: token };
+    }
     if (byName.has(token) || RESERVED_TOKEN_NAMES.includes(token)) continue;
     return { kind: "unknown", name: token };
   }
@@ -382,9 +391,14 @@ function unknownToken(
 
 // One sentence per fault kind, written for whoever authored the template.
 function tokenFaultReason(where: string, fault: TokenFault): string {
-  return fault.kind === "malformed"
-    ? `${where} uses ${fault.text}, which is not a readable token: a name must start with a lowercase letter and contain only lowercase letters, digits and underscores. As written it would print with its braces in the customer's document.`
-    : `${where} uses {{${fault.name}}}, which is neither a declared field nor a reserved name. Declare it in fields, or remove it — an unresolved token renders as a blank space in the customer's document.`;
+  switch (fault.kind) {
+    case "malformed":
+      return `${where} uses ${fault.text}, which is not a readable token: a name must start with a lowercase letter and contain only lowercase letters, digits and underscores. As written it would print with its braces in the customer's document.`;
+    case "notScalar":
+      return `${where} uses {{${fault.name}}}, which is a lineItems field. A table cannot be printed as a token — it renders as a blank. Use a lineItems block to show those items.`;
+    default:
+      return `${where} uses {{${fault.name}}}, which is neither a declared field nor a reserved name. Declare it in fields, or remove it — an unresolved token renders as a blank space in the customer's document.`;
+  }
 }
 
 // ── values (what one issuance supplies) ──

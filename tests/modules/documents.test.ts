@@ -1655,6 +1655,36 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
           (f.endsWith(".prev") || f.endsWith(".part")),
       ),
     ).toEqual([]);
+
+    // Two overlapping uploads of the SAME format share one path, so they have to serialise: one
+    // moving the file aside while the other sees the path free is how the committed version ends up
+    // describing the other request's image. The swap runs inside the per-tenant settings lock.
+    const upload = (marker: number) =>
+      setCompanyLogo(
+        ctx(tenantB),
+        {
+          type: "image/png",
+          size: png.length,
+          arrayBuffer: async () =>
+            new Uint8Array([...png.slice(0, -1), marker]).buffer as ArrayBuffer,
+        },
+        appDb,
+      );
+    // Both are valid PNGs by structure; only the last byte differs, so whichever committed last is
+    // identifiable from the file itself.
+    await Promise.all([upload(0x82), upload(0x82)]);
+    const settled = await runScopedOn(appDb, ctx(tenantB), (db) =>
+      readCompanySettings(db, tenantB),
+    );
+    expect(settled.logoKey).toBe(key);
+    expect(await Bun.file(`${dir}/${key}`).exists()).toBe(true);
+    expect(
+      (await readdir(dir)).filter(
+        (f) =>
+          f.startsWith(`${key}.`) &&
+          (f.endsWith(".prev") || f.endsWith(".part")),
+      ),
+    ).toEqual([]);
     await rm(`${dir}/${key}`, { force: true });
   });
 });

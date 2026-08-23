@@ -276,6 +276,27 @@ describe("parseTemplateContent", () => {
     expect(footer.ok === false && footer.reason).toContain("footerText");
   });
 
+  // A lineItems field is DECLARED, so it passes the "known name" test — and resolves to the empty
+  // string, because a table is not a token. Accepted, authoring succeeds and the customer's document
+  // carries a blank exactly where the operator expected their items.
+  test("refuses a token naming a lineItems field", () => {
+    const r = parseTemplateContent(
+      blocks({ id: "t", type: "text", text: "Itens: {{itens}}" }),
+      FIELDS,
+      {},
+    );
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.reason).toContain("lineItems block");
+    // The same field is still fine where it belongs — as a block's `field`, not as a token.
+    expect(
+      parseTemplateContent(
+        blocks({ id: "li", type: "lineItems", field: "itens" }),
+        FIELDS,
+        {},
+      ).ok,
+    ).toBe(true);
+  });
+
   test("accepts a reserved token without a field behind it", () => {
     const r = parseTemplateContent(
       blocks({

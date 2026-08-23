@@ -186,13 +186,17 @@ async function patchBlock<
   ctx: TenantContext,
   base: PrismaClient,
   key: "embedding" | "langfuse" | "company",
-  merge: (raw: Record<string, unknown>) => T,
+  // May be async, so a caller with a side effect that has to be ORDERED against this write can do it
+  // here — inside the lock, before the commit. The logo upload is the one: its bytes and the row
+  // that records them have to move together, or two uploads interleave and the committed version
+  // describes the other one's image.
+  merge: (raw: Record<string, unknown>) => T | Promise<T>,
 ): Promise<T> {
   const tenantId = requireTenantId(ctx);
   return runScopedOn(base, ctx, async (db) => {
     await db.$queryRaw`SELECT 1 FROM "tenants" WHERE "id" = ${tenantId} FOR UPDATE`;
     const raw = await readRawSettings(db, tenantId);
-    const value = merge(raw);
+    const value = await merge(raw);
     await db.tenant.update({
       where: { id: tenantId },
       data: { settings: { ...raw, [key]: value } as Prisma.InputJsonValue },
@@ -307,8 +311,13 @@ export async function setCompanyLogoKey(
   logoKey: string | null,
   base: PrismaClient = basePrisma,
   now: number = Date.now(),
+  // Runs INSIDE the per-tenant lock, before the row is written: the logo upload puts its bytes in
+  // place here so the file and the version that describes it cannot be interleaved by a second
+  // upload. Throwing from it aborts the write, which is what leaves the previous letterhead intact.
+  publish?: () => Promise<void>,
 ): Promise<CompanySettings> {
-  return patchBlock(ctx, base, "company", (raw) => {
+  return patchBlock(ctx, base, "company", async (raw) => {
+    await publish?.();
     const current = parseCompanySettings(raw);
     return companySettingsSchema.parse({
       ...current,

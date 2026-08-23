@@ -311,6 +311,13 @@ export async function getPlaygroundSessionTurns(
     ? (channel.messages as BaseMessage[])
     : [];
   // The agent's own document tools, so a simulated issuance keeps its badge on reopen.
+  //
+  // Derived from the grants as they stand NOW, which is a known limit rather than an oversight: a
+  // template whose grant was removed, renamed or deleted since the turn loses its badge when the
+  // session is reopened, and the call then reads as a live external action. Fixing it properly means
+  // persisting the simulated names WITH each turn — a column, a migration and a write on every
+  // playground turn, for a badge on a historical session whose tool no longer exists. The trade is
+  // not worth it; the limit is written here so the next reader knows it was weighed.
   const documentTools = await runScopedOn(base, sysCtx(tenantId), (db) =>
     db.agentToolSelection.findMany({
       where: { agentId, source: "DOCUMENT" },

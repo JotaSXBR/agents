@@ -192,30 +192,33 @@ export async function setCompanyLogo(
   await Bun.write(temp, bytes);
 
   // A same-format replacement reuses the SAME path (that is what logoVersion exists for), so the
-  // bytes on disk change before the row that records the change does. If that write then fails, the
-  // endpoint reports a failure while every document already renders the new letterhead and every
-  // cached client still shows the old one — the exact mismatch the version was added to prevent.
+  // bytes on disk and the row that records them have to move TOGETHER. Two things go wrong when they
+  // do not: a failed row write leaves every document rendering the new letterhead while every cached
+  // client still shows the old one, and two overlapping uploads interleave — one moves the current
+  // file aside, the other sees the path free and installs its bytes, and whichever row commits last
+  // describes the other one's image.
   //
-  // So the old file is set aside first and put back if the row does not commit. The reader-facing
-  // swap is still a rename, so nobody ever sees a partial file.
-  const hadPrevious = await Bun.file(path).exists();
-  if (hadPrevious) await rename(path, previous);
+  // Both are the same fix: the swap happens INSIDE the per-tenant settings lock, as part of the same
+  // transaction, so uploads serialise and a row that does not commit takes its bytes back with it.
+  // The reader-facing swap is still a rename, so nobody ever sees a partial file.
+  let hadPrevious = false;
   try {
-    await rename(temp, path);
+    return await setCompanyLogoKey(ctx, key, base, Date.now(), async () => {
+      hadPrevious = await Bun.file(path).exists();
+      if (hadPrevious) await rename(path, previous);
+      // No restore here: a throw from inside the lock aborts the transaction and lands in the catch
+      // below, which restores for BOTH reasons a write can fail. Two restores for one condition is
+      // one that never runs.
+      await rename(temp, path);
+    });
   } catch (e) {
+    // The transaction rolled back (the publish itself failed, or the row write did), so the
+    // letterhead goes back to the one the stored version still describes.
     if (hadPrevious) await rename(previous, path).catch(() => undefined);
+    throw e;
+  } finally {
     await rm(temp, { force: true });
-    throw e;
-  }
-  try {
-    const saved = await setCompanyLogoKey(ctx, key, base);
-    if (hadPrevious) await rm(previous, { force: true });
-    return saved;
-  } catch (e) {
-    // The row did not commit, so the letterhead has to go back to the one it still describes.
-    if (hadPrevious) await rename(previous, path).catch(() => undefined);
-    else await rm(path, { force: true });
-    throw e;
+    await rm(previous, { force: true });
   }
 }
 
