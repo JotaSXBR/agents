@@ -34,6 +34,35 @@ describe("parseInline", () => {
     expect(parseInline("preço: R$ 10 *")).toEqual(plain("preço: R$ 10 *"));
   });
 
+  // An italic is closed by the token that OPENED it, and by nothing else. A shared boolean let
+  // either token close the other's span: `_3 * 4_` rendered as an italic "3 " followed by a literal
+  // " 4_", so a stray asterisk inside an emphasised sentence rewrote what the customer reads.
+  test("an italic is closed only by its own delimiter", () => {
+    expect(parseInline("_3 * 4_")).toEqual([{ text: "3 * 4", italic: true }]);
+    expect(parseInline("*a_b*")).toEqual([{ text: "a_b", italic: true }]);
+    // And the pair still closes normally when nothing gets in the way.
+    expect(parseInline("_x_ e *y*")).toEqual([
+      { text: "x", italic: true },
+      { text: " e " },
+      { text: "y", italic: true },
+    ]);
+  });
+
+  // Nesting one emphasis inside another has no representation — a span is bold, italic, or both —
+  // so the inner markers print. The alternative is guessing which delimiter the operator meant to
+  // close, and a wrong guess changes the sentence rather than its styling.
+  test("an inner italic marker prints instead of nesting", () => {
+    expect(parseInline("_a *b* c_")).toEqual([
+      { text: "a *b* c", italic: true },
+    ]);
+    // Bold is a separate flag, so it still nests inside an italic.
+    expect(parseInline("_a **b** c_")).toEqual([
+      { text: "a ", italic: true },
+      { text: "b", bold: true, italic: true },
+      { text: " c", italic: true },
+    ]);
+  });
+
   // The escape covers ONE character, so a literal ** is written as two escapes. `\**` is the
   // ambiguous middle: it produces a literal asterisk followed by a live italic marker, which is what
   // a one-character escape has to mean and is worth pinning so a future "smarter" escape is a

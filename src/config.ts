@@ -205,9 +205,11 @@ const config = {
   // Boot fails fast if the runtime role is superuser/bypassrls (RLS would be a no-op) UNLESS
   // this is true AND env !== production. NEVER set in production.
   allowSuperuserRuntime: ALLOW_SUPERUSER_RUNTIME === "true",
-  // NOTE: filesystem root for issued document PDFs (`<dir>/<tenantId>/<documentId>.pdf`) and the
-  // tenant's letterhead logo (`<dir>/company/<tenantId>-logo.<ext>`). Served ONLY via the
-  // authenticated, tenant-scoped /v1/documents routes — never under staticPlugin.
+  // NOTE: filesystem root for issued document PDFs (`<dir>/<tenantId>/documents/<documentId>.pdf`)
+  // and the tenant's letterhead logo (`<dir>/company/<tenantId>-logo.<ext>`). Served ONLY via the
+  // authenticated, tenant-scoped /v1/documents routes — never under staticPlugin. The `documents/`
+  // segment keeps them clear of the `<tenantId>/<quoteId>.pdf` an upgraded install already has in
+  // this directory (see storageKey).
   //
   // The QUOTES_STORAGE_DIR fallback is NOT tidiness, it is the upgrade path, and dropping it loses
   // files. Coolify FREEZES a compose `environment:` value when the installation is created, so an

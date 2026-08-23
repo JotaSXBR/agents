@@ -245,10 +245,18 @@ too, so a `document_template_create` that would not lay out fails before it save
 
 ## Storage
 
-`DOCUMENTS_STORAGE_DIR` holds `<tenantId>/<documentId>.pdf` and `company/<tenantId>-logo.<ext>`.
-`QUOTES_STORAGE_DIR` is still read as a fallback, and that is not tidiness: platforms that freeze a
-compose value at install time (Coolify) never hand an existing installation the new name, and without
-the fallback that installation writes inside the container and loses every PDF on the next redeploy.
+`DOCUMENTS_STORAGE_DIR` holds `<tenantId>/documents/<documentId>.pdf` and
+`company/<tenantId>-logo.<ext>`. `QUOTES_STORAGE_DIR` is still read as a fallback, and that is not
+tidiness: platforms that freeze a compose value at install time (Coolify) never hand an existing
+installation the new name, and without the fallback that installation writes inside the container and
+loses every PDF on the next redeploy.
+
+That fallback is also why the `documents/` segment is not decoration. An upgraded installation points
+this directory at the one the quotes subsystem used, which already holds `<tenantId>/<quoteId>.pdf`,
+and `issued_documents` is a new table whose ids start over. Sharing the layout would put a new
+document on an old quote's file name, where `link` answers EEXIST, the publisher reads that as "another
+renderer got here first", and the row goes READY over a stranger's document — which is then what the
+download serves and what the agent attaches.
 
 The filesystem has no RLS, so the **scoped read of the row** is the boundary: a storage key is only
 resolvable for the owning tenant, and every refusal is a 404 — which of the reasons applies is

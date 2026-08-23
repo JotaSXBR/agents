@@ -38,14 +38,23 @@ export function parseInline(text: string): InlineSpan[] {
   const spans: InlineSpan[] = [];
   let buffer = "";
   let bold = false;
-  let italic = false;
+  // The TOKEN that opened the current italic, not a boolean, because two tokens mean it. Sharing one
+  // flag let either of them close what the other opened: in `_3 * 4_` the asterisk read as a closer,
+  // and the line rendered as an italic "3 " followed by a literal " 4_" — a stray marker in a text
+  // block silently rewriting a sentence in the customer's document.
+  //
+  // While an italic is open, the OTHER token is literal. Nesting one emphasis inside another has no
+  // representation here (a span is bold, italic, or both), so the alternative to printing the inner
+  // markers is guessing which of the two the operator meant to close — and guessing wrong changes
+  // the text rather than the styling.
+  let italicToken: string | null = null;
 
   const flush = () => {
     if (!buffer) return;
     spans.push({
       text: buffer,
       ...(bold ? { bold: true } : {}),
-      ...(italic ? { italic: true } : {}),
+      ...(italicToken !== null ? { italic: true } : {}),
     });
     buffer = "";
   };
@@ -61,13 +70,17 @@ export function parseInline(text: string): InlineSpan[] {
     }
     const marker = MARKERS.find((m) => text.startsWith(m.token, i));
     if (marker) {
-      const open = marker.key === "bold" ? bold : italic;
+      // Open only against the SAME token: an italic opened with `_` is closed by `_` and by nothing
+      // else, and while it is open an asterisk is just an asterisk.
+      const open: boolean =
+        marker.key === "bold" ? bold : italicToken === marker.token;
+      const blocked = marker.key === "italic" && italicToken !== null && !open;
       const hasCloser =
         closerAt(text, i + marker.token.length, marker.token) !== -1;
-      if (open || hasCloser) {
+      if (!blocked && (open || hasCloser)) {
         flush();
         if (marker.key === "bold") bold = !bold;
-        else italic = !italic;
+        else italicToken = open ? null : marker.token;
         i += marker.token.length;
         continue;
       }

@@ -11,6 +11,7 @@ import {
   issueDocument,
   listIssuedDocuments,
   revokeIssuedDocument,
+  storageKey,
 } from "@/modules/documents/issue";
 import { documentStarter } from "@/modules/documents/starters";
 import {
@@ -1619,7 +1620,7 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       where: { id },
       data: { status: "PENDING", pdfStorageKey: null },
     });
-    await Bun.write(`${DIR}/${tenantA}/${id}.pdf`, "PUBLISHED-FIRST");
+    await Bun.write(`${DIR}/${storageKey(tenantA, id)}`, "PUBLISHED-FIRST");
 
     const again = await issueDocument({
       tenantId: tenantA,
@@ -1632,6 +1633,55 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     });
     expect(again.status).toBe("READY");
     expect(new TextDecoder().decode(again.bytes)).toBe("PUBLISHED-FIRST");
+  });
+
+  // …and what it must NOT adopt: a file left behind by the quotes subsystem this one replaces.
+  //
+  // An install upgraded from quotes keeps writing into the directory its QUOTES_STORAGE_DIR names
+  // (Coolify freezes that value), and that directory already holds `<tenantId>/<quoteId>.pdf`.
+  // `issued_documents` is a new table with a new sequence, so its ids start over and land on those
+  // names. Adoption then reads as "another renderer got here first" and marks the row READY over a
+  // stranger's quote — which is what the download serves and what the agent attaches to the
+  // conversation. A path segment no numeric id can produce is what keeps the two sets apart.
+  test("never adopts a legacy quote PDF that happens to share its id", async () => {
+    const key = `legacy-${process.pid}`;
+    const seed = await issueDocument({
+      tenantId: tenantA,
+      templateId,
+      idempotencyKey: key,
+      values: VALUES,
+      base: appDb,
+      storageDir: DIR,
+    });
+    const id = BigInt(seed.id);
+    // The upgraded install's leftover: same tenant, same numeric id, another customer's document.
+    const legacyPath = `${DIR}/${tenantA}/${id}.pdf`;
+    await Bun.write(legacyPath, "SOMEONE-ELSES-QUOTE");
+    // Back to PENDING with the file gone, so this issuance renders and publishes for real.
+    await suDb.issuedDocument.update({
+      where: { id },
+      data: { status: "PENDING", pdfStorageKey: null },
+    });
+    await rm(`${DIR}/${storageKey(tenantA, id)}`, { force: true });
+
+    const again = await issueDocument({
+      tenantId: tenantA,
+      templateId,
+      idempotencyKey: key,
+      values: VALUES,
+      withBytes: true,
+      base: appDb,
+      storageDir: DIR,
+    });
+    expect(again.status).toBe("READY");
+    expect(pdfHeader(Buffer.from(again.bytes as ArrayBuffer))).toBe("%PDF-");
+    // The leftover is untouched, and it is not what this document points at.
+    expect(await Bun.file(legacyPath).text()).toBe("SOMEONE-ELSES-QUOTE");
+    const stored = await suDb.issuedDocument.findUnique({
+      where: { id },
+      select: { pdfStorageKey: true },
+    });
+    expect(stored?.pdfStorageKey).not.toBe(`${tenantA}/${id}.pdf`);
   });
 
   // A same-format replacement reuses the same path, so the bytes change before the row that records

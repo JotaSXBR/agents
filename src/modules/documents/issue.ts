@@ -97,8 +97,21 @@ function sysCtx(tenantId: bigint): TenantContext {
   return { tenantId, userId: null, role: "TENANT_ADMIN" };
 }
 
-function storageKey(tenantId: bigint, documentId: bigint): string {
-  return `${tenantId}/${documentId}.pdf`;
+// Where an issued document's bytes live, under the storage root.
+//
+// The `documents/` segment is the load-bearing part. An install upgraded from the quotes subsystem
+// keeps writing into the directory its QUOTES_STORAGE_DIR names (Coolify freezes that value, which
+// is why the fallback exists at all), and that directory already holds `<tenantId>/<quoteId>.pdf`
+// from before. `issued_documents` is a NEW table with a new sequence, so its ids start over and
+// collide with those file names — and a collision is not a lost file, it is the wrong customer's
+// document: `link` fails with EEXIST, the publish path reads that as "another renderer got here
+// first", adopts the file, and marks the row READY over a stranger's quote, which is then what the
+// download serves and what the agent attaches to the conversation.
+//
+// A segment no numeric id can produce keeps the two sets of files apart for good. Nothing has to be
+// migrated: the documents feature is new, so no install has a file under this scheme yet.
+export function storageKey(tenantId: bigint, documentId: bigint): string {
+  return `${tenantId}/documents/${documentId}.pdf`;
 }
 
 export function documentFileName(title: string, number: string | null): string {

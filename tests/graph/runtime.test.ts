@@ -23,6 +23,7 @@ import { runAgentTurn } from "@/graph/runtime";
 import type { TenantContext } from "@/lib/tenancy";
 import type { ChatwootClient } from "@/modules/chatwoot/client";
 import type { NormalizedChatwootEvent } from "@/modules/chatwoot/types";
+import { storageKey } from "@/modules/documents/issue";
 import { documentStarter } from "@/modules/documents/starters";
 import { createDocumentTemplate } from "@/modules/documents/templates";
 import { readGuardrailHealth } from "@/modules/guardrails/health";
@@ -2068,7 +2069,9 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
       // first version of this test passed a dir the runtime did not plumb through, so the PDF was
       // written to the configured one and nothing said so.
       expect(
-        await Bun.file(`${dir}/${tenantId}/${row?.id ?? 0}.pdf`).exists(),
+        await Bun.file(
+          `${dir}/${storageKey(tenantId, row?.id ?? 0n)}`,
+        ).exists(),
       ).toBe(true);
       // And the trail names the tool the operator granted, not a constant: an operator filtering for
       // it has to find the line it produced.
