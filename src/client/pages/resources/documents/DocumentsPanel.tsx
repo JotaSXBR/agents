@@ -123,6 +123,13 @@ export function DocumentsPanel() {
       starterModal.close();
       showToast(t("documents.created", "Template created."), "success");
       void load();
+    } catch {
+      // Eden REJECTS on a transport failure instead of answering `{ error }`, and only the second
+      // was handled: offline, the button spun and then said nothing at all.
+      showToast(
+        t("documents.createError", "Could not create this template."),
+        "error",
+      );
     } finally {
       setCreating(null);
     }
@@ -181,6 +188,8 @@ export function DocumentsPanel() {
       showToast(t("documents.deleted", "Deleted."), "success");
       deleteModal.close();
       void load();
+    } catch {
+      showToast(t("documents.deleteError", "Could not delete."), "error");
     } finally {
       setDeleting(false);
     }
@@ -230,15 +239,19 @@ export function DocumentsPanel() {
   }
 
   async function revoke(doc: IssuedDocument) {
-    const { error: err } = await api.api.v1
-      .documents({ id: doc.id })
-      .revoke.post();
-    if (err) {
+    try {
+      const { error: err } = await api.api.v1
+        .documents({ id: doc.id })
+        .revoke.post();
+      if (err) {
+        showToast(t("documents.revokeError", "Could not revoke."), "error");
+        return;
+      }
+      showToast(t("documents.revoked", "Revoked."), "success");
+      void load();
+    } catch {
       showToast(t("documents.revokeError", "Could not revoke."), "error");
-      return;
     }
-    showToast(t("documents.revoked", "Revoked."), "success");
-    void load();
   }
 
   return (

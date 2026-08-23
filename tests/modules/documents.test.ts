@@ -1656,6 +1656,23 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       ),
     ).toEqual([]);
 
+    // A FIRST upload whose row does not commit must leave no file at all: there is no previous
+    // letterhead to go back to, and keeping the new one would be an unreferenced logo on disk for a
+    // row that never existed. (Round 24 folded two restore branches into one and dropped this half.)
+    await rm(`${dir}/${key}`, { force: true });
+    await expect(
+      setCompanyLogo(
+        ctx(tenantB),
+        {
+          type: "image/png",
+          size: png.length,
+          arrayBuffer: async () => new Uint8Array(png).buffer as ArrayBuffer,
+        },
+        failing,
+      ),
+    ).rejects.toThrow(/settings write failed/);
+    expect(await Bun.file(`${dir}/${key}`).exists()).toBe(false);
+
     // Two overlapping uploads of the SAME format share one path, so they have to serialise: one
     // moving the file aside while the other sees the path free is how the committed version ends up
     // describing the other request's image. The swap runs inside the per-tenant settings lock.

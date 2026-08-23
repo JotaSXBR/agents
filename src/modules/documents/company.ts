@@ -212,9 +212,13 @@ export async function setCompanyLogo(
       await rename(temp, path);
     });
   } catch (e) {
-    // The transaction rolled back (the publish itself failed, or the row write did), so the
-    // letterhead goes back to the one the stored version still describes.
+    // The transaction rolled back (the publish itself failed, or the row write did), so the file
+    // goes back to whatever the stored version still describes. When there was no previous file,
+    // that is NO file: leaving the new one behind would keep an unreferenced letterhead on disk for
+    // a row that never committed. (Round 24 folded two restore branches into one and dropped this
+    // half with them.)
     if (hadPrevious) await rename(previous, path).catch(() => undefined);
+    else await rm(path, { force: true });
     throw e;
   } finally {
     await rm(temp, { force: true });

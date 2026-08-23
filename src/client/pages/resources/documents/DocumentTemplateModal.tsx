@@ -202,6 +202,16 @@ export function DocumentTemplateModal({
       baselineRef.current = null;
       modal.close();
       onSaved();
+    } catch {
+      // Eden rejects on a transport failure rather than answering `{ error }`, and only the second
+      // was handled — so an offline save closed nothing, said nothing, and left an unhandled
+      // rejection behind.
+      if (session === sessionRef.current) {
+        showToast(
+          t("documents.saveError", "Could not save this template."),
+          "error",
+        );
+      }
     } finally {
       setSaving(false);
     }

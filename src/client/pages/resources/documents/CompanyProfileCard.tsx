@@ -106,6 +106,11 @@ export function CompanyProfileCard({
       }
       onChanged(data.company);
       showToast(t("common.saved", "Saved."), "success");
+    } catch {
+      // Eden RESOLVES an HTTP error as `{ error }` and REJECTS on a transport failure — offline, a
+      // reset connection. Only the first half was handled, so the second left the operator with a
+      // button that did nothing and an unhandled rejection in the console.
+      showToast(t("documents.company.saveError", "Could not save."), "error");
     } finally {
       setSaving(false);
     }
@@ -121,10 +126,7 @@ export function CompanyProfileCard({
   }
 
   async function upload(file: File) {
-    const { data, error } = await api.api.v1[
-      "tenant-settings"
-    ].company.logo.post({ file });
-    if (error || !data) {
+    const failed = () =>
       showToast(
         t(
           "documents.company.logoError",
@@ -132,9 +134,15 @@ export function CompanyProfileCard({
         ),
         "error",
       );
-      return;
+    try {
+      const { data, error } = await api.api.v1[
+        "tenant-settings"
+      ].company.logo.post({ file });
+      if (error || !data) return failed();
+      applyLogoOnly(data.company);
+    } catch {
+      failed();
     }
-    applyLogoOnly(data.company);
   }
 
   // Both halves of a failure: Eden RESOLVES an HTTP error as `{ error }`, and the fetch can reject
