@@ -73,6 +73,12 @@ TTF: a face resolves from a path that differs between the dev tree and the conta
 goes into is global and does not deduplicate, and the built-ins cover Latin-1, which is what PT-BR
 needs. A bundled family is purely additive later.
 
+The console owns the **words**, and it sends them as `blockText` — the text of `text` blocks by ID,
+merged server-side into the layout as it stands. It never sends the `blocks` array back: doing that
+would make the console authoritative over a layout it did not author, so a block added or reordered
+over the API while the modal was open would be silently replaced by the snapshot the modal loaded.
+Block ids exist for exactly this.
+
 ### Authoring is strict; storage is tolerant
 
 Two questions, deliberately answered differently. Reading a **stored** row is tolerant: a template
@@ -217,6 +223,12 @@ PNG lands on the same name. A `logoVersion` on the company block moves on every 
 what the console keys its fetch off: the name alone cannot say the letterhead changed, so a same
 format replacement would leave the card — and any browser cache of a response served with a
 `max-age` — showing the old logo while issued documents already carry the new one.
+
+The upload's **bytes decide the format**, not the label on them: `file.type` is whatever the caller
+put in the multipart part (and Bun derives it from the file name's extension, which a REST caller
+controls outright), so a JPEG announced as a PNG would be stored under a `.png` key and then fail
+every preview and every issuance of a template showing the logo. The signature is checked before
+anything is written.
 
 The logo is read from disk as **bytes** and never as a URL: `@react-pdf/renderer` will fetch an
 `<Image src>` over the network, which on a server renderer is a request driven by tenant input. Its

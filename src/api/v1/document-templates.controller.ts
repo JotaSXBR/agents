@@ -57,6 +57,12 @@ export const writeBody = t.Object({
   blocks: t.Optional(
     t.Array(t.Record(t.String(), t.Unknown()), { description: BLOCKS_DESC }),
   ),
+  blockText: t.Optional(
+    t.Record(t.String(), t.String(), {
+      description:
+        "Replace the text of `text` blocks BY ID, leaving the rest of the layout as it stands. Prefer this over sending `blocks` when only the wording changes: a whole-array write makes the caller authoritative over blocks another client may have added or reordered meanwhile.",
+    }),
+  ),
   fields: t.Optional(
     t.Array(t.Record(t.String(), t.Unknown()), { description: FIELDS_DESC }),
   ),
@@ -145,6 +151,7 @@ export const documentTemplatesController = new Elysia({
         id: body.id ? BigInt(body.id) : undefined,
         name: body.name,
         blocks: body.blocks,
+        blockText: body.blockText,
         fields: body.fields,
         style: body.style,
         numberPrefix: body.numberPrefix,
@@ -175,6 +182,12 @@ export const documentTemplatesController = new Elysia({
         blocks: t.Optional(
           t.Array(t.Record(t.String(), t.Unknown()), {
             description: BLOCKS_DESC,
+          }),
+        ),
+        blockText: t.Optional(
+          t.Record(t.String(), t.String(), {
+            description:
+              "Replace the text of `text` blocks BY ID, over the saved template's layout. The same shape the PATCH takes, so a preview shows what the save will produce.",
           }),
         ),
         fields: t.Optional(

@@ -22,6 +22,26 @@ export const LOGO_EXT_BY_TYPE: Record<string, "png" | "jpg"> = {
 };
 export const LOGO_MAX_BYTES = 524_288; // 512 KB
 
+// The BYTES decide the format, not the label on them. `file.type` is whatever the caller put in the
+// multipart part (and Bun derives it from the file NAME's extension, which a REST caller controls
+// outright), so a JPEG announced as image/png would be stored under a .png key and handed to
+// @react-pdf/renderer as a PNG — which then fails every preview and every issuance of a template
+// showing the logo, until someone thinks to remove it. Two signatures, matching the allowlist above.
+const LOGO_SIGNATURES: Record<"png" | "jpg", number[]> = {
+  png: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+  jpg: [0xff, 0xd8, 0xff],
+};
+
+export function logoBytesLookLike(
+  bytes: Uint8Array,
+  ext: "png" | "jpg",
+): boolean {
+  // No length guard: `every` walks the SIGNATURE, so a file shorter than it compares a byte against
+  // `undefined` and fails. Measured — the guard survived removal against the whole table, which is
+  // the definition of a clause that decides nothing.
+  return LOGO_SIGNATURES[ext].every((byte, i) => bytes[i] === byte);
+}
+
 export const LOGO_CONTENT_TYPE: Record<"png" | "jpg", string> = {
   png: "image/png",
   jpg: "image/jpeg",
@@ -66,10 +86,18 @@ export async function setCompanyLogo(
   if (file.size > LOGO_MAX_BYTES) {
     throw new AppError("image too large", 400, "errors.imageTooLarge");
   }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (!logoBytesLookLike(bytes, ext)) {
+    throw new AppError(
+      "the logo must be a PNG or JPEG",
+      400,
+      "errors.unsupportedImageType",
+    );
+  }
   const key = logoKeyFor(ctx.tenantId, ext);
   // Bytes first, then the row: a crash between the two leaves an unreferenced file, which costs
   // disk. The other order leaves a row pointing at nothing, which costs every render after it.
-  await Bun.write(logoPath(key), new Uint8Array(await file.arrayBuffer()));
+  await Bun.write(logoPath(key), bytes);
   return setCompanyLogoKey(ctx, key, base);
 }
 

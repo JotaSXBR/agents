@@ -32,7 +32,11 @@ type IssuedData = Awaited<
 type IssuedDocument = NonNullable<IssuedData>["documents"][number];
 
 export function DocumentsPanel() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  // The route defaults an absent locale to pt-BR, so an English console would create Portuguese
+  // starters — names, wording and currency — without ever offering a choice. Normalised because the
+  // route takes the two the starter table has, and the browser can hand us "en", "en-GB", "pt".
+  const starterLocale = i18n.language.startsWith("pt") ? "pt-BR" : "en-US";
   const { showToast } = useToast();
   const [templates, setTemplates] = useState<DocumentTemplate[]>([]);
   const [starters, setStarters] = useState<Starter[]>([]);
@@ -56,7 +60,9 @@ export function DocumentsPanel() {
     try {
       const [list, startersRes, settings, issuedRes] = await Promise.all([
         api.api.v1["document-templates"].get(),
-        api.api.v1["document-templates"].starters.get({ query: {} }),
+        api.api.v1["document-templates"].starters.get({
+          query: { locale: starterLocale },
+        }),
         api.api.v1["tenant-settings"].get(),
         api.api.v1.documents.get({ query: { limit: "20" } }),
       ]);
@@ -73,7 +79,9 @@ export function DocumentsPanel() {
     } finally {
       setLoading(false);
     }
-  }, []);
+    // Reloads when the operator switches language: the starters are the one thing on this panel
+    // whose CONTENT is locale-specific.
+  }, [starterLocale]);
 
   useEffect(() => {
     void load();

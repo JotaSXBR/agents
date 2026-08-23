@@ -913,4 +913,81 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       }),
     ).rejects.toThrow(/numbered/);
   });
+
+  // What the console actually does: change the WORDS. Sending the whole blocks array to do that
+  // makes the console authoritative over a layout it did not author — a block added or reordered
+  // over the API while the modal was open would be replaced by the snapshot the modal loaded. Ids
+  // exist so an edit survives a reorder from another transport.
+  test("a text edit by block id survives a reorder that landed meanwhile", async () => {
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const tpl = await createDocumentTemplate(
+      ctx(tenantA),
+      {
+        name: "Orçamento reordenado",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+      },
+      appDb,
+    );
+    const id = BigInt(tpl.id);
+    const textBlock = tpl.blocks.find((b) => b.type === "text");
+    if (!textBlock) throw new Error("starter has no text block");
+
+    // Another client appends a block — the console's modal knows nothing about it.
+    await updateDocumentTemplate(
+      ctx(tenantA),
+      id,
+      {
+        blocks: [
+          ...tpl.blocks,
+          {
+            id: "novo_texto",
+            type: "text",
+            text: "Adicionado por outro cliente",
+          },
+        ],
+      },
+      appDb,
+    );
+
+    // …and only then does the console save its wording.
+    await updateDocumentTemplate(
+      ctx(tenantA),
+      id,
+      { blockText: { [textBlock.id]: "TEXTO DO CONSOLE" } },
+      appDb,
+    );
+
+    const after = await getDocumentTemplate(ctx(tenantA), id, appDb);
+    expect(after.blocks.some((b) => b.id === "novo_texto")).toBe(true);
+    expect(
+      after.blocks.find((b) => b.id === textBlock.id) as { text?: string },
+    ).toMatchObject({ text: "TEXTO DO CONSOLE" });
+  });
+
+  // An id that is not a text block is refused rather than dropped: silently ignoring it is how a
+  // caller believes it edited something it did not.
+  test("refuses blockText for an id that is not a text block", async () => {
+    const tpl = await getDocumentTemplate(ctx(tenantA), templateId, appDb);
+    const notText = tpl.blocks.find((b) => b.type !== "text");
+    if (!notText) throw new Error("starter has only text blocks");
+    await expect(
+      updateDocumentTemplate(
+        ctx(tenantA),
+        templateId,
+        { blockText: { [notText.id]: "x" } },
+        appDb,
+      ),
+    ).rejects.toThrow(/not a text block/);
+    await expect(
+      updateDocumentTemplate(
+        ctx(tenantA),
+        templateId,
+        { blockText: { nao_existe: "x" } },
+        appDb,
+      ),
+    ).rejects.toThrow(/not a text block/);
+  });
 });

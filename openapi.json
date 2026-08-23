@@ -24325,6 +24325,15 @@
                       }
                     }
                   },
+                  "blockText": {
+                    "description": "Replace the text of `text` blocks BY ID, leaving the rest of the layout as it stands. Prefer this over sending `blocks` when only the wording changes: a whole-array write makes the caller authoritative over blocks another client may have added or reordered meanwhile.",
+                    "type": "object",
+                    "patternProperties": {
+                      "^(.*)$": {
+                        "type": "string"
+                      }
+                    }
+                  },
                   "fields": {
                     "description": "Fields an agent fills when it issues this document: [{\"name\":\"…\",\"label\":\"…\",\"type\":\"text\"|\"number\"|\"date\"|\"currency\"|\"lineItems\",\"required\"?,\"description\"?}]. `name` is lowercase letters, digits and underscores, and may not start with company_, empresa_, doc_ or documento_ (those already resolve to the letterhead or the document itself). A lineItems value is [{\"description\",\"quantity\",\"unitPrice\"}] and is the only field a lineItems or totals block may point at.",
                     "type": "array",
@@ -24395,6 +24404,15 @@
                       }
                     }
                   },
+                  "blockText": {
+                    "description": "Replace the text of `text` blocks BY ID, leaving the rest of the layout as it stands. Prefer this over sending `blocks` when only the wording changes: a whole-array write makes the caller authoritative over blocks another client may have added or reordered meanwhile.",
+                    "type": "object",
+                    "patternProperties": {
+                      "^(.*)$": {
+                        "type": "string"
+                      }
+                    }
+                  },
                   "fields": {
                     "description": "Fields an agent fills when it issues this document: [{\"name\":\"…\",\"label\":\"…\",\"type\":\"text\"|\"number\"|\"date\"|\"currency\"|\"lineItems\",\"required\"?,\"description\"?}]. `name` is lowercase letters, digits and underscores, and may not start with company_, empresa_, doc_ or documento_ (those already resolve to the letterhead or the document itself). A lineItems value is [{\"description\",\"quantity\",\"unitPrice\"}] and is the only field a lineItems or totals block may point at.",
                     "type": "array",
@@ -24462,6 +24480,15 @@
                       "type": "object",
                       "patternProperties": {
                         "^(.*)$": {}
+                      }
+                    }
+                  },
+                  "blockText": {
+                    "description": "Replace the text of `text` blocks BY ID, leaving the rest of the layout as it stands. Prefer this over sending `blocks` when only the wording changes: a whole-array write makes the caller authoritative over blocks another client may have added or reordered meanwhile.",
+                    "type": "object",
+                    "patternProperties": {
+                      "^(.*)$": {
+                        "type": "string"
                       }
                     }
                   },
@@ -24700,6 +24727,15 @@
                       }
                     }
                   },
+                  "blockText": {
+                    "description": "Replace the text of `text` blocks BY ID, over the saved template's layout. The same shape the PATCH takes, so a preview shows what the save will produce.",
+                    "type": "object",
+                    "patternProperties": {
+                      "^(.*)$": {
+                        "type": "string"
+                      }
+                    }
+                  },
                   "fields": {
                     "description": "Fields an agent fills when it issues this document: [{\"name\":\"…\",\"label\":\"…\",\"type\":\"text\"|\"number\"|\"date\"|\"currency\"|\"lineItems\",\"required\"?,\"description\"?}]. `name` is lowercase letters, digits and underscores, and may not start with company_, empresa_, doc_ or documento_ (those already resolve to the letterhead or the document itself). A lineItems value is [{\"description\",\"quantity\",\"unitPrice\"}] and is the only field a lineItems or totals block may point at.",
                     "type": "array",
@@ -24759,6 +24795,15 @@
                       }
                     }
                   },
+                  "blockText": {
+                    "description": "Replace the text of `text` blocks BY ID, over the saved template's layout. The same shape the PATCH takes, so a preview shows what the save will produce.",
+                    "type": "object",
+                    "patternProperties": {
+                      "^(.*)$": {
+                        "type": "string"
+                      }
+                    }
+                  },
                   "fields": {
                     "description": "Fields an agent fills when it issues this document: [{\"name\":\"…\",\"label\":\"…\",\"type\":\"text\"|\"number\"|\"date\"|\"currency\"|\"lineItems\",\"required\"?,\"description\"?}]. `name` is lowercase letters, digits and underscores, and may not start with company_, empresa_, doc_ or documento_ (those already resolve to the letterhead or the document itself). A lineItems value is [{\"description\",\"quantity\",\"unitPrice\"}] and is the only field a lineItems or totals block may point at.",
                     "type": "array",
@@ -24815,6 +24860,15 @@
                       "type": "object",
                       "patternProperties": {
                         "^(.*)$": {}
+                      }
+                    }
+                  },
+                  "blockText": {
+                    "description": "Replace the text of `text` blocks BY ID, over the saved template's layout. The same shape the PATCH takes, so a preview shows what the save will produce.",
+                    "type": "object",
+                    "patternProperties": {
+                      "^(.*)$": {
+                        "type": "string"
                       }
                     }
                   },
@@ -25107,6 +25161,15 @@
                       }
                     }
                   },
+                  "blockText": {
+                    "description": "Replace the text of `text` blocks BY ID, leaving the rest of the layout as it stands. Prefer this over sending `blocks` when only the wording changes: a whole-array write makes the caller authoritative over blocks another client may have added or reordered meanwhile.",
+                    "type": "object",
+                    "patternProperties": {
+                      "^(.*)$": {
+                        "type": "string"
+                      }
+                    }
+                  },
                   "fields": {
                     "description": "Fields an agent fills when it issues this document: [{\"name\":\"…\",\"label\":\"…\",\"type\":\"text\"|\"number\"|\"date\"|\"currency\"|\"lineItems\",\"required\"?,\"description\"?}]. `name` is lowercase letters, digits and underscores, and may not start with company_, empresa_, doc_ or documento_ (those already resolve to the letterhead or the document itself). A lineItems value is [{\"description\",\"quantity\",\"unitPrice\"}] and is the only field a lineItems or totals block may point at.",
                     "type": "array",
@@ -25177,6 +25240,15 @@
                       }
                     }
                   },
+                  "blockText": {
+                    "description": "Replace the text of `text` blocks BY ID, leaving the rest of the layout as it stands. Prefer this over sending `blocks` when only the wording changes: a whole-array write makes the caller authoritative over blocks another client may have added or reordered meanwhile.",
+                    "type": "object",
+                    "patternProperties": {
+                      "^(.*)$": {
+                        "type": "string"
+                      }
+                    }
+                  },
                   "fields": {
                     "description": "Fields an agent fills when it issues this document: [{\"name\":\"…\",\"label\":\"…\",\"type\":\"text\"|\"number\"|\"date\"|\"currency\"|\"lineItems\",\"required\"?,\"description\"?}]. `name` is lowercase letters, digits and underscores, and may not start with company_, empresa_, doc_ or documento_ (those already resolve to the letterhead or the document itself). A lineItems value is [{\"description\",\"quantity\",\"unitPrice\"}] and is the only field a lineItems or totals block may point at.",
                     "type": "array",
@@ -25244,6 +25316,15 @@
                       "type": "object",
                       "patternProperties": {
                         "^(.*)$": {}
+                      }
+                    }
+                  },
+                  "blockText": {
+                    "description": "Replace the text of `text` blocks BY ID, leaving the rest of the layout as it stands. Prefer this over sending `blocks` when only the wording changes: a whole-array write makes the caller authoritative over blocks another client may have added or reordered meanwhile.",
+                    "type": "object",
+                    "patternProperties": {
+                      "^(.*)$": {
+                        "type": "string"
                       }
                     }
                   },

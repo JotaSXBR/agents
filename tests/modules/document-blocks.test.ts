@@ -176,6 +176,34 @@ describe("parseTemplateContent", () => {
     expect(r.ok).toBe(true);
   });
 
+  // A token the RESOLVER cannot even read as a name. It matches nothing, so the "unknown token"
+  // scan never saw it and authoring succeeded — and then the resolver did not match it either, so
+  // the braces printed verbatim in a document the customer keeps. The invariant is that an
+  // expression which will not resolve is refused when written, and that has to include the ones we
+  // could not parse as a name at all.
+  test("refuses a token expression the resolver cannot read", () => {
+    for (const text of [
+      "Olá {{Cliente}}",
+      "Olá {{company-name}}",
+      "Olá {{ 1cliente }}",
+      "Olá {{}}",
+    ]) {
+      const r = parseTemplateContent(
+        blocks({ id: "t", type: "text", text }),
+        FIELDS,
+        {},
+      );
+      expect(r.ok).toBe(false);
+      expect(r.ok === false && r.reason).toContain("not a readable token");
+    }
+    // The same rule on the footer, which prints on every page.
+    const footer = parseTemplateContent(blocks(), FIELDS, {
+      footerText: "{{Company_name}}",
+    });
+    expect(footer.ok).toBe(false);
+    expect(footer.ok === false && footer.reason).toContain("footerText");
+  });
+
   test("accepts a reserved token without a field behind it", () => {
     const r = parseTemplateContent(
       blocks({

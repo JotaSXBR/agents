@@ -21,6 +21,7 @@ describe("document-templates writeBody vs the service input (drift guard)", () =
       "slug",
       "description",
       "blocks",
+      "blockText",
       "fields",
       "style",
       "numberPrefix",

@@ -103,6 +103,23 @@ export function sanitizeDocumentValue(
 }
 
 // Every token name a piece of text asks for, in order, deduplicated.
+// Anything shaped like a token that the resolver would NOT recognise: {{Company_name}} (capital),
+// {{company-name}} (hyphen), {{ 1st }} (leading digit), {{}}. These slip past `tokensIn` — it only
+// reports what MATCHES — so authoring accepted them, and then `resolveTokens` did not match them
+// either and the braces printed verbatim in a document the customer keeps. The invariant is that an
+// expression which will not resolve is refused when it is written, and "will not resolve" has to
+// include "we could not even read it as a name".
+const TOKEN_SHAPED_RE = /\{\{([^{}]*)\}\}/g;
+const VALID_TOKEN_BODY_RE = /^\s*[a-z][a-z0-9_]*\s*$/;
+
+export function malformedTokenIn(text: string): string | null {
+  for (const m of text.matchAll(TOKEN_SHAPED_RE)) {
+    const body = m[1] ?? "";
+    if (!VALID_TOKEN_BODY_RE.test(body)) return m[0];
+  }
+  return null;
+}
+
 export function tokensIn(text: string): string[] {
   const found: string[] = [];
   for (const m of text.matchAll(DOCUMENT_TOKEN_RE)) {

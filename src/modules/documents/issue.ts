@@ -410,15 +410,25 @@ async function assignNumber(
   templateId: bigint,
   documentId: bigint,
 ): Promise<number | null> {
-  // The DOCUMENT row is claimed first, and that order is the whole point. A row exists unnumbered
-  // for a moment by design — the counter is bumped after the insert, so a lost idempotency race
-  // consumes no number — and in that window a second caller re-reads it, sees no number, and heals
-  // it at the same time as the first. Without this lock both take a number from the counter, one
-  // update is discarded, and the caller whose update lost goes on to render a document with NO
-  // number and write it over the winner's PDF: the customer's link then serves a quote with a blank
-  // where its identity should be.
+  // TEMPLATE first, then the document. Both locks are needed and the ORDER is the load-bearing part:
+  // deleting a template locks the template row and then, through the FK's ON DELETE SET NULL, the
+  // issued rows that point at it. A numbering that took the document lock first and then waited on
+  // the template would close a cycle, and PostgreSQL would break it by killing one side — either a
+  // customer's issuance or the operator's delete. Same order everywhere, no cycle.
   //
-  // Locked before the template row by BOTH paths, so the order is consistent and cannot deadlock.
+  // The counter UPDATE below would take this same row lock anyway; taking it up front is what makes
+  // the order explicit instead of incidental.
+  await db.$queryRaw`
+    SELECT 1 FROM "document_templates" WHERE "id" = ${templateId} FOR UPDATE
+  `;
+  // The DOCUMENT row is claimed next, and that claim is the whole point of this function. A row
+  // exists unnumbered for a moment by design — the counter is bumped after the insert, so a lost
+  // idempotency race consumes no number — and in that window a second caller re-reads it, sees no
+  // number, and heals it at the same time as the first. Without the lock both take a number from
+  // the counter, one update is discarded, and the caller whose update lost goes on to render a
+  // document with NO number and write it over the winner's PDF: the customer's link then serves a
+  // quote with a blank where its identity should be.
+  //
   // Scoped by RLS like every other statement in this transaction, and the id is one we inserted.
   const claimed = await db.$queryRaw<{ number: number | null }[]>`
     SELECT "number" FROM "issued_documents" WHERE "id" = ${documentId} FOR UPDATE

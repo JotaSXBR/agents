@@ -11,7 +11,12 @@ import {
   MAX_LINE_ITEMS,
   parseDocumentStyle,
 } from "./blocks";
-import { isReservedTokenName, RESERVED_TOKEN_NAMES, tokensIn } from "./tokens";
+import {
+  isReservedTokenName,
+  malformedTokenIn,
+  RESERVED_TOKEN_NAMES,
+  tokensIn,
+} from "./tokens";
 
 // Everything that REFUSES a template or a set of values, as one pure decision with a decision table
 // behind it. Written for whoever authored the thing, because the caller on the far end is either an
@@ -291,22 +296,22 @@ export function parseTemplateContent(
       }
     }
     for (const text of textsIn(b)) {
-      const unknown = unknownToken(text, byName);
-      if (unknown) {
+      const fault = unknownToken(text, byName);
+      if (fault) {
         return {
           ok: false,
-          reason: `blocks: block "${b.id}" uses {{${unknown}}}, which is neither a declared field nor a reserved name. Declare it in fields, or remove it — an unresolved token renders as a blank space in the customer's document.`,
+          reason: `blocks: ${tokenFaultReason(`block "${b.id}"`, fault)}`,
         };
       }
     }
   }
 
   const footer = parseDocumentStyle(rawStyle).footerText;
-  const unknownInFooter = footer ? unknownToken(footer, byName) : null;
-  if (unknownInFooter) {
+  const footerFault = footer ? unknownToken(footer, byName) : null;
+  if (footerFault) {
     return {
       ok: false,
-      reason: `style: footerText uses {{${unknownInFooter}}}, which is neither a declared field nor a reserved name. Declare it in fields, or remove it — an unresolved token renders as a blank on the last line of every page.`,
+      reason: `style: ${tokenFaultReason("footerText", footerFault)}`,
     };
   }
 
@@ -315,15 +320,33 @@ export function parseTemplateContent(
 
 // One question, asked of every text that reaches resolveTokens: block texts and the style's footer
 // alike. Returns the first token that would render as a blank, or null.
+type TokenFault =
+  | { kind: "malformed"; text: string }
+  | { kind: "unknown"; name: string };
+
 function unknownToken(
   text: string,
   byName: Map<string, DocumentField>,
-): string | null {
+): TokenFault | null {
+  // Malformed first, and reported as its own kind. A {{Company_name}} or {{company-name}} matches
+  // nothing the resolver looks for, so `tokensIn` cannot see it — authoring accepted it and the
+  // braces printed verbatim in a document the customer keeps. It also needs different advice:
+  // "declare it in fields" is the fix for an unknown NAME, and no field can be declared under a
+  // name the token syntax cannot express.
+  const malformed = malformedTokenIn(text);
+  if (malformed) return { kind: "malformed", text: malformed };
   for (const token of tokensIn(text)) {
     if (byName.has(token) || RESERVED_TOKEN_NAMES.includes(token)) continue;
-    return token;
+    return { kind: "unknown", name: token };
   }
   return null;
+}
+
+// One sentence per fault kind, written for whoever authored the template.
+function tokenFaultReason(where: string, fault: TokenFault): string {
+  return fault.kind === "malformed"
+    ? `${where} uses ${fault.text}, which is not a readable token: a name must start with a lowercase letter and contain only lowercase letters, digits and underscores. As written it would print with its braces in the customer's document.`
+    : `${where} uses {{${fault.name}}}, which is neither a declared field nor a reserved name. Declare it in fields, or remove it — an unresolved token renders as a blank space in the customer's document.`;
 }
 
 // ── values (what one issuance supplies) ──

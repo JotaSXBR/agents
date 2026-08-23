@@ -102,7 +102,22 @@ export function DocumentTemplateModal({
       texts,
     }) !== baselineRef.current;
 
-  // The blocks as edited: only the text of `text` blocks differs from what was loaded.
+  // The words, by block id — never the whole `blocks` array. Sending the array back would make this
+  // modal authoritative over a layout it did not author: an API or MCP client that added or
+  // reordered a block while it was open would have that work replaced by the snapshot loaded here.
+  // Block ids exist so a console edit survives a reorder from another transport.
+  const blockText = useMemo(() => {
+    if (!template) return {};
+    const out: Record<string, string> = {};
+    for (const b of template.blocks) {
+      if (b.type !== "text") continue;
+      const edited = texts[b.id];
+      if (edited !== undefined && edited !== b.text) out[b.id] = edited;
+    }
+    return out;
+  }, [template, texts]);
+
+  // Local only, for the block list below: the preview is rendered server-side from `blockText`.
   const blocks = useMemo(() => {
     if (!template) return [];
     return template.blocks.map((b) =>
@@ -118,13 +133,12 @@ export function DocumentTemplateModal({
         ? {
             id: template.id,
             name,
-            blocks,
-            fields: template.fields,
+            blockText,
             style,
             numberPrefix: numberPrefix || null,
           }
         : null,
-    [template, name, blocks, style, numberPrefix],
+    [template, name, blockText, style, numberPrefix],
   );
   const preview = useDocumentPreview(draft as Record<string, unknown> | null);
 
@@ -139,7 +153,7 @@ export function DocumentTemplateModal({
         description: description || null,
         numberPrefix: numberPrefix || null,
         enabled,
-        blocks: blocks as Record<string, unknown>[],
+        blockText,
         style: style as unknown as Record<string, unknown>,
       });
       if (error) {

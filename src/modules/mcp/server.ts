@@ -1071,6 +1071,86 @@ export function buildMcpServer(principal: VerifiedToken): McpServer {
       async (args: { conversation_id: string }, eff) =>
         writeContent(await conversationMessages(eff, args)),
     );
+
+    // The document READS live here with every other *_list/*_get, not with the writes below: the
+    // scope contract in docs/mcp.md is that mcp:read sees everything that only reads, and these
+    // five went out inside the write block — invisible to a read-only token even though their own
+    // implementations go through readGate.
+    registerTenantTool(
+      server,
+      principal,
+      "document_template_list",
+      {
+        description:
+          "List the tenant's document templates (id, name, slug, the agent tool name it produces, declared fields, block count, numbering). The blocks themselves come from document_template_get.",
+        inputSchema: {},
+      },
+      async (_args, eff) => writeContent(await documentTemplateList(eff)),
+    );
+
+    registerTenantTool(
+      server,
+      principal,
+      "document_template_get",
+      {
+        description:
+          "Get one document template in full: its blocks, declared fields and style, exactly as document_template_update accepts them.",
+        inputSchema: { document_template_id: z.string() },
+      },
+      async (args: { document_template_id: string }, eff) =>
+        writeContent(await documentTemplateGet(eff, args)),
+    );
+
+    // NOTE: the block vocabulary is served HERE, on demand, instead of being published in every
+    // tools/list as the input schema of the two write tools. A document block is a six-variant
+    // discriminated union, and JSON Schema publishes a union by inlining every variant — measured at
+    // ~3.2k characters per tool, paid by every client on every session, for a contract only a caller
+    // actually authoring a template needs. Nothing on the client side renders a form for a six-way
+    // oneOf, so the cost buys nothing. The enforcement is not weakened: the service validates
+    // strictly, and its refusal names the block and the rule.
+    registerTenantTool(
+      server,
+      principal,
+      "document_template_schema",
+      {
+        description:
+          "The authoring contract for document templates: JSON Schema for every block type, for a declared field and for the style, plus the full {{token}} list. Generated from the validator itself, so it is exactly what document_template_create accepts. Call it once before authoring blocks.",
+        inputSchema: {},
+      },
+      async (_args, eff) => writeContent(await documentTemplateSchema(eff)),
+    );
+
+    registerTenantTool(
+      server,
+      principal,
+      "document_starters_list",
+      {
+        description:
+          "List the ready-made document templates (quote, proposal, receipt) that document_template_create can start from with `starter`.",
+        inputSchema: { locale: z.enum(["pt-BR", "en-US"]).optional() },
+      },
+      async (args: { locale?: "pt-BR" | "en-US" }, eff) =>
+        writeContent(await documentStarterList(eff, args)),
+    );
+
+    registerTenantTool(
+      server,
+      principal,
+      "issued_document_list",
+      {
+        description:
+          "List documents the tenant has issued (id, title, number, template, status, thread, revoked). The PDFs themselves are served only to an authenticated console session.",
+        inputSchema: {
+          template_id: z.string().optional(),
+          thread_id: z.string().optional(),
+          limit: z.number().int().optional(),
+        },
+      },
+      async (
+        args: { template_id?: string; thread_id?: string; limit?: number },
+        eff,
+      ) => writeContent(await issuedDocumentList(eff, args)),
+    );
   }
 
   if (hasScope(principal, "mcp:write")) {
@@ -1448,82 +1528,6 @@ export function buildMcpServer(principal: VerifiedToken): McpServer {
       },
       async (args: { tool_id: string; dry_run?: boolean }, eff) =>
         writeContent(await toolDelete(eff, args)),
-    );
-
-    registerTenantTool(
-      server,
-      principal,
-      "document_template_list",
-      {
-        description:
-          "List the tenant's document templates (id, name, slug, the agent tool name it produces, declared fields, block count, numbering). The blocks themselves come from document_template_get.",
-        inputSchema: {},
-      },
-      async (_args, eff) => writeContent(await documentTemplateList(eff)),
-    );
-
-    registerTenantTool(
-      server,
-      principal,
-      "document_template_get",
-      {
-        description:
-          "Get one document template in full: its blocks, declared fields and style, exactly as document_template_update accepts them.",
-        inputSchema: { document_template_id: z.string() },
-      },
-      async (args: { document_template_id: string }, eff) =>
-        writeContent(await documentTemplateGet(eff, args)),
-    );
-
-    // NOTE: the block vocabulary is served HERE, on demand, instead of being published in every
-    // tools/list as the input schema of the two write tools. A document block is a six-variant
-    // discriminated union, and JSON Schema publishes a union by inlining every variant — measured at
-    // ~3.2k characters per tool, paid by every client on every session, for a contract only a caller
-    // actually authoring a template needs. Nothing on the client side renders a form for a six-way
-    // oneOf, so the cost buys nothing. The enforcement is not weakened: the service validates
-    // strictly, and its refusal names the block and the rule.
-    registerTenantTool(
-      server,
-      principal,
-      "document_template_schema",
-      {
-        description:
-          "The authoring contract for document templates: JSON Schema for every block type, for a declared field and for the style, plus the full {{token}} list. Generated from the validator itself, so it is exactly what document_template_create accepts. Call it once before authoring blocks.",
-        inputSchema: {},
-      },
-      async (_args, eff) => writeContent(await documentTemplateSchema(eff)),
-    );
-
-    registerTenantTool(
-      server,
-      principal,
-      "document_starters_list",
-      {
-        description:
-          "List the ready-made document templates (quote, proposal, receipt) that document_template_create can start from with `starter`.",
-        inputSchema: { locale: z.enum(["pt-BR", "en-US"]).optional() },
-      },
-      async (args: { locale?: "pt-BR" | "en-US" }, eff) =>
-        writeContent(await documentStarterList(eff, args)),
-    );
-
-    registerTenantTool(
-      server,
-      principal,
-      "issued_document_list",
-      {
-        description:
-          "List documents the tenant has issued (id, title, number, template, status, thread, revoked). The PDFs themselves are served only to an authenticated console session.",
-        inputSchema: {
-          template_id: z.string().optional(),
-          thread_id: z.string().optional(),
-          limit: z.number().int().optional(),
-        },
-      },
-      async (
-        args: { template_id?: string; thread_id?: string; limit?: number },
-        eff,
-      ) => writeContent(await issuedDocumentList(eff, args)),
     );
 
     registerTenantTool(

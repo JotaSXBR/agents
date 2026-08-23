@@ -186,6 +186,13 @@ export interface DocumentTemplateInput {
   slug?: string;
   description?: string | null;
   blocks?: unknown;
+  // The console's own operation: the text of `text` blocks, by BLOCK ID, merged into the layout as
+  // it stands at write time. The console edits the words and nothing else, and sending the whole
+  // `blocks` array to do that makes it authoritative over a layout it did not author — an API or MCP
+  // client that added or reordered a block while the modal was open would have that work silently
+  // replaced by the snapshot the modal loaded. Block ids exist precisely so a console edit survives
+  // a reorder from another transport (docs/documents.md).
+  blockText?: Record<string, string>;
   fields?: unknown;
   style?: unknown;
   numberPrefix?: string | null;
@@ -336,6 +343,29 @@ export async function updateDocumentTemplate(
   });
 }
 
+// Text by block id, onto the layout as it stands. An id that is not a `text` block is refused
+// rather than ignored: silently dropping it is how a caller believes it edited something it did not.
+function applyBlockText(
+  blocks: DocumentBlock[],
+  text: Record<string, string>,
+): DocumentBlock[] {
+  const byId = new Map(blocks.map((b) => [b.id, b]));
+  for (const id of Object.keys(text)) {
+    if (byId.get(id)?.type !== "text") {
+      throw new AppError(
+        `blockText: "${id}" is not a text block of this template.`,
+        400,
+        "errors.invalidDocumentTemplate",
+      );
+    }
+  }
+  return blocks.map((b) =>
+    b.type === "text" && text[b.id] !== undefined
+      ? { ...b, text: text[b.id] as string }
+      : b,
+  );
+}
+
 // The body of the patch, run inside the caller's lock. Split out so the transaction above reads as
 // what it is — read, decide, write, once — rather than as a wall of field handling.
 async function patched(
@@ -367,11 +397,18 @@ async function patched(
   // declared.
   if (
     patch.blocks !== undefined ||
+    patch.blockText !== undefined ||
     patch.fields !== undefined ||
     patch.style !== undefined
   ) {
+    // Merged against the blocks as they stand INSIDE the lock, which is what makes a text edit
+    // survive a reorder that landed while the operator was typing.
+    const base = (patch.blocks ?? current.blocks) as DocumentBlock[];
+    const blocks = patch.blockText
+      ? applyBlockText(base, patch.blockText)
+      : base;
     const content = validated({
-      blocks: patch.blocks ?? current.blocks,
+      blocks,
       fields: patch.fields ?? current.fields,
       style: patch.style ?? current.style,
     });
@@ -436,6 +473,9 @@ export interface PreviewInput {
   id?: bigint;
   name?: string;
   blocks?: unknown;
+  // Same shape the patch takes, so the console previews exactly what it will save: the words, by
+  // block id, merged into the saved layout.
+  blockText?: Record<string, string>;
   fields?: unknown;
   style?: unknown;
   numberPrefix?: string | null;
@@ -489,8 +529,13 @@ export async function previewDocumentTemplate(
   const saved = input.id
     ? await getDocumentTemplate(ctx, input.id, base)
     : null;
+  const previewBlocks = (input.blocks ??
+    saved?.blocks ??
+    []) as DocumentBlock[];
   const content = validated({
-    blocks: input.blocks ?? saved?.blocks ?? [],
+    blocks: input.blockText
+      ? applyBlockText(previewBlocks, input.blockText)
+      : previewBlocks,
     fields: input.fields ?? saved?.fields ?? [],
     style: input.style ?? saved?.style,
   });
