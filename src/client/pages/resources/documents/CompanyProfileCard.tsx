@@ -2,6 +2,7 @@ import { Building2, ImageUp, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button, Card, FormField, Input, useToast } from "@/client/components";
+import { useNavGuard } from "@/client/contexts/NavGuardContext";
 import { api } from "@/client/lib/api";
 import {
   afterCompanySave,
@@ -34,6 +35,10 @@ export function CompanyProfileCard({
   // elsewhere". See nextCompanyDraft.
   const [form, setForm] = useState(emptyCompanyForm);
   const draft = form.draft;
+  // The letterhead is the one form on this tab that is not a modal, so nothing else stands between
+  // an unsaved edit and a click on another tab — or a tenant switch, which is a full reload. The
+  // same `companyChanges` the save sends is what "unsaved" means here, so the two cannot disagree.
+  useNavGuard(Object.keys(companyChanges(form)).length > 0);
   const [saving, setSaving] = useState(false);
   const logoUrl = useCompanyLogoUrl(company?.logoKey, company?.logoVersion);
   const fileRef = useRef<HTMLInputElement>(null);

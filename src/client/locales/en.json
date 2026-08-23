@@ -599,6 +599,8 @@
     "revoked": "Revoked.",
     "revokedBadge": "Revoked",
     "revokeError": "Could not revoke.",
+    "revokeMessage": "Revoke \"{{name}}\"? Its PDF stops being served and this cannot be undone.",
+    "revokeTitle": "Revoke document",
     "saveError": "Could not save this template.",
     "starterHint": "Pick one to copy into your account, then edit its wording. Building a template block by block is done through the API or MCP.",
     "startersError": "Could not load the ready-made templates.",

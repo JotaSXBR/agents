@@ -7,6 +7,8 @@ import {
   Badge,
   Button,
   Card,
+  ConfirmDialog,
+  type ConfirmPayload,
   DataBoundary,
   EmptyState,
   Modal,
@@ -62,6 +64,7 @@ export function DocumentsPanel() {
   const starterModal = useModalController();
   const refsModal = useModalController<{ name: string }>();
   const deleteModal = useModalController<{ id: string; name: string }>();
+  const confirm = useModalController<ConfirmPayload>();
 
   // `loading` is the FIRST load only. Every handler here reloads on success, and the company card
   // sits inside a boundary keyed on this flag — so a shared flag made deleting a template unmount
@@ -244,20 +247,40 @@ export function DocumentsPanel() {
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
 
+  // Asked first, because there is no un-revoke. The PDF stops being served, and the agent's
+  // idempotency key is derived from the VALUES, so every later send of the same document resolves
+  // to this revoked row rather than issuing a fresh one — an accidental click on a row in a list is
+  // permanent, and it takes the customer's copy with it.
+  function askRevoke(doc: IssuedDocument) {
+    confirm.open({
+      title: t("documents.revokeTitle", "Revoke document"),
+      message: t(
+        "documents.revokeMessage",
+        'Revoke "{{name}}"? Its PDF stops being served and this cannot be undone.',
+        { name: doc.number ?? doc.title },
+      ),
+      danger: true,
+      confirmLabel: t("documents.revoke", "Revoke"),
+      onConfirm: () => revoke(doc),
+    });
+  }
+
   async function revoke(doc: IssuedDocument) {
     try {
       const { error: err } = await api.api.v1
         .documents({ id: doc.id })
         .revoke.post();
-      if (err) {
-        showToast(t("documents.revokeError", "Could not revoke."), "error");
-        return;
-      }
-      showToast(t("documents.revoked", "Revoked."), "success");
-      void load();
-    } catch {
+      if (err) throw err;
+    } catch (e) {
       showToast(t("documents.revokeError", "Could not revoke."), "error");
+      // Rethrown so the confirm dialog stays OPEN on failure, per its own contract: a revoke worth
+      // asking about is worth retrying without hunting the row down in the list again. Eden
+      // RESOLVES an HTTP error as `{ error }` and REJECTS on a transport failure, so both halves
+      // land here.
+      throw e;
     }
+    showToast(t("documents.revoked", "Revoked."), "success");
+    void load();
   }
 
   return (
@@ -413,7 +436,7 @@ export function DocumentsPanel() {
                     <Button
                       variant="secondary"
                       size="sm"
-                      onClick={() => revoke(doc)}
+                      onClick={() => askRevoke(doc)}
                     >
                       {t("documents.revoke", "Revoke")}
                     </Button>
@@ -424,6 +447,8 @@ export function DocumentsPanel() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog modal={confirm} />
 
       <DocumentTemplateModal modal={editModal} onSaved={() => load()} />
 
