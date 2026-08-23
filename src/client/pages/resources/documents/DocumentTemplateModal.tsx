@@ -58,7 +58,11 @@ export function DocumentTemplateModal({
   const [texts, setTexts] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const baselineRef = useRef<string | null>(null);
+  // The same open, counted twice on purpose: the ref is what an in-flight save compares itself
+  // against (it has to read the CURRENT value when the response lands), and the state is what the
+  // render is keyed on, which is how the preview learns the modal was reopened.
   const sessionRef = useRef(0);
+  const [session, setSession] = useState(0);
 
   // On OPEN, not on payload identity. The controller retains its payload after close (Radix needs it
   // for the exit animation), so an operator who cancels and reopens the same template gets an effect
@@ -67,6 +71,7 @@ export function DocumentTemplateModal({
   // this reset belongs to (docs/modals.md).
   useOnModalOpen(modal, () => {
     sessionRef.current++;
+    setSession(sessionRef.current);
     const tpl = modal.payload?.template;
     if (!tpl) return;
     const initialTexts = Object.fromEntries(
@@ -144,9 +149,9 @@ export function DocumentTemplateModal({
   );
   const preview = useDocumentPreview(
     draft as Record<string, unknown> | null,
-    // The template this modal is open on. Changing it drops the previous PDF at once, instead of
-    // leaving it under the new form for the length of the debounce.
-    template?.id,
+    // This OPEN, not this template: cancelling and reopening the same one has to drop the preview
+    // of the edits that were just discarded.
+    session,
   );
 
   async function save() {

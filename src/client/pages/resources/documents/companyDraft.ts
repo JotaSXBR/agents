@@ -1,0 +1,65 @@
+import type { CompanyProfile } from "./CompanyProfileCard";
+
+// Which of the letterhead's fields this form edits, and in which order they are shown.
+export const COMPANY_FIELDS = [
+  "name",
+  "document",
+  "address",
+  "phone",
+  "email",
+  "website",
+] as const;
+
+export type CompanyDraft = Record<(typeof COMPANY_FIELDS)[number], string>;
+
+// The form's whole state: the text in the inputs, and the copy that text was seeded FROM.
+//
+// The baseline is what makes the question answerable at all. The panel hands down a fresh `company`
+// object on every reload — including reloads caused by something else entirely, like deleting a
+// template — so "the prop changed" says nothing. Comparing the draft against the INCOMING copy does
+// not work either: it cannot tell "the operator typed a new address" from "the address changed on
+// the server", and it answers "keep the draft" to both, so the next Save overwrites the other
+// writer silently. Against the baseline the two separate cleanly.
+//
+// It also removes the case that would otherwise need its own branch. A form nobody has opened is
+// not "empty" — an operator can legitimately clear every field, so all-blank cannot double as
+// never-filled-in — but a blank form whose baseline is also blank is untouched by this rule's own
+// definition, and adopts the first copy that arrives. One rule, no special case.
+export interface CompanyDraftState {
+  draft: CompanyDraft;
+  seededFrom: CompanyDraft;
+}
+
+export function blankCompanyDraft(): CompanyDraft {
+  return Object.fromEntries(COMPANY_FIELDS.map((f) => [f, ""])) as CompanyDraft;
+}
+
+// The stored profile as this form would hold it: every field present, a missing one as blank.
+export function companyToDraft(company: CompanyProfile): CompanyDraft {
+  return Object.fromEntries(
+    COMPANY_FIELDS.map((f) => [f, company[f] ?? ""]),
+  ) as CompanyDraft;
+}
+
+export function seedCompanyDraft(company: CompanyProfile): CompanyDraftState {
+  const draft = companyToDraft(company);
+  return { draft, seededFrom: draft };
+}
+
+// What the form holds before anything has arrived from the server.
+export function emptyCompanyForm(): CompanyDraftState {
+  return { draft: blankCompanyDraft(), seededFrom: blankCompanyDraft() };
+}
+
+// What the form becomes when a `company` arrives: the operator's unsaved text if there is any,
+// otherwise the server's copy — which is how a change made elsewhere (another tab, REST, MCP)
+// reaches a form nobody is editing.
+export function nextCompanyDraft(
+  current: CompanyDraftState,
+  company: CompanyProfile,
+): CompanyDraftState {
+  const typedIn = COMPANY_FIELDS.some(
+    (f) => current.draft[f] !== current.seededFrom[f],
+  );
+  return typedIn ? current : seedCompanyDraft(company);
+}

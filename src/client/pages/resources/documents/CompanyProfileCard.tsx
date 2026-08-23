@@ -1,9 +1,15 @@
 import { Building2, ImageUp, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button, Card, FormField, Input, useToast } from "@/client/components";
 import { api } from "@/client/lib/api";
 import { mediaFetch } from "@/client/lib/media";
+import {
+  type CompanyDraft,
+  emptyCompanyForm,
+  COMPANY_FIELDS as FIELDS,
+  nextCompanyDraft,
+} from "./companyDraft";
 
 // The letterhead every issued document carries: name, tax id, address, contacts and a logo. It lives
 // on this tab rather than in Settings because it exists only to feed documents, and an operator
@@ -14,15 +20,6 @@ type SettingsData = Awaited<
 >["data"];
 export type CompanyProfile = NonNullable<SettingsData>["company"];
 
-const FIELDS = [
-  "name",
-  "document",
-  "address",
-  "phone",
-  "email",
-  "website",
-] as const;
-
 export function CompanyProfileCard({
   company,
   onChanged,
@@ -32,7 +29,10 @@ export function CompanyProfileCard({
 }) {
   const { t } = useTranslation();
   const { showToast } = useToast();
-  const [draft, setDraft] = useState<Record<string, string>>({});
+  // Carries the copy it was seeded from, which is what separates "typed in" from "changed
+  // elsewhere". See nextCompanyDraft.
+  const [form, setForm] = useState(emptyCompanyForm);
+  const draft = form.draft;
   const [saving, setSaving] = useState(false);
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -41,17 +41,6 @@ export function CompanyProfileCard({
   // alone. Two of them: a logo write (which answers with the whole block) and a successful save
   // (whose echo IS the draft). Only a change from OUTSIDE should replace what someone is typing.
   const ownChangeRef = useRef(false);
-
-  // What the draft would be if it were reinitialised from the current props. Comparing against it is
-  // how "the operator has typed something" is known.
-  const fromCompany = useCallback(
-    (next: CompanyProfile) =>
-      Object.fromEntries(FIELDS.map((f) => [f, next[f] ?? ""])) as Record<
-        string,
-        string
-      >,
-    [],
-  );
 
   useEffect(() => {
     if (!company) return;
@@ -62,15 +51,10 @@ export function CompanyProfileCard({
       ownChangeRef.current = false;
       return;
     }
-    // And a DIRTY draft is never replaced, whatever the change was. The panel hands down a fresh
-    // company object on every reload — including reloads caused by deleting a template, which has
-    // nothing to do with this form — and a new object with identical values still reads as "changed".
-    // The rule that survives all of those: unsaved text belongs to whoever typed it.
-    setDraft((current) => {
-      const dirty = FIELDS.some((f) => current[f] !== (company[f] ?? ""));
-      return dirty ? current : fromCompany(company);
-    });
-  }, [company, fromCompany]);
+    // Whether the operator's unsaved text survives this arrival is one rule with three answers, and
+    // it lives next door with its decision table.
+    setForm((current) => nextCompanyDraft(current, company));
+  }, [company]);
 
   // The logo endpoint is tenant-scoped, so a bare <img src> would omit the active-tenant header and
   // a SUPER_ADMIN would get "a target tenant is required" instead of a picture. mediaFetch + a blob
@@ -113,7 +97,7 @@ export function CompanyProfileCard({
     setSaving(true);
     try {
       const { data, error } = await api.api.v1["tenant-settings"].company.put(
-        draft as Record<(typeof FIELDS)[number], string>,
+        draft satisfies CompanyDraft,
       );
       if (error || !data) {
         showToast(t("documents.company.saveError", "Could not save."), "error");
@@ -206,9 +190,12 @@ export function CompanyProfileCard({
         {FIELDS.map((field) => (
           <FormField key={field} label={label[field]}>
             <Input
-              value={draft[field] ?? ""}
+              value={draft[field]}
               onChange={(e) =>
-                setDraft((d) => ({ ...d, [field]: e.target.value }))
+                setForm((current) => ({
+                  ...current,
+                  draft: { ...current.draft, [field]: e.target.value },
+                }))
               }
             />
           </FormField>

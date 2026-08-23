@@ -26,11 +26,15 @@ const DEBOUNCE_MS = 600;
 
 export function useDocumentPreview(
   draft: Record<string, unknown> | null,
-  // Identifies WHICH template is being previewed. When it changes the previous PDF is dropped
-  // synchronously: the request is debounced by 600 ms, so without this the modal shows template A's
-  // document under template B's form for at least that long — the operator reading a preview of
-  // something they are not editing.
-  session?: string | number,
+  // Which EDITING SESSION this preview belongs to — one per modal open, not one per template. When
+  // it changes the previous PDF is dropped synchronously: the request is debounced by 600 ms, so
+  // without this the modal shows the last session's document under the current form for at least
+  // that long, and an operator who cancels and reopens the SAME template reads a preview of the
+  // edits they just discarded.
+  //
+  // Required, and a number, so the resource id cannot be passed here by mistake: keying on the
+  // template is what looks right and silently does nothing on a reopen.
+  session: number,
 ): DocumentPreviewState {
   const [state, setState] = useState<DocumentPreviewState>({
     url: null,
@@ -48,8 +52,8 @@ export function useDocumentPreview(
   // useLayoutEffect, not useEffect: the reset has to land before the paint that would otherwise show
   // the previous session's document (docs/modals.md).
   useLayoutEffect(() => {
-    // `session` is read here so the effect is keyed on it: the reset belongs to the template
-    // CHANGING, and the linter counts a dependency it cannot see used as unnecessary.
+    // `session` is read here so the effect is keyed on it: the reset belongs to the modal OPENING,
+    // and the linter counts a dependency it cannot see used as unnecessary.
     void session;
     swap(null);
     abortRef.current?.abort();
@@ -59,6 +63,11 @@ export function useDocumentPreview(
   const body = draft ? JSON.stringify(draft) : null;
 
   useEffect(() => {
+    // Keyed on the session as well as the draft, and it has to be: reopening the modal on the same
+    // template hands this effect an IDENTICAL body, so without the session the reset above would
+    // clear the document and nothing would ever ask for it again — an empty preview panel until the
+    // operator types something. (The linter counts a dependency it cannot see used as unnecessary.)
+    void session;
     if (!body) return;
     let cancelled = false;
     const timer = setTimeout(async () => {
@@ -102,7 +111,7 @@ export function useDocumentPreview(
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [body, swap]);
+  }, [body, session, swap]);
 
   useEffect(() => () => swap(null), [swap]);
 
