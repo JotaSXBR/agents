@@ -19,6 +19,31 @@ function cents(value: number): number {
   return Math.round(value * 100);
 }
 
+// The factors are QUANTIZED to the precision the document prints them at, before they are
+// multiplied. A unit price of 0.105 renders as "R$ 0,11" and multiplied raw gives 3 × 0.105 = 0.315
+// → 32 cents, so the customer reads "3 × R$ 0,11 = R$ 0,32" and cannot make those three numbers
+// agree. Whatever the document shows has to be what it computed with; hidden digits are precisely
+// the kind of discrepancy someone photographs.
+//
+// The precisions are the renderer's own: money at 2 decimals (formatMoney) and quantity at up to 4
+// (formatNumber). They live here as the numbers those two formatters use, and a change on either
+// side has to move both.
+const QUANTITY_DECIMALS = 4;
+const MONEY_DECIMALS = 2;
+
+function quantize(value: number, decimals: number): number {
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+}
+
+export function displayedQuantity(value: number): number {
+  return quantize(value, QUANTITY_DECIMALS);
+}
+
+export function displayedMoney(value: number): number {
+  return quantize(value, MONEY_DECIMALS);
+}
+
 // `tax` is an AMOUNT, not a rate, because the field that feeds it is declared `currency`. That
 // settles the question a rate would open — whether it applies to the gross or to the discounted
 // subtotal — by never asking it.
@@ -26,10 +51,16 @@ export function computeTotals(
   items: LineItemValue[],
   opts: { discount?: number; tax?: number } = {},
 ): DocumentTotals {
+  // Through lineTotal, so the subtotal is the sum of the lines the customer READS rather than of a
+  // parallel calculation that happens to be near them.
   const subtotalCents = items.reduce(
-    (acc, item) => acc + cents(item.quantity * item.unitPrice),
+    (acc, item) => acc + cents(lineTotal(item)),
     0,
   );
+  // NOT quantized on the way in, and that is not an oversight: `cents()` IS the money quantization,
+  // so a lone amount needs nothing more — measured, by removing a displayedMoney() here and finding
+  // no test could tell. The factors below are different, because there a PRODUCT is taken before the
+  // rounding, and the digits the document never showed survive into it.
   const requestedDiscount = Math.max(0, cents(opts.discount ?? 0));
   // NOTE: clamped to the subtotal, and the CLAMPED value is what comes back, so the rows the
   // renderer prints add up to the total it prints. A discount larger than the subtotal is somebody's
@@ -47,5 +78,8 @@ export function computeTotals(
 }
 
 export function lineTotal(item: LineItemValue): number {
-  return cents(item.quantity * item.unitPrice) / 100;
+  return (
+    cents(displayedQuantity(item.quantity) * displayedMoney(item.unitPrice)) /
+    100
+  );
 }

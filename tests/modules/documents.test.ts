@@ -1067,6 +1067,17 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
         appDb,
       ),
     ).rejects.toThrow(/2000/);
+    // An explicit empty slug is a malformed identifier the caller WROTE. A truthiness fallback would
+    // silently replace it with one derived from the name — while the MCP dry run, which only fills
+    // in an absent slug, refuses exactly that input. Preview and apply have to answer alike.
+    await expect(
+      createDocumentTemplate(
+        ctx(tenantA),
+        { name: "Slug vazio", slug: "", blocks: [], fields: [] },
+        appDb,
+      ),
+    ).rejects.toThrow(/slug/);
+
     // The number prefix is rendered into every document AND returned in the tool's own result, which
     // the flow log stores and the model reads back on the next turn.
     await expect(

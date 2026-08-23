@@ -345,7 +345,11 @@ export async function createDocumentTemplate(
   base: PrismaClient = basePrisma,
 ): Promise<DocumentTemplateDto> {
   const name = parseTemplateName(input.name);
-  const slug = input.slug ? input.slug : slugifyTemplateName(name);
+  // Derived only when the slug is genuinely ABSENT. An explicit "" is a malformed identifier the
+  // caller wrote, and a truthiness fallback silently replaced it with one derived from the name —
+  // while the dry run, which uses `?? `, refused exactly that input. A preview that says no to what
+  // the apply says yes to is the same contract break as the reverse.
+  const slug = input.slug ?? slugifyTemplateName(name);
   const problem = slugProblem(slug);
   if (problem) {
     throw new AppError(`slug: ${problem}.`, 400, "errors.invalidDocumentSlug");

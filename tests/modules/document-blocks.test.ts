@@ -6,9 +6,11 @@ import {
   MAX_DOCUMENT_AMOUNT,
   MAX_FIELDS_PER_DOCUMENT,
   MAX_LINE_ITEMS,
+  MAX_TOKENS_PER_DOCUMENT,
   parseDocumentStyle,
 } from "@/modules/documents/blocks";
 import { printedDate } from "@/modules/documents/issue";
+import { documentStarter } from "@/modules/documents/starters";
 import { computeTotals } from "@/modules/documents/totals";
 import {
   parseAuthoredTemplate,
@@ -42,6 +44,46 @@ function blocks(...extra: unknown[]): unknown[] {
 // Reading an AUTHORED template has to be strict: what the operator wrote either takes effect or is
 // refused by name, because the alternative is a template that silently differs from the one they
 // submitted and nothing anywhere says so.
+describe("token amplification", () => {
+  // The input bounds do not bound the OUTPUT. One 5,000-character block can hold a thousand tokens,
+  // each resolving to a 2,000-character value, so it expands to megabytes — on the request thread,
+  // before layout, for any authenticated tenant. The ceiling is on the amplifier because that is the
+  // half known when the template is written.
+  test("refuses more tokens than the ceiling, counting repeats", () => {
+    const many = `{{cliente}} `.repeat(MAX_TOKENS_PER_DOCUMENT + 1);
+    const r = parseTemplateContent(
+      blocks({ id: "t", type: "text", text: many }),
+      FIELDS,
+      {},
+    );
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.reason).toContain(
+      String(MAX_TOKENS_PER_DOCUMENT),
+    );
+  });
+
+  // Across the DOCUMENT, not per block: sixty blocks of two tokens cost what one block of a hundred
+  // and twenty costs.
+  test("counts across every block and the footer", () => {
+    const spread = Array.from({ length: 60 }, (_, i) => ({
+      id: `t${i}`,
+      type: "text",
+      text: "{{cliente}} {{validade}}",
+    }));
+    const r = parseTemplateContent(spread, FIELDS, {});
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.reason).toContain("120");
+  });
+
+  test("a real template is nowhere near it", () => {
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    expect(
+      parseTemplateContent(starter.blocks, starter.fields, starter.style).ok,
+    ).toBe(true);
+  });
+});
+
 describe("parseAuthoredTemplate (writes) vs parseTemplateContent (stored rows)", () => {
   test("names a misspelled block property instead of dropping it", () => {
     const bad = [{ id: "t", type: "text", text: "Olá", alignn: "center" }];
@@ -549,6 +591,17 @@ describe("parseDocumentValues", () => {
     );
     expect(Number.isSafeInteger(Math.round(totals.total * 100))).toBe(true);
     expect(totals.total).toBe(MAX_LINE_ITEMS * MAX_DOCUMENT_AMOUNT);
+  });
+
+  // A description is printed on a PRICED row, so whitespace is the same defect as a blank required
+  // field: a numbered financial document with an empty line carrying a price.
+  test("refuses a line item whose description renders blank", () => {
+    const r = parseDocumentValues(FIELDS as never, {
+      cliente: "Ana",
+      itens: [{ description: "   ", quantity: 1, unitPrice: 100 }],
+    });
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.reason).toContain("description");
   });
 
   test("refuses more line items than the ceiling", () => {

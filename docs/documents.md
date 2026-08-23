@@ -157,6 +157,13 @@ printed. The number is how a document identifies itself to the customer holding 
 template's prefix must not rewrite numbers already in circulation, and deleting the template (which
 nulls the FK, by design, because the documents outlive it) must not erase them.
 
+**What the document prints is what it computed with.** The factors are quantized to the precision
+the renderer shows them at — money at two decimals, quantity at four — before they are multiplied, so
+a unit price of 0.105 that prints as `R$ 0,11` multiplies as `0,11`. Otherwise the customer holds
+three numbers (`3`, `R$ 0,11`, `R$ 0,32`) that do not agree, which is exactly the discrepancy the
+integer-cent arithmetic exists to prevent, one level below where it was being applied. A lone amount
+needs no such step: converting to cents IS the money quantization.
+
 ## Delivery
 
 A document tool **issues and queues in one call**: issuing and sending are one act from the
@@ -219,6 +226,12 @@ take a whole agent down), and the names that lost are logged for the operator wh
   `document_starters_list`, `issued_document_list`. `document_template_schema` serves the block
   vocabulary as JSON Schema generated from the validator; see `docs/mcp.md` for why it is not
   published in every `tools/list`.
+
+`{{tokens}}` are capped per document (counting repeats), because the input bounds do not bound the
+OUTPUT: a 5,000-character block may hold a thousand of them, each resolving to a value of up to 2,000
+characters, and sixty such blocks build more than 100 MB on the request thread before layout. The cap
+is on the amplifier rather than on the result, because the amplifier is the half that is known when
+the template is written.
 
 The preview renders an **unsaved draft**, which is what makes authoring through the API bearable:
 build the blocks from a script or an MCP client, then look at the document. The MCP dry-run renders

@@ -112,3 +112,54 @@ describe("format", () => {
     expect(formatNumber(1500.5, "en-US")).toBe("1,500.5");
   });
 });
+
+// What the customer can add up. A unit price of 0.105 PRINTS as R$ 0,11, so a line of three of them
+// has to print R$ 0,33 — multiplying the hidden 0.105 gives 0.315, rounds to R$ 0,32, and leaves the
+// customer holding three numbers that do not agree. This is the exact failure the module's header
+// names, one level below where it was being checked.
+describe("what is printed is what is computed", () => {
+  test("multiplies the factors at the precision the document shows them", () => {
+    const item = { description: "x", quantity: 3, unitPrice: 0.105 };
+    expect(lineTotal(item)).toBe(0.33);
+    expect(computeTotals([item]).subtotal).toBe(0.33);
+  });
+
+  test("quantizes the quantity at the precision the document shows it", () => {
+    // formatNumber prints up to 4 decimals, so 1.000004 reads as "1" and must multiply as 1.
+    expect(
+      lineTotal({ description: "x", quantity: 1.000004, unitPrice: 100 }),
+    ).toBe(100);
+    // …and a fifth decimal that rounds UP is shown, so it must be multiplied: 1.00005 prints as
+    // "1,0001". The rule is the displayed value, not a truncation of it. At a unit price of 1000 the
+    // two readings part company — 1000,05 against the 1000,10 the printed factors give — which is
+    // the price at which this rule starts deciding anything.
+    expect(
+      lineTotal({ description: "x", quantity: 1.00005, unitPrice: 1000 }),
+    ).toBe(1000.1);
+  });
+
+  // Not "quantized the same way": a lone money amount is already quantized by the cent conversion
+  // itself. The row is here because the PRINTED discount and the SUBTRACTED discount must be the
+  // same number, which is the property, not the mechanism.
+  test("subtracts the discount the document prints", () => {
+    const totals = computeTotals(
+      [{ description: "x", quantity: 1, unitPrice: 10 }],
+      { discount: 0.105, tax: 0.105 },
+    );
+    expect(totals.discount).toBe(0.11);
+    expect(totals.tax).toBe(0.11);
+    expect(totals.total).toBe(10);
+  });
+
+  // The property the whole module exists for, stated directly: the printed lines add up to the
+  // printed subtotal, for values chosen to have hidden digits.
+  test("the printed lines sum to the printed subtotal", () => {
+    const items = [
+      { description: "a", quantity: 3, unitPrice: 0.105 },
+      { description: "b", quantity: 7, unitPrice: 1.005 },
+      { description: "c", quantity: 1.5, unitPrice: 19.999 },
+    ];
+    const printed = items.reduce((acc, i) => acc + lineTotal(i), 0);
+    expect(computeTotals(items).subtotal).toBeCloseTo(printed, 10);
+  });
+});

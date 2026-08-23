@@ -10,9 +10,11 @@ import {
   MAX_DOCUMENT_AMOUNT,
   MAX_FIELDS_PER_DOCUMENT,
   MAX_LINE_ITEMS,
+  MAX_TOKENS_PER_DOCUMENT,
   parseDocumentStyle,
 } from "./blocks";
 import {
+  DOCUMENT_TOKEN_RE,
   isReservedTokenName,
   malformedTokenIn,
   RESERVED_TOKEN_NAMES,
@@ -320,7 +322,23 @@ export function parseTemplateContent(
     }
   }
 
+  // Counted with repeats, and across the whole template: the amplification is a property of the
+  // document, not of one block, and 60 blocks of two tokens each cost the same as one block of 120.
+  let tokenCount = 0;
+  for (const b of blocks) {
+    for (const text of textsIn(b)) {
+      tokenCount += [...text.matchAll(DOCUMENT_TOKEN_RE)].length;
+    }
+  }
   const footer = parseDocumentStyle(rawStyle).footerText;
+  tokenCount += footer ? [...footer.matchAll(DOCUMENT_TOKEN_RE)].length : 0;
+  if (tokenCount > MAX_TOKENS_PER_DOCUMENT) {
+    return {
+      ok: false,
+      reason: `blocks: at most ${MAX_TOKENS_PER_DOCUMENT} {{tokens}} per document, counting repeats, got ${tokenCount} — each one expands to a value of up to 2000 characters when the document is issued.`,
+    };
+  }
+
   const footerFault = footer ? unknownToken(footer, byName) : null;
   if (footerFault) {
     return {
@@ -429,6 +447,14 @@ function valueProblem(field: DocumentField, value: unknown): string | null {
       const parsed = z.array(lineItemValueSchema).safeParse(value);
       if (!parsed.success) {
         return `line items: ${issues(parsed.error)} — each is {"description":"…","quantity":n,"unitPrice":n}`;
+      }
+      // A description is PRINTED on a priced row, so it has to survive sanitising like any other
+      // required text: `min(1)` counts whitespace, which would put a blank line carrying a price on
+      // a numbered financial document.
+      for (const item of parsed.data) {
+        if (sanitizeDocumentValue(item.description).trim() === "") {
+          return "line items: every item needs a description that is not blank once whitespace and control characters are removed";
+        }
       }
       // The factors AND their product. Each factor is PRINTED on the line, so a quantity of 1e308
       // against a unit price of zero keeps the product inside the cap and still puts an unreadable

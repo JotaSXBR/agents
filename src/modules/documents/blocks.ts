@@ -215,6 +215,15 @@ export const MAX_FIELDS_PER_DOCUMENT = 40;
 // a hundred billion — no real document approaches it, so nothing legitimate is refused.
 export const MAX_DOCUMENT_AMOUNT = 1e11;
 
+// Token OCCURRENCES across a whole template, counted with repeats. The input bounds do not bound the
+// output: a 5,000-character text block may hold a thousand `{{x}}`, each one resolving to a value of
+// up to 2,000 characters, so one block expands to ~2 MB and sixty of them to more than 100 MB —
+// built on the request thread, before markdown parsing and PDF layout, by any authenticated tenant.
+// The ceiling is on the amplifier rather than on the result, because the amplifier is the half that
+// is known when the template is WRITTEN, and a template is written once while it renders forever.
+// A hundred is far past any real document: the bundled starters use six.
+export const MAX_TOKENS_PER_DOCUMENT = 100;
+
 // The authoring contract, generated FROM the schemas above so it cannot drift from what the
 // validator enforces. Served on demand (the `document_template_schema` MCP tool, and the console's
 // block reference) rather than published in every tools/list: a six-variant discriminated union
