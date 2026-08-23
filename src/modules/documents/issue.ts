@@ -405,33 +405,51 @@ async function finish(
   // than in a system temp dir — and why the rename cannot cross a filesystem. The suffix keeps two
   // concurrent renders from sharing the temporary as well.
   //
-  // NOT COVERED BY A TEST, and measured as such: observing the truncation needs two renders of one
-  // key overlapping AND a reader landing inside the window, which no single-process test reaches
-  // with any reliability — the last attempt at a race like this one (the template patch, round 4)
-  // passed with the fix removed three times out of three and was deleted rather than kept. What IS
-  // asserted is the visible half: a successful issuance leaves no `.part` behind.
+  // The ORDERING (claim, then publish) IS covered: a render that loses the claim leaves the winner's
+  // file alone, which a test can force by having another connection finish the row first. What is
+  // not covered is the truncation the rename prevents — that needs two renders of one key
+  // overlapping AND a reader landing inside the window, which no single-process test reaches with
+  // any reliability (the last attempt at a race like it passed three times out of three with the fix
+  // removed, and was deleted rather than kept). The other visible half is asserted too: a successful
+  // issuance leaves no `.part` behind.
   const finalPath = `${dir}/${key}`;
   const tempPath = `${finalPath}.${process.pid}-${Math.random().toString(36).slice(2, 10)}.part`;
   await Bun.write(tempPath, buffer);
-  try {
-    await rename(tempPath, finalPath);
-  } catch (e) {
-    await rm(tempPath, { force: true });
-    throw e;
-  }
-  // `revoked: false` in the CAS, not only PENDING: an operator can revoke while this render is
-  // running, and without it the row would be flipped to READY and its bytes handed back for
-  // delivery — revocation losing to a race it should always win.
+
+  // The CAS decides WHO publishes, and it runs before the rename. Renaming first let a caller that
+  // then lost the CAS replace a file the winner had already published — the two renders come from
+  // one frozen snapshot, but the LOGO is read live, so a letterhead swapped between them makes the
+  // published document visibly change after it was declared final.
+  //
+  // `revoked: false` is in the same claim, not only PENDING: an operator can revoke while this
+  // render is running, and without it the row would flip to READY and hand its bytes back for
+  // delivery — revocation losing a race it should always win.
   const finished = await runScopedOn(base, ctx, (db) =>
     db.issuedDocument.updateMany({
       where: { id: row.id, status: "PENDING", revoked: false },
       data: { status: "READY", pdfStorageKey: key },
     }),
   );
-  if (finished.count === 0) {
-    // Two ways to get here, and only one of them is a problem: another caller finished the same
-    // render (their bytes come from the same frozen snapshot, so ours are interchangeable), or it
-    // was revoked. Re-read to tell them apart rather than guess.
+  if (finished.count === 1) {
+    try {
+      await rename(tempPath, finalPath);
+    } catch (e) {
+      // Back to PENDING: a row that says READY with no file behind it is permanently broken,
+      // because nothing renders it again. (A hard crash between the two cannot be caught here —
+      // that is the limit of a non-transactional filesystem, and it is bounded to the same window.)
+      await runScopedOn(base, ctx, (db) =>
+        db.issuedDocument.updateMany({
+          where: { id: row.id, status: "READY", pdfStorageKey: key },
+          data: { status: "PENDING", pdfStorageKey: null },
+        }),
+      );
+      await rm(tempPath, { force: true });
+      throw e;
+    }
+  } else {
+    // Lost, so this render does NOT publish: the winner's file stands. Two ways to get here and
+    // only one is a problem — another caller finished the same render, or it was revoked.
+    await rm(tempPath, { force: true });
     const now = await runScopedOn(base, ctx, (db) =>
       db.issuedDocument.findUnique({
         where: { id: row.id },

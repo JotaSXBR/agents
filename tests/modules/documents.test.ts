@@ -1421,4 +1421,63 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       await listIssuedDocuments(ctx(tenantA), { threadId: "" }, appDb),
     ).toEqual([]);
   });
+
+  // The claim decides who PUBLISHES. Renaming before it let a caller that then lost replace a file
+  // the winner had already declared final — and because the logo is read live, a letterhead swapped
+  // between the two renders makes that published document visibly change after the fact.
+  test("a render that loses the claim leaves the winner's file alone", async () => {
+    const key = `claim-loser-${process.pid}`;
+    const seed = await issueDocument({
+      tenantId: tenantA,
+      templateId,
+      idempotencyKey: key,
+      values: VALUES,
+      base: appDb,
+      storageDir: DIR,
+    });
+    const id = BigInt(seed.id);
+    const path = `${DIR}/${tenantA}/${id}.pdf`;
+    // Back to PENDING so a second issuance renders again, with a marker in the published file that
+    // only survives if the loser leaves it alone.
+    await suDb.issuedDocument.update({
+      where: { id },
+      data: { status: "PENDING", pdfStorageKey: null },
+    });
+    await Bun.write(path, "WINNER");
+
+    let claimed = false;
+    // Another caller wins the claim while this render is between its write and its own CAS.
+    const racing = appDb.$extends({
+      query: {
+        issuedDocument: {
+          async updateMany({ args, query }) {
+            if (!claimed) {
+              claimed = true;
+              await suDb.issuedDocument.update({
+                where: { id },
+                data: {
+                  status: "READY",
+                  pdfStorageKey: `${tenantA}/${id}.pdf`,
+                },
+              });
+            }
+            return query(args);
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+
+    await issueDocument({
+      tenantId: tenantA,
+      templateId,
+      idempotencyKey: key,
+      values: VALUES,
+      base: racing,
+      storageDir: DIR,
+    });
+    expect(claimed).toBe(true);
+    expect(await Bun.file(path).text()).toBe("WINNER");
+    const litter = await readdir(`${DIR}/${tenantA}`);
+    expect(litter.filter((f) => f.endsWith(".part"))).toEqual([]);
+  });
 });

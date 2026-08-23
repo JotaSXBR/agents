@@ -245,7 +245,13 @@ export function DocumentsPanel() {
         </Button>
       </div>
 
-      <CompanyProfileCard company={company} onChanged={setCompany} />
+      {/* Inside a boundary of its own, not beside one: rendered eagerly it showed an editable BLANK
+          form while the settings request was still out, and the response then reset the draft —
+          throwing away whatever the operator had already typed. And if only that request failed, the
+          card stayed blank with no error, over a profile that may well have values stored. */}
+      <DataBoundary loading={loading} error={error} onRetry={load}>
+        <CompanyProfileCard company={company} onChanged={setCompany} />
+      </DataBoundary>
 
       <DataBoundary
         loading={loading}
