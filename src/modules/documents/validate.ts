@@ -148,7 +148,10 @@ function droppedKey(
   for (const key of Object.keys(input)) {
     // `undefined` is how an absent optional arrives over JSON round-trips; it was never a value.
     if (input[key] === undefined) continue;
-    if (!(key in parsed)) return path ? `${path}.${key}` : key;
+    // Object.hasOwn, not `in`: `"constructor" in {}` is true through the prototype chain, so a
+    // submitted `constructor` or `__proto__` would read as "kept" while Zod had stripped it — the
+    // one shape of unknown key this check was blind to.
+    if (!Object.hasOwn(parsed, key)) return path ? `${path}.${key}` : key;
     const found = droppedKey(
       input[key],
       parsed[key],

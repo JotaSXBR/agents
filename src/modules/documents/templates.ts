@@ -700,7 +700,13 @@ export async function previewDocumentTemplate(
       ? applyBlockText(previewBlocks, input.blockText)
       : previewBlocks,
     fields: input.fields ?? saved?.fields ?? [],
-    style: input.style ?? saved?.style,
+    // MERGED over the saved style, the way the patch merges it — a preview whose style semantics
+    // differ from the write's shows a PDF the apply will not produce. Previewing a style that omits
+    // the saved footerText rendered without the footer, while saving the same patch kept it.
+    style:
+      input.style !== undefined && saved
+        ? { ...(saved.style as Record<string, unknown>), ...input.style }
+        : (input.style ?? saved?.style),
   });
   const style = content.style;
   const now = input.now ?? new Date();

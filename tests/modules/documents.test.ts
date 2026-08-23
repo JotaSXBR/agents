@@ -612,6 +612,42 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
         appDb,
       ),
     ).rejects.toThrow(/100/);
+    // A preview has to show what the SAVE would produce, so it merges a partial style the way the
+    // patch does. Replacing outright rendered a saved template without its footer while saving the
+    // same patch kept it — the preview approving a document the apply would not make.
+    const saved = await getDocumentTemplate(ctx(tenantA), templateId, appDb);
+    expect(saved.style.footerText).toBeTruthy();
+    const previewed = await previewDocumentTemplate(
+      ctx(tenantA),
+      { id: templateId, style: { font: "mono" } },
+      appDb,
+    );
+    expect(pdfHeader(previewed)).toBe("%PDF-");
+    // The merge itself, observed through the one thing a preview reports out loud: its validation.
+    // A template whose SAVED footer names a declared field, previewed with a style patch that does
+    // not mention the footer and with the fields removed. Merged, the saved footer is still there
+    // and its token now names nothing — refused. Replaced, there is no footer at all and the
+    // preview would happily render. The two branches answer differently, which is what makes this
+    // an assertion rather than a coincidence.
+    const footered = await createDocumentTemplate(
+      ctx(tenantA),
+      {
+        name: "Com rodapé",
+        slug: "com_rodape",
+        blocks: [{ id: "t", type: "text", text: "Sem token nenhum." }],
+        fields: [{ name: "cliente", label: "Cliente", type: "text" }],
+        style: { footerText: "{{cliente}}" },
+      },
+      appDb,
+    );
+    const mergedStyle = await previewDocumentTemplate(
+      ctx(tenantA),
+      { id: BigInt(footered.id), style: { font: "mono" }, fields: [] },
+      appDb,
+    ).catch((e: unknown) => e);
+    expect(mergedStyle).toBeInstanceOf(AppError);
+    expect((mergedStyle as AppError).message).toContain("footerText");
+
     // The metadata gate is the preview's own, not one it inherits from a caller: the REST route
     // reaches this function directly, and a prefix the create would refuse must not render — nor be
     // fed unbounded into a PDF built on the request thread.

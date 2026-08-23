@@ -111,6 +111,20 @@ describe("parseAuthoredTemplate (writes) vs parseTemplateContent (stored rows)",
     expect(r.ok === false && r.reason).toContain("bold");
   });
 
+  // The one shape of unknown key a naive `in` check cannot see: it is on Object.prototype, so it
+  // reads as present on the parsed output while Zod actually stripped it.
+  test("names a key that only exists on the prototype chain", () => {
+    for (const key of ["constructor", "toString"]) {
+      const r = parseAuthoredTemplate(
+        [{ id: "t", type: "text", text: "Olá", [key]: "x" }],
+        FIELDS,
+        {},
+      );
+      expect(r.ok).toBe(false);
+      expect(r.ok === false && r.reason).toContain(key);
+    }
+  });
+
   test("names a misspelled field property", () => {
     const r = parseAuthoredTemplate(
       blocks(),

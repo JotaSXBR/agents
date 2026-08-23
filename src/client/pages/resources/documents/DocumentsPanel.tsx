@@ -178,8 +178,15 @@ export function DocumentsPanel() {
     // on it instead, which is the same protection without losing the tab.
     const tab = window.open("", "_blank");
     if (tab) tab.opener = null;
-    const res = await mediaFetch(`/api/v1/documents/${doc.id}/pdf`);
-    if (!res.ok) {
+    // The fetch can REJECT — offline, DNS, a dropped connection — and not merely answer non-OK. That
+    // path skipped the branch below entirely, leaving the tab we just opened blank forever and the
+    // operator with no message at all: a button that visibly does nothing.
+    let url: string;
+    try {
+      const res = await mediaFetch(`/api/v1/documents/${doc.id}/pdf`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      url = URL.createObjectURL(await res.blob());
+    } catch {
       tab?.close();
       showToast(
         t("documents.openPdfError", "Could not open the PDF."),
@@ -187,7 +194,6 @@ export function DocumentsPanel() {
       );
       return;
     }
-    const url = URL.createObjectURL(await res.blob());
     if (tab) {
       tab.location.href = url;
     } else {
