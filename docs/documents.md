@@ -260,6 +260,13 @@ what the console keys its fetch off: the name alone cannot say the letterhead ch
 format replacement would leave the card — and any browser cache of a response served with a
 `max-age` — showing the old logo while issued documents already carry the new one.
 
+The upload is bounded by **pixels**, not only by bytes: both formats compress flat colour
+enormously, so a 40 KB file can declare 20000×20000 and the renderer — which decodes server-side, on
+every preview and every issuance, in a process every tenant shares — would allocate gigabytes for it.
+The dimensions are read from the header (PNG's IHDR, JPEG's first SOFn) and refused above four
+megapixels; an image whose dimensions cannot be read is refused too, because unmeasurable is
+unbounded.
+
 The upload's **bytes decide the format**, not the label on them: `file.type` is whatever the caller
 put in the multipart part (and Bun derives it from the file name's extension, which a REST caller
 controls outright), so a JPEG announced as a PNG would be stored under a `.png` key and then fail

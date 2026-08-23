@@ -3,6 +3,7 @@ import {
   LOGO_EXT_BY_TYPE,
   LOGO_MAX_BYTES,
   logoBytesLookLike,
+  logoPixels,
   setCompanyLogo,
 } from "@/modules/documents/company";
 
@@ -22,13 +23,53 @@ const JPEG_MAGIC = [0xff, 0xd8, 0xff];
 const PNG_END = [0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82];
 const JPEG_END = [0xff, 0xd9];
 
-const png = (...body: number[]) => bytes(...PNG_MAGIC, ...body, ...PNG_END);
-const jpeg = (...body: number[]) => bytes(...JPEG_MAGIC, ...body, ...JPEG_END);
+const be32 = (n: number) => [
+  (n >>> 24) & 0xff,
+  (n >>> 16) & 0xff,
+  (n >>> 8) & 0xff,
+  n & 0xff,
+];
+const be16 = (n: number) => [(n >>> 8) & 0xff, n & 0xff];
+
+// A PNG header the way the format requires it: signature, then IHDR (length, type, width, height).
+const png = (w = 100, h = 100) =>
+  bytes(
+    ...PNG_MAGIC,
+    ...be32(13),
+    0x49,
+    0x48,
+    0x44,
+    0x52,
+    ...be32(w),
+    ...be32(h),
+    ...PNG_END,
+  );
+// A JPEG with one APP0 segment before the SOF0 frame header, so the marker walk has to skip one.
+const jpeg = (w = 100, h = 100) =>
+  bytes(
+    0xff,
+    0xd8,
+    0xff,
+    0xe0,
+    ...be16(4),
+    0x00,
+    0x00,
+    0xff,
+    0xc0,
+    ...be16(11),
+    0x08,
+    ...be16(h),
+    ...be16(w),
+    0x00,
+    0x00,
+    0x00,
+    ...JPEG_END,
+  );
 
 describe("logoBytesLookLike", () => {
   test("accepts a complete file of each format", () => {
-    expect(logoBytesLookLike(png(0x00, 0x01), "png")).toBe(true);
-    expect(logoBytesLookLike(jpeg(0xe0, 0x00), "jpg")).toBe(true);
+    expect(logoBytesLookLike(png(), "png")).toBe(true);
+    expect(logoBytesLookLike(jpeg(), "jpg")).toBe(true);
   });
 
   // The failure a signature check cannot see: the first bytes are genuine and the rest never
@@ -50,8 +91,8 @@ describe("logoBytesLookLike", () => {
   // The case the check exists for: `file.type` is whatever the caller wrote in the multipart part,
   // and Bun derives it from the file NAME's extension — which a REST caller controls outright.
   test("refuses bytes of the other format, and bytes of no format", () => {
-    expect(logoBytesLookLike(jpeg(0xe0), "png")).toBe(false);
-    expect(logoBytesLookLike(png(0x00), "jpg")).toBe(false);
+    expect(logoBytesLookLike(jpeg(), "png")).toBe(false);
+    expect(logoBytesLookLike(png(), "jpg")).toBe(false);
     // A WebP: a RIFF container, which the renderer does not decode at all.
     expect(
       logoBytesLookLike(bytes(0x52, 0x49, 0x46, 0x46, 0x00, 0x00), "png"),
@@ -65,6 +106,22 @@ describe("logoBytesLookLike", () => {
   test("a file too short to carry a signature is not a maybe", () => {
     expect(logoBytesLookLike(bytes(0x89, 0x50), "png")).toBe(false);
     expect(logoBytesLookLike(new Uint8Array(), "jpg")).toBe(false);
+  });
+});
+
+// The byte cap does not bound the DECODE. Both formats compress flat colour enormously, so a file
+// well under 512 KB can declare dimensions whose pixel buffer is gigabytes — allocated server-side,
+// on every preview and every issuance, in a process every tenant shares.
+describe("logoPixels", () => {
+  test("reads the declared dimensions of each format", () => {
+    expect(logoPixels(png(640, 480), "png")).toBe(640 * 480);
+    // Past an APP0 segment: the frame header is not the first marker in a real file.
+    expect(logoPixels(jpeg(640, 480), "jpg")).toBe(640 * 480);
+  });
+
+  test("returns null when the header cannot be read", () => {
+    expect(logoPixels(bytes(...PNG_MAGIC), "png")).toBeNull();
+    expect(logoPixels(bytes(0xff, 0xd8), "jpg")).toBeNull();
   });
 });
 
@@ -83,17 +140,30 @@ describe("setCompanyLogo", () => {
   // upload must not leave bytes on disk under a name that says they are something else.
   test("refuses a JPEG announced as a PNG", async () => {
     await expect(
+      setCompanyLogo(ctx, upload("image/png", [...jpeg()])),
+    ).rejects.toThrow(/PNG or JPEG/);
+  });
+
+  // The one the size cap cannot catch: a small file that decodes into gigabytes.
+  test("refuses an image whose declared dimensions are past the pixel budget", async () => {
+    const huge = png(20_000, 20_000);
+    expect(huge.length).toBeLessThan(LOGO_MAX_BYTES);
+    await expect(
+      setCompanyLogo(ctx, upload("image/png", [...huge])),
+    ).rejects.toThrow(/pixels/);
+    // …and one we cannot measure at all is refused too: unmeasurable is unbounded.
+    await expect(
       setCompanyLogo(
         ctx,
-        upload("image/png", [...JPEG_MAGIC, 0xe0, ...JPEG_END]),
+        upload("image/png", [...PNG_MAGIC, 0x00, ...PNG_END]),
       ),
-    ).rejects.toThrow(/PNG or JPEG/);
+    ).rejects.toThrow();
   });
 
   test("still refuses a type outside the allowlist, and an oversized file", async () => {
     expect(LOGO_EXT_BY_TYPE["image/webp"]).toBeUndefined();
     await expect(
-      setCompanyLogo(ctx, upload("image/webp", [...PNG_MAGIC, ...PNG_END])),
+      setCompanyLogo(ctx, upload("image/webp", [...png()])),
     ).rejects.toThrow(/PNG or JPEG/);
     await expect(
       setCompanyLogo(ctx, {

@@ -155,9 +155,9 @@ describe.skipIf(!dbUp)("agent export/import", () => {
     expect(exp.agent.name).toBe("Vendedora");
     // credentialRef is a NAME, not a secret
     expect(exp.agent.modelConfig.credentialRef).toBe("llm-key");
-    const http = exp.agent.tools.find((g) => g.source === "HTTP");
+    const http = exp.agent.tools.find((g) => g?.source === "HTTP");
     expect(http && "tool" in http && http.tool).toBe("lookup_order");
-    const rag = exp.agent.tools.find((g) => g.source === "RAG");
+    const rag = exp.agent.tools.find((g) => g?.source === "RAG");
     expect(rag && "knowledgeBases" in rag && rag.knowledgeBases).toEqual([
       "FAQ",
     ]);
@@ -885,6 +885,39 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
     );
   });
 
+  // A discriminated union refuses the WHOLE array on one unknown arm, so a grant of a source a newer
+  // release added would make an otherwise importable agent unimportable — and say nothing about
+  // which part was the problem. Dropped with a count instead.
+  test("skips a grant whose source this build does not know", async () => {
+    const exp = await exportAgent(srcCtx(), srcAgentId, appDb, {
+      includeComponents: true,
+    });
+    const tampered = structuredClone(exp) as unknown as {
+      agent: { tools: unknown[] };
+    };
+    tampered.agent.tools.push({ source: "HOLOGRAM", projector: "x" });
+    const { agent, warnings } = await importAgent(
+      dstCtx(),
+      tampered as never,
+      appDb,
+    );
+    expect(warnings.some((w) => w.code === "unknownGrantSourceSkipped")).toBe(
+      true,
+    );
+    // …and everything else still arrived.
+    const grants = await suDb.agentToolSelection.findMany({
+      where: { agentId: BigInt(agent.id) },
+      select: { source: true },
+    });
+    expect(grants.length).toBeGreaterThan(3);
+    await suDb.$executeRawUnsafe(
+      `DELETE FROM agent_tool_selections WHERE agent_id = ${BigInt(agent.id)}`,
+    );
+    await suDb.$executeRawUnsafe(
+      `DELETE FROM agents WHERE id = ${BigInt(agent.id)}`,
+    );
+  });
+
   test("import canonicalizes legacy authoring shapes (JSON-Schema inputSchema, single-brace {var})", async () => {
     const exp = await exportAgent(srcCtx(), srcAgentId, appDb, {
       includeComponents: true,
@@ -903,7 +936,7 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
       properties: { order_id: { type: "string" } },
     };
     const grant = legacy.agent.tools.find(
-      (g) => g.source === "HTTP" && g.tool === "lookup_order",
+      (g) => g?.source === "HTTP" && g.tool === "lookup_order",
     );
     if (grant?.source === "HTTP") grant.tool = "legacy_lookup";
     await importAgent(dstCtx(), legacy, appDb);
@@ -951,7 +984,7 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
     tool.name = "retired_tier_lookup";
     (tool as unknown as Record<string, unknown>).riskTier = "high";
     const grant = dated.agent.tools.find(
-      (g) => g.source === "HTTP" && g.tool === "lookup_order",
+      (g) => g?.source === "HTTP" && g.tool === "lookup_order",
     );
     if (grant?.source === "HTTP") grant.tool = "retired_tier_lookup";
     await importAgent(dstCtx(), dated, appDb);

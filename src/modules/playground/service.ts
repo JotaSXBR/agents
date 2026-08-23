@@ -340,6 +340,12 @@ export async function listPlaygroundTools(params: {
 
   const conversation = new Set<string>(CONVERSATION_NATIVE_TOOL_NAMES);
   const utility = new Set<string>(UTILITY_NATIVE_TOOL_NAMES);
+  // Simulated here for the same reason the conversation natives are, so the catalog has to say so:
+  // the panel's badge is what tells the operator this run cannot issue a real document, and without
+  // it the tool reads as an ordinary external one that does.
+  const document = new Set(
+    loaded.documentSelections.map((d) => documentToolName(d.slug)),
+  );
   const knowledge = new Set(loaded.ragConfig?.tools ?? []);
   const http = new Set(loaded.httpToolDefs.map((d) => d.name));
   const mcp = new Set(loaded.mcpSelections.flatMap((s) => s.enabledTools));
@@ -352,6 +358,8 @@ export async function listPlaygroundTools(params: {
     const description = tl.description ?? "";
     if (conversation.has(name))
       return { name, description, category: "native", simulated: true };
+    if (document.has(name))
+      return { name, description, category: "external", simulated: true };
     if (utility.has(name))
       return { name, description, category: "utility", simulated: false };
     if (knowledge.has(name))

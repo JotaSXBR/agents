@@ -1746,6 +1746,12 @@ function AgentEditor() {
           'MCP server "{{name}}" was not found, so its grant was skipped.',
           p,
         );
+      case "unknownGrantSourceSkipped":
+        return t(
+          "editor.importWarning.unknownGrantSourceSkipped",
+          "{{n}} tool grant(s) came from a newer version and were skipped.",
+          p,
+        );
       case "documentGrantNotFound":
         return t(
           "editor.importWarning.documentGrantNotFound",

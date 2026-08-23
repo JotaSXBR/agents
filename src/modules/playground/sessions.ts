@@ -13,6 +13,7 @@ import {
 } from "@/graph/trace";
 import { NotFoundError } from "@/lib/errors";
 import { runScopedOn, type TenantContext } from "@/lib/tenancy";
+import { documentToolName } from "@/modules/documents/templates";
 import { listThreadMedia } from "./media";
 import { isValidPlaygroundThread } from "./thread";
 
@@ -135,7 +136,17 @@ export interface RebuiltTurn {
 // user turn + the agent reply) or a system message (an injected follow-up nudge → a proactive
 // assistant turn; silent follow-ups produce nothing and are skipped). Per-turn traces are rebuilt
 // from each slice. Intermediate tool/AI messages belong to the turn's trace, never a separate bubble.
-export function rebuildPlaygroundTurns(messages: BaseMessage[]): RebuiltTurn[] {
+export function rebuildPlaygroundTurns(
+  messages: BaseMessage[],
+  // Tool names simulated for THIS agent beyond the fixed conversation set — the document tools its
+  // granted templates produce. The live trace labels them; without them here the same result loses
+  // its badge on reopen and reads as a document that was really issued.
+  extraSimulated: Iterable<string> = [],
+): RebuiltTurn[] {
+  const simulated = new Set<string>([
+    ...SIMULATED_TOOL_NAMES,
+    ...extraSimulated,
+  ]);
   const turns: RebuiltTurn[] = [];
   const n = messages.length;
   let i = 0;
@@ -153,7 +164,7 @@ export function rebuildPlaygroundTurns(messages: BaseMessage[]): RebuiltTurn[] {
     }
     const slice = messages.slice(i, j);
     const trace = buildPlaygroundTrace(slice, {
-      simulatedNames: SIMULATED_TOOL_NAMES,
+      simulatedNames: simulated,
     });
     const sources = collectTraceSources(trace);
     const reply = lastAi(slice);
@@ -299,7 +310,20 @@ export async function getPlaygroundSessionTurns(
   const messages = Array.isArray(channel?.messages)
     ? (channel.messages as BaseMessage[])
     : [];
-  const turns = rebuildPlaygroundTurns(messages);
+  // The agent's own document tools, so a simulated issuance keeps its badge on reopen.
+  const documentTools = await runScopedOn(base, sysCtx(tenantId), (db) =>
+    db.agentToolSelection.findMany({
+      where: { agentId, source: "DOCUMENT" },
+      select: { documentTemplate: { select: { slug: true } } },
+    }),
+  );
+  const turns = rebuildPlaygroundTurns(
+    messages,
+    documentTools
+      .map((g) => g.documentTemplate?.slug)
+      .filter((slug): slug is string => !!slug)
+      .map(documentToolName),
+  );
 
   // Join persisted media onto the turns by message id (best-effort replay — if the checkpointer
   // didn't round-trip the message id, the media simply isn't re-attached, never an error).

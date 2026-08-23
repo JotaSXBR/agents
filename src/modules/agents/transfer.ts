@@ -94,6 +94,20 @@ const exportedGrantSchema = z.discriminatedUnion("source", [
   z.object({ source: z.literal("DOCUMENT"), documentTemplate: z.string() }),
 ]);
 
+// A grant whose SOURCE this build does not know — one a newer release added — is dropped with a
+// warning instead of failing the whole bundle. A discriminated union refuses the entire array on one
+// unknown arm, so without this a single grant of a kind we have not heard of makes an otherwise
+// importable agent unimportable, and the operator is told nothing about which part was the problem.
+//
+// This does NOT help an OLDER instance read a bundle written here — nothing in this file can, and
+// bumping the format version would only trade a confusing refusal for a clean one while making every
+// bundle without a document grant refusable too, which is the trade `riskTier` above already
+// rejected for the same reason. What it does is stop the next arm from breaking this direction.
+const importedGrantSchema = z.union([
+  exportedGrantSchema,
+  z.object({ source: z.string() }).transform(() => null),
+]);
+
 // Full component definitions (opt-in via ?components=true). Each references its credential BY NAME
 // (never id, never secret); integrations carry NO inboundSecretRef/routeTokenHash (regenerated on
 // import). Knowledge bases carry metadata; their documents' SOURCE TEXT is bundled only with the
@@ -224,7 +238,9 @@ export const agentExportSchema = z.object({
     transferWithSummary: z.boolean(),
     businessHours: z.string().nullable(),
     followUpHours: z.string().nullable(),
-    tools: z.array(exportedGrantSchema),
+    // Tolerant on the way IN: a grant of a source this build does not know is dropped rather than
+    // taking the bundle with it (see importedGrantSchema). Nulls are filtered where they are read.
+    tools: z.array(importedGrantSchema),
     // Metadata for unambiguous import: every credential name referenced in modelConfig/settings
     // (and in the component definitions) carries its kind here, so import resolves by (name, kind)
     // — never by bare name.
@@ -1028,11 +1044,24 @@ export async function importAgent(
       );
     }
 
+    // Grants of a source this build does not know arrive as null (see importedGrantSchema) and are
+    // dropped here, with a warning naming how many — the bundle imports, and the operator learns
+    // that something in it did not.
+    const knownGrants = exp.tools.filter(
+      (g): g is Exclude<typeof g, null> => g !== null,
+    );
+    const unknownGrants = exp.tools.length - knownGrants.length;
+    if (unknownGrants > 0) {
+      warnings.push({
+        code: "unknownGrantSourceSkipped",
+        params: { n: unknownGrants },
+      });
+    }
     const grantRows = await buildGrantRows(
       db,
       tenantId,
       created.id,
-      exp.tools,
+      knownGrants,
       warnings,
     );
     if (grantRows.length > 0) {

@@ -47,6 +47,58 @@ const LOGO_TERMINATORS: Record<"png" | "jpg", number[]> = {
   jpg: [0xff, 0xd9], // EOI
 };
 
+// A LOGO, not a poster. The byte cap does not bound this: PNG and JPEG both compress flat colour
+// enormously, so a 40 KB file can declare 20000×20000 — and @react-pdf/renderer decodes server-side,
+// allocating width × height × 4 bytes, which is 1.6 GB for that one. Every tenant shares the process.
+//
+// Four megapixels is roughly 2000×2000, which is far beyond what a letterhead needs (it prints
+// around 150pt wide) and still bounded at ~16 MB decoded.
+export const LOGO_MAX_PIXELS = 4_000_000;
+
+function beUint32(bytes: Uint8Array, at: number): number {
+  return (
+    ((bytes[at] ?? 0) << 24) |
+    ((bytes[at + 1] ?? 0) << 16) |
+    ((bytes[at + 2] ?? 0) << 8) |
+    (bytes[at + 3] ?? 0)
+  );
+}
+
+// Declared dimensions, read from the header rather than by decoding. PNG puts them in the IHDR
+// chunk, which the format requires to come first: 8 bytes of signature, 4 of length, 4 of type, then
+// width and height. JPEG carries them in whichever SOFn frame header comes first, so the marker
+// segments are walked until one turns up.
+export function logoPixels(
+  bytes: Uint8Array,
+  ext: "png" | "jpg",
+): number | null {
+  if (ext === "png") {
+    if (bytes.length < 24) return null;
+    return beUint32(bytes, 16) * beUint32(bytes, 20);
+  }
+  let at = 2; // past SOI
+  while (at + 9 < bytes.length) {
+    if (bytes[at] !== 0xff) return null;
+    const marker = bytes[at + 1] ?? 0;
+    // SOF0..SOF15 carry the frame header; C4 (DHT), C8 (JPG) and CC (DAC) do not.
+    if (
+      marker >= 0xc0 &&
+      marker <= 0xcf &&
+      marker !== 0xc4 &&
+      marker !== 0xc8 &&
+      marker !== 0xcc
+    ) {
+      const height = ((bytes[at + 5] ?? 0) << 8) | (bytes[at + 6] ?? 0);
+      const width = ((bytes[at + 7] ?? 0) << 8) | (bytes[at + 8] ?? 0);
+      return width * height;
+    }
+    const length = ((bytes[at + 2] ?? 0) << 8) | (bytes[at + 3] ?? 0);
+    if (length < 2) return null;
+    at += 2 + length;
+  }
+  return null;
+}
+
 export function logoBytesLookLike(
   bytes: Uint8Array,
   ext: "png" | "jpg",
@@ -111,6 +163,18 @@ export async function setCompanyLogo(
       "the logo must be a PNG or JPEG",
       400,
       "errors.unsupportedImageType",
+    );
+  }
+  // Dimensions decide, not bytes. A file well under the size cap can declare enough pixels to
+  // exhaust the process when the renderer decodes it, and the renderer runs on every preview and
+  // every issuance of a template that shows the logo — for every tenant on the instance.
+  // Unreadable dimensions are refused too: an image we cannot measure is one we cannot bound.
+  const pixels = logoPixels(bytes, ext);
+  if (pixels === null || pixels <= 0 || pixels > LOGO_MAX_PIXELS) {
+    throw new AppError(
+      `the logo must be at most ${LOGO_MAX_PIXELS} pixels (about 2000×2000)`,
+      400,
+      "errors.imageTooLarge",
     );
   }
   const key = logoKeyFor(ctx.tenantId, ext);

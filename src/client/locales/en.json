@@ -591,6 +591,7 @@
       "errorTitle": "This document does not render",
       "title": "Document preview"
     },
+    "refsError": "Could not check which agents use this template.",
     "revoke": "Revoke",
     "revoked": "Revoked.",
     "revokedBadge": "Revoked",
@@ -935,7 +936,8 @@
       "kbReusedDocsSkipped": "Knowledge base \"{{name}}\" already existed and was reused; its {{n}} bundled document(s) were not imported.",
       "mcpGrantNotFound": "MCP server \"{{name}}\" was not found, so its grant was skipped.",
       "mcpReused": "MCP server \"{{name}}\" already existed and was reused; check it is right.",
-      "mcpUnsafeStdio": "MCP server \"{{name}}\" has an unsupported command and was skipped."
+      "mcpUnsafeStdio": "MCP server \"{{name}}\" has an unsupported command and was skipped.",
+      "unknownGrantSourceSkipped": "{{n}} tool grant(s) came from a newer version and were skipped."
     },
     "importWarningReview": "Review",
     "importWarningsTitle": "Imported with warnings",

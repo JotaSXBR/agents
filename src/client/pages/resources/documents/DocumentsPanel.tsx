@@ -46,8 +46,12 @@ export function DocumentsPanel() {
   const [error, setError] = useState(false);
   const [creating, setCreating] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [refs, setRefs] = useState<AgentRef[] | null>(null);
-  const [deleteRefs, setDeleteRefs] = useState<AgentRef[] | null>(null);
+  // null = still loading, "error" = the lookup failed. Two states, because collapsing them leaves a
+  // dialog claiming to be checking something it has already given up on.
+  const [refs, setRefs] = useState<AgentRef[] | "error" | null>(null);
+  const [deleteRefs, setDeleteRefs] = useState<AgentRef[] | "error" | null>(
+    null,
+  );
 
   const editModal = useModalController<{ template: DocumentTemplate }>();
   const starterModal = useModalController();
@@ -113,11 +117,19 @@ export function DocumentsPanel() {
     }
   }
 
-  async function loadRefs(id: string): Promise<AgentRef[] | null> {
-    const { data } = await api.api.v1["document-templates"]({
-      id,
-    }).references.get();
-    return data ? [...data.references.agents] : null;
+  // `null` is the LOADING state for both dialogs, so a failure must not answer with it: the delete
+  // dialog would sit on "Checking…" with Confirm disabled forever, explaining nothing and offering
+  // no way out. An empty list is a real answer ("nothing uses it"); a failure is its own.
+  async function loadRefs(id: string): Promise<AgentRef[] | "error"> {
+    try {
+      const { data, error: err } = await api.api.v1["document-templates"]({
+        id,
+      }).references.get();
+      if (err || !data) return "error";
+      return [...data.references.agents];
+    } catch {
+      return "error";
+    }
   }
 
   // A session token per modal open. The lookup is slow enough for an operator to close one template
@@ -401,7 +413,16 @@ export function DocumentsPanel() {
         modal={refsModal}
         title={t("resources.usageTitle", "Where this is used")}
       >
-        <AgentReferences agents={refs} />
+        {refs === "error" ? (
+          <p className="text-sm text-warning">
+            {t(
+              "documents.refsError",
+              "Could not check which agents use this template.",
+            )}
+          </p>
+        ) : (
+          <AgentReferences agents={refs} />
+        )}
       </Modal>
 
       <Modal
@@ -426,6 +447,9 @@ export function DocumentsPanel() {
               variant="danger"
               onClick={confirmDelete}
               loading={deleting}
+              // Enabled once the lookup has ANSWERED, whether with a list or with a failure: a
+              // failed check must not become a dialog the operator can never leave through the
+              // button it offers. The warning below says the impact is unknown.
               disabled={deleteRefs === null}
             >
               {t("common.delete", "Delete")}
@@ -450,7 +474,15 @@ export function DocumentsPanel() {
               {t("documents.deleteChecking", "Checking which agents use it…")}
             </p>
           )}
-          {deleteRefs && deleteRefs.length > 0 && (
+          {deleteRefs === "error" && (
+            <p className="text-sm text-warning">
+              {t(
+                "documents.refsError",
+                "Could not check which agents use this template.",
+              )}
+            </p>
+          )}
+          {Array.isArray(deleteRefs) && deleteRefs.length > 0 && (
             <p className="text-sm text-warning">
               {t(
                 "resources.deleteRefsWarning",
@@ -459,7 +491,9 @@ export function DocumentsPanel() {
               )}
             </p>
           )}
-          <AgentReferences agents={deleteRefs} />
+          <AgentReferences
+            agents={Array.isArray(deleteRefs) ? deleteRefs : null}
+          />
         </div>
       </Modal>
     </div>
