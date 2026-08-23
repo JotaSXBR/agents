@@ -704,12 +704,19 @@ export function parseDocumentValues(
 
 // The strings a value contributes to the page: the value itself when it is text, and every line
 // item's description when it is a table.
+//
+// SANITISED first, because that is the form that reaches the page — `resolveTokens` sanitises every
+// substitution on the way in, and line-item descriptions are stored that way. A model's stray tab or
+// bell is normalised to a space there by design, so checking the raw string would refuse text this
+// project has already decided to accept and print. What is left after that normalisation is what has
+// to be printable.
 function printedStrings(field: DocumentField, value: unknown): string[] {
-  if (typeof value === "string") return [value];
+  if (typeof value === "string") return [sanitizeDocumentValue(value)];
   if (field.type !== "lineItems" || !Array.isArray(value)) return [];
   return value
     .map((item) => (item as { description?: unknown }).description)
-    .filter((d): d is string => typeof d === "string");
+    .filter((d): d is string => typeof d === "string")
+    .map((d) => sanitizeDocumentValue(d));
 }
 
 // A refusal that keeps the REASON. The global error handler localizes `translationKey` and drops

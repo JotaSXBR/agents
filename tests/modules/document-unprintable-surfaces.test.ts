@@ -142,6 +142,51 @@ describe("the write paths ask, not just the validator", () => {
   });
 });
 
+// Control characters are their own half of "cannot print", and they split the two kinds of surface
+// apart rather than joining them.
+describe("control characters", () => {
+  const NUL = String.fromCharCode(0);
+  const BELL = String.fromCharCode(7);
+  const CR = String.fromCharCode(13);
+
+  // AUTHORED text is refused. Nothing sanitises a block on the way to the page, so a control there
+  // is drawn as an empty box at the end of every line — and a NUL never even gets that far, because
+  // Postgres refuses it in text and jsonb, turning an authored template into a 500 at the INSERT
+  // instead of a refusal anyone can act on.
+  test("are refused in authored text, by code point", () => {
+    for (const ch of [NUL, BELL, CR]) {
+      const r = parseAuthoredTemplate(
+        [{ ...okBlock, text: `ok${ch}` }],
+        [],
+        {},
+      );
+      expect(r.ok).toBe(false);
+      // Named U+XXXX: a control has no shape to quote, and pasting one into the message would put
+      // it into a log line and an API response.
+      expect(r.ok ? "" : r.reason).toMatch(/U\+00(00|07|0D)/);
+    }
+  });
+
+  // …and a LINE FEED is not one of them: a text block is legitimately several lines.
+  test("a line feed is text, not a control", () => {
+    expect(
+      parseAuthoredTemplate([{ ...okBlock, text: "primeira\nsegunda" }], [], {})
+        .ok,
+    ).toBe(true);
+  });
+
+  // VALUES are normalised instead, because that is what already reaches the page: `resolveTokens`
+  // sanitises every substitution, so a model's stray tab or bell becomes a space by design. Checking
+  // the raw string would refuse text this project has decided to accept and print.
+  test("are normalised in values, not refused", () => {
+    const r = parseDocumentValues(FIELDS, {
+      cliente: `Ana${BELL}${CR}`,
+      itens: [{ description: `Serviço${NUL}`, quantity: 1, unitPrice: 1 }],
+    });
+    expect(r.ok).toBe(true);
+  });
+});
+
 // The surfaces nobody authors, which is why they cannot be gated at a write.
 describe("what is printable by construction", () => {
   // The currency SYMBOL is chosen by Intl from a valid code. INR, KRW, THB, VND and ILS are real

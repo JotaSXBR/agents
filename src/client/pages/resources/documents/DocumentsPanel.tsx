@@ -468,6 +468,12 @@ export function DocumentsPanel() {
       <Modal
         modal={starterModal}
         title={t("documents.starterTitle", "Start from a template")}
+        // Dismissing mid-create would leave a request in flight whose result the operator can no
+        // longer see, and the template it creates would then appear in the list with no
+        // explanation. It is also what keeps this dialog from being REOPENED while a request from
+        // the previous opening is still out — the case that would otherwise need a session token,
+        // and does not, because it cannot happen.
+        onCloseRequest={creating ? () => undefined : undefined}
       >
         <div className="flex flex-col gap-3">
           <p className="text-sm text-text-muted">
@@ -498,6 +504,9 @@ export function DocumentsPanel() {
               <Button
                 size="sm"
                 loading={creating === s.key}
+                // Every row, not just this one: two starters picked in quick succession are two
+                // templates, and the second request also clears the first one's spinner.
+                disabled={creating !== null}
                 onClick={() => createFromStarter(s)}
               >
                 {t("documents.use", "Use")}

@@ -286,15 +286,18 @@ export const tenantSettingsController = new Elysia({
       return new Response(new Uint8Array(logo.data), {
         headers: {
           "Content-Type": LOGO_CONTENT_TYPE[ext],
-          // The asset is tenant-scoped, so it must not be shared by a proxy the way the global
-          // branding assets are.
-          "Cache-Control": "private, max-age=60",
-          // …and not shared between TENANTS inside one browser either. The URL carries only
-          // `logoVersion`, which is a millisecond timestamp: two tenants uploading in the same
-          // millisecond get the same URL, and a SUPER_ADMIN switching between them would be served
-          // the other one's letterhead out of cache, without the scoped read ever running. The
-          // tenant travels in a header, so the cache key has to say so.
-          Vary: "X-Tenant-Id",
+          // NOT STORED AT ALL, which is the only answer that holds for every principal.
+          //
+          // The URL carries just `logoVersion`, a millisecond timestamp, so two tenants uploading in
+          // the same millisecond share it. `private` keeps proxies out but not the ONE browser that
+          // saw both tenants, and `Vary: X-Tenant-Id` — the first fix here — only discriminates for
+          // a SUPER_ADMIN: that header selects a tenant for nobody else, so it is absent on both
+          // requests when a browser signs out of tenant A and into tenant B, and the cache replays
+          // A's letterhead without B's scoped read ever running.
+          //
+          // What the cache bought was one small image per remount inside a minute. That is not a
+          // trade worth making against a tenant seeing another tenant's asset.
+          "Cache-Control": "private, no-store",
         },
       });
     },

@@ -23,7 +23,23 @@ const WIN_ANSI_ABOVE_LATIN1 = new Set([
   8218, 8220, 8221, 8222, 8224, 8225, 8226, 8230, 8240, 8249, 8250, 8364, 8482,
 ]);
 
+// The only control the page has a shape for: a text block is legitimately several lines, which is
+// why sanitizeDocumentValue keeps this one and turns every other control into a space.
+const LINE_FEED = 0x0a;
+
+function isControl(code: number): boolean {
+  // C0, DEL, and C1. The WinAnsi extras that LOOK like they live at 0x80–0x9F (€, curly quotes) are
+  // Unicode code points elsewhere — U+20AC, U+2018 — so nothing printable is caught here.
+  return code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f);
+}
+
 export function isPrintableCodeUnit(code: number): boolean {
+  if (code === LINE_FEED) return true;
+  // Controls are drawn as `.notdef` by the standard fonts — an empty box at the end of every line
+  // for a value pasted with CRLF — and a NUL is worse than that: Postgres refuses it in text and
+  // jsonb outright, so it turns an authored template into a 500 at the INSERT rather than a
+  // refusal anyone can act on.
+  if (isControl(code)) return false;
   return code <= 255 || WIN_ANSI_ABOVE_LATIN1.has(code);
 }
 
@@ -47,5 +63,13 @@ export function unprintableCharacters(text: string): string[] {
 export function unprintableProblem(text: string, what: string): string | null {
   const bad = unprintableCharacters(text);
   if (bad.length === 0) return null;
-  return `${what} contains characters this document cannot print (${bad.join(" ")}) — the PDF fonts cover Latin text only, and printing them anyway would put a different character in the document.`;
+  // A control has no shape to quote, and pasting one into the message would put it in a log line and
+  // an API response. Named by code point instead, which is also what a caller has to search for.
+  const named = bad.map((ch) => {
+    const code = ch.codePointAt(0) ?? 0;
+    return isControl(code)
+      ? `U+${code.toString(16).toUpperCase().padStart(4, "0")}`
+      : ch;
+  });
+  return `${what} contains characters this document cannot print (${named.join(" ")}) — the PDF fonts cover Latin text only, and printing them anyway would put a different character in the document.`;
 }
