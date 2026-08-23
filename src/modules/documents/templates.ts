@@ -769,7 +769,25 @@ export async function readRenderContext(
   const company = await runScopedOn(base, ctx, (db) =>
     readCompanySettings(db, tenantId),
   );
-  return { company, logo: await readCompanyLogo(company) };
+  const logo = await readCompanyLogo(company);
+  // A logo the settings NAME and the disk does not have is a cross-format replacement landing
+  // between these two reads: the upload commits the new key and deletes the file the old one named,
+  // which is exactly the file this read is reaching for. Answering null there freezes a document
+  // without a letterhead forever, even though both the profile before and the profile after had
+  // one — and the document is immutable, so nothing ever fixes it.
+  //
+  // Re-read once instead of holding the company lock across a render: the lock is taken by every
+  // profile save, and an issuance is not something a save should have to wait behind. One retry is
+  // enough because the replacement has already committed by the time the file is gone.
+  if (!logo && company.logoKey) {
+    const latest = await runScopedOn(base, ctx, (db) =>
+      readCompanySettings(db, tenantId),
+    );
+    if (latest.logoKey && latest.logoKey !== company.logoKey) {
+      return { company: latest, logo: await readCompanyLogo(latest) };
+    }
+  }
+  return { company, logo };
 }
 
 // A preview is a RENDER, so caller-supplied values face the same gate the issued ones do. Passed

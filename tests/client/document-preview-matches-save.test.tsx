@@ -41,6 +41,9 @@ const realFetch = globalThis.fetch;
 let previewBodies: Record<string, unknown>[] = [];
 let patchBodies: Record<string, unknown>[] = [];
 
+let holdPatch = false;
+let releasePatch = () => {};
+
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(
     typeof input === "string"
@@ -60,6 +63,11 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   }
   if ((init?.method ?? "GET").toUpperCase() === "PATCH") {
     patchBodies.push(body);
+    if (holdPatch) {
+      await new Promise<void>((r) => {
+        releasePatch = r;
+      });
+    }
   }
   return new Response(JSON.stringify({ template: { id: "3" } }), {
     status: 200,
@@ -112,6 +120,7 @@ function Harness() {
 beforeEach(() => {
   previewBodies = [];
   patchBodies = [];
+  holdPatch = false;
 });
 afterEach(cleanup);
 afterAll(() => {
@@ -157,5 +166,46 @@ describe("the preview payload is the payload that will be saved", () => {
     });
     const patch = patchBodies[0] as Record<string, unknown>;
     expect(Object.keys(patch).sort()).toEqual(["blockText"]);
+  });
+});
+
+// The diff was captured when Save was clicked. An edit typed after that is not in the request, and
+// the success that follows closes the modal and takes it away without a word — so the form has to
+// stop accepting edits for as long as the request is out.
+describe("the form is not editable while a save is in flight", () => {
+  test("controls are disabled until the request answers", async () => {
+    holdPatch = true;
+    render(
+      <MemoryRouter initialEntries={["/recursos/documentos"]}>
+        <ToastProvider>
+          <Harness />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    const textarea = await screen.findByDisplayValue("Olá.");
+    fireEvent.change(textarea, { target: { value: "Bom dia." } });
+    const save = await screen.findByText(/^(Save|Salvar)$/);
+    fireEvent.click(save);
+    await waitFor(() => {
+      expect(patchBodies.length).toBe(1);
+    });
+
+    // Asserted STRUCTURALLY: every editable control sits inside a fieldset, and that fieldset is
+    // disabled. A fieldset disables its whole subtree — including controls added to this form later,
+    // which is why it is one element rather than a prop on each — but that inheritance is computed
+    // by the browser, and happy-dom leaves `el.disabled` reading each element's own attribute. So
+    // the containment and the flag are what can be observed here; the propagation is the platform's.
+    const form = document.querySelector("fieldset") as HTMLFieldSetElement;
+    expect(form?.disabled).toBe(true);
+    const editable = [
+      ...document.querySelectorAll("input, textarea, select"),
+    ] as HTMLElement[];
+    expect(editable.length).toBeGreaterThan(3);
+    expect(editable.every((el) => form.contains(el))).toBe(true);
+    releasePatch();
+    // …and once it answers, the form is gone: a successful save closes the modal.
+    await waitFor(() => {
+      expect(document.querySelector("fieldset")).toBeNull();
+    });
   });
 });

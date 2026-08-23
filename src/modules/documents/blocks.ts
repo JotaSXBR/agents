@@ -212,6 +212,36 @@ export function parseDocumentStyle(value: unknown): DocumentStyle {
   };
 }
 
+// Whether a block puts anything on the page.
+//
+// "Not a divider" is not the same question, and the difference is a blank page nobody refused: a
+// text block whose text is empty, or a header with no title, no subtitle, no logo, no company and no
+// rows, both parse and both draw nothing. A template made of those consumes a number from its
+// sequence and attaches an empty PDF to a customer's conversation.
+//
+// A `fields` block always has at least one row and a `totals` block at least one line, by schema; a
+// `lineItems` block draws its own table. Those three are settled where they are declared, which is
+// why they are not re-asked here.
+export function blockDraws(block: DocumentBlock): boolean {
+  switch (block.type) {
+    case "divider":
+      return false;
+    case "text":
+      // Whitespace is not content: the renderer draws a line of nothing.
+      return block.text.trim() !== "";
+    case "header":
+      return Boolean(
+        block.title?.trim() ||
+          block.subtitle?.trim() ||
+          block.showLogo ||
+          block.showCompany ||
+          block.meta?.length,
+      );
+    default:
+      return true;
+  }
+}
+
 // ── bounds ──
 
 // The preview renders on the request thread with operator-supplied input, which makes it the one

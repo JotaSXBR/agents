@@ -257,7 +257,14 @@ export function DocumentTemplateModal({
         </div>
       }
     >
-      <div className="grid gap-4 lg:grid-cols-2">
+      {/* Every control at once, because the diff this save sends was captured when it was clicked:
+          an edit typed after that is not in the request, and the success that follows closes the
+          modal and takes it away without a word. A fieldset disables its whole subtree, so a control
+          added here later is covered without anyone remembering the rule. */}
+      <fieldset
+        disabled={saving}
+        className="grid gap-4 border-0 p-0 lg:grid-cols-2"
+      >
         <div className="flex flex-col gap-3">
           <FormField label={t("documents.name", "Name")}>
             <Input value={name} onChange={(e) => setName(e.target.value)} />
@@ -447,7 +454,7 @@ export function DocumentTemplateModal({
           state={preview}
           className="min-h-96 lg:sticky lg:top-0 lg:max-h-[70vh] lg:self-start"
         />
-      </div>
+      </fieldset>
     </Modal>
   );
 }

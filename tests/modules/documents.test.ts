@@ -19,6 +19,7 @@ import {
   deleteDocumentTemplate,
   getDocumentTemplate,
   previewDocumentTemplate,
+  readRenderContext,
   SLUG_MAX,
   updateDocumentTemplate,
 } from "@/modules/documents/templates";
@@ -1419,6 +1420,70 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       select: { style: true },
     });
     expect((raw?.style as { font?: string })?.font).toBe("brand-grotesk-2027");
+  });
+
+  // A logo the settings NAME and the disk does not have is a cross-format replacement landing
+  // between the two reads a render does: the upload commits the new key and deletes the file the old
+  // one named, which is the file the render is reaching for. Answering null freezes an IMMUTABLE
+  // document without a letterhead, even though both the profile before and the profile after had
+  // one, and nothing ever fixes it.
+  //
+  // Forced deterministically: the first settings read returns the key that is about to be deleted,
+  // and the second (the retry) returns what actually committed.
+  test("re-reads the settings when the logo they name is already gone", async () => {
+    const dir = `${config.documentsStorageDir}/company`;
+    const png = [
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48,
+      0x44, 0x52, 0, 0, 0, 10, 0, 0, 0, 10, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42,
+      0x60, 0x82,
+    ];
+    await setCompanyLogo(
+      ctx(tenantB),
+      {
+        type: "image/png",
+        size: png.length,
+        arrayBuffer: async () => new Uint8Array(png).buffer as ArrayBuffer,
+      },
+      appDb,
+    );
+    // The state a replacement leaves for a heartbeat: the row names the JPEG, the PNG file is gone,
+    // and a reader that took its snapshot a moment earlier still holds the PNG key.
+    const stale = `${tenantB}-logo.jpg`;
+    let handedStale = false;
+    const racing = appDb.$extends({
+      query: {
+        tenant: {
+          async findUnique({ args, query }) {
+            const row = (await query(args)) as {
+              settings?: Record<string, unknown>;
+            } | null;
+            const company = (row?.settings?.company ?? {}) as Record<
+              string,
+              unknown
+            >;
+            if (!handedStale && company.logoKey) {
+              handedStale = true;
+              return {
+                ...row,
+                settings: {
+                  ...row?.settings,
+                  company: { ...company, logoKey: stale },
+                },
+              };
+            }
+            return row;
+          },
+        },
+      },
+    }) as unknown as typeof appDb;
+
+    const rendered = await readRenderContext(ctx(tenantB), racing);
+    expect(handedStale).toBe(true);
+    // The retry found the key that is really stored, and its bytes.
+    expect(rendered.company.logoKey).toBe(`${tenantB}-logo.png`);
+    expect(rendered.logo).not.toBeNull();
+    expect(await Bun.file(`${dir}/${tenantB}-logo.png`).exists()).toBe(true);
+    await clearCompanyLogo(ctx(tenantB), appDb);
   });
 
   // The template can be deleted between the read that loads it and the insert that references it.

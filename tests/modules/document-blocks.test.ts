@@ -809,6 +809,43 @@ describe("a layout has to print something", () => {
     ).toBe(false);
   });
 
+  // "Not a divider" is the wrong question, and these are the two blocks that answer it wrongly: a
+  // text block with no text, and a header with everything turned off. Both parse, both draw a blank
+  // page, and both would consume a number from the template's sequence to attach it.
+  test("refuses blocks that parse and print nothing", () => {
+    expect(
+      parseAuthoredTemplate([{ id: "t", type: "text", text: "" }], [field], {})
+        .ok,
+    ).toBe(false);
+    expect(
+      parseAuthoredTemplate(
+        [{ id: "t", type: "text", text: "   \n  " }],
+        [field],
+        {},
+      ).ok,
+    ).toBe(false);
+    expect(
+      parseAuthoredTemplate([{ id: "h", type: "header" }], [field], {}).ok,
+    ).toBe(false);
+  });
+
+  // …and a header draws as soon as ANY of its parts is on, including the two that carry no text of
+  // their own.
+  test("a header draws when any of its parts is on", () => {
+    for (const on of [
+      { title: "Orçamento" },
+      { subtitle: "válido por 7 dias" },
+      { showLogo: true },
+      { showCompany: true },
+      { meta: [{ label: "Validade", value: "7 dias" }] },
+    ]) {
+      expect(
+        parseAuthoredTemplate([{ id: "h", type: "header", ...on }], [field], {})
+          .ok,
+      ).toBe(true);
+    }
+  });
+
   test("one printing block is enough, whichever it is", () => {
     for (const block of [
       { id: "h", type: "header", title: "Orçamento" },

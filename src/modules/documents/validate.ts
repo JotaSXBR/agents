@@ -1,6 +1,7 @@
 import { type ZodError, z } from "zod";
 import { AppError } from "@/lib/errors";
 import {
+  blockDraws,
   type DocumentBlock,
   type DocumentField,
   type DocumentStyle,
@@ -259,9 +260,10 @@ export function parseAuthoredTemplate(
   // A layout that draws NOTHING is not a document. `blocks` defaults to [] and templates default to
   // enabled, so an omitted layout became a granted tool that issued a numbered, blank PDF — burning
   // a number from the template's sequence and attaching an empty page to a customer's conversation.
-  // A divider on its own is the same thing: the rule is about what PRINTS, not about the count.
+  // A divider on its own is the same thing, and so is a text block with no text or a header with
+  // nothing turned on: the rule is about what PRINTS, not about the count or the type.
   if (authored.blocks) {
-    const draws = shared.content.blocks.some((b) => b.type !== "divider");
+    const draws = shared.content.blocks.some(blockDraws);
     if (!draws) {
       return {
         ok: false,
