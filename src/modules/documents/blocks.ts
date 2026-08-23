@@ -233,7 +233,11 @@ export function documentAuthoringSchema(): Record<string, unknown> {
   return {
     blocks: closed(z.toJSONSchema(documentBlockSchema)),
     fields: closed(z.toJSONSchema(documentFieldSchema)),
-    style: closed(z.toJSONSchema(documentStyleSchema)),
+    // PARTIAL, because that is what a write accepts: create fills the defaults for what is missing
+    // and update keeps the stored value, so `{"font":"serif"}` is a supported payload. Publishing
+    // the strict object marks every property required, and a client validating against the contract
+    // refuses a style the server would have taken.
+    style: closed(z.toJSONSchema(documentStyleSchema.partial())),
   };
 }
 

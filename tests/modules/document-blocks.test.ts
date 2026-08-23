@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   DOCUMENT_STYLE_DEFAULTS,
   documentAuthoringSchema,
+  documentStyleSchema,
   MAX_BLOCKS_PER_DOCUMENT,
   MAX_DOCUMENT_AMOUNT,
   MAX_FIELDS_PER_DOCUMENT,
@@ -14,6 +15,7 @@ import { sampleValues } from "@/modules/documents/sample";
 import { documentStarter } from "@/modules/documents/starters";
 import { computeTotals } from "@/modules/documents/totals";
 import {
+  authoredStyleProblem,
   parseAuthoredTemplate,
   parseDocumentValues,
   parseTemplateContent,
@@ -736,6 +738,25 @@ describe("documentAuthoringSchema", () => {
     expect(open).toEqual([]);
     // …and it does reach inside a block, not just the top of one.
     expect(JSON.stringify(schema.blocks)).toContain("additionalProperties");
+  });
+
+  // Closed is not the same as complete. A write takes a PARTIAL style — create fills the defaults,
+  // update keeps the stored value — so publishing every property as required refuses a payload the
+  // server accepts, and does it inside the client, where no server message can explain it.
+  test("publishes the style as partial, the way a write takes it", () => {
+    const style = documentAuthoringSchema().style as {
+      required?: string[];
+      properties: Record<string, unknown>;
+    };
+    expect(style.required ?? []).toEqual([]);
+    // Every property is still published — optional, not absent.
+    expect(Object.keys(style.properties).sort()).toEqual(
+      Object.keys(documentStyleSchema.shape).sort(),
+    );
+    // And the gate really does take one property on its own.
+    expect(
+      authoredStyleProblem({ font: "serif" } as Record<string, unknown>),
+    ).toBeNull();
   });
 });
 

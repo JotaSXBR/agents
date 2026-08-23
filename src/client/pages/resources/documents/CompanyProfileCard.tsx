@@ -5,7 +5,7 @@ import { Button, Card, FormField, Input, useToast } from "@/client/components";
 import { api } from "@/client/lib/api";
 import { mediaFetch } from "@/client/lib/media";
 import {
-  type CompanyDraft,
+  afterCompanySave,
   emptyCompanyForm,
   COMPANY_FIELDS as FIELDS,
   nextCompanyDraft,
@@ -37,22 +37,13 @@ export function CompanyProfileCard({
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // Marks a `company` change this card CAUSED, so the draft effect below leaves the operator's text
-  // alone. Two of them: a logo write (which answers with the whole block) and a successful save
-  // (whose echo IS the draft). Only a change from OUTSIDE should replace what someone is typing.
-  const ownChangeRef = useRef(false);
-
   useEffect(() => {
     if (!company) return;
-    // A logo upload or removal returns the whole company block, and reinitialising the draft from it
-    // would discard the text the operator has typed and not yet saved — losing their edits because
-    // they changed the picture. Only the logo state (below) reacts to that write.
-    if (ownChangeRef.current) {
-      ownChangeRef.current = false;
-      return;
-    }
-    // Whether the operator's unsaved text survives this arrival is one rule with three answers, and
-    // it lives next door with its decision table.
+    // Every arrival goes through the same rule, including the ones this card caused: a logo write
+    // answers with the whole company block, and a save echoes what we sent. Neither needs to be
+    // marked as ours, because against the baseline they are already "nothing was typed" and land as
+    // no-ops. (An earlier version DID mark them, and that mark is what hid the missing baseline
+    // advance below.) The rule lives next door with its decision table.
     setForm((current) => nextCompanyDraft(current, company));
   }, [company]);
 
@@ -95,18 +86,18 @@ export function CompanyProfileCard({
 
   async function save() {
     setSaving(true);
+    // What this request carries, captured before the await: the operator can type during it.
+    const sent = draft;
     try {
-      const { data, error } = await api.api.v1["tenant-settings"].company.put(
-        draft satisfies CompanyDraft,
-      );
+      const { data, error } =
+        await api.api.v1["tenant-settings"].company.put(sent);
       if (error || !data) {
         showToast(t("documents.company.saveError", "Could not save."), "error");
         return;
       }
-      // The same mark: the operator can keep typing while the request is in flight, and resetting
-      // the draft from this echo would silently discard every keystroke made since they clicked
-      // Save. The echo carries what we SENT; the draft carries what they have now.
-      ownChangeRef.current = true;
+      // The text is now stored, so it becomes the baseline — see afterCompanySave. Anything typed
+      // while the request was in flight stays, and stays unsaved.
+      setForm((current) => afterCompanySave(current, sent));
       onChanged(data.company);
       showToast(t("common.saved", "Saved."), "success");
     } catch {
@@ -119,12 +110,11 @@ export function CompanyProfileCard({
     }
   }
 
-  // The logo routes answer with the WHOLE company block, and handing that to `onChanged` replaces
-  // the `company` prop — which re-runs the draft effect and overwrites the text fields the operator
-  // has been typing but not yet saved. Their edits would vanish because they changed the logo. The
-  // logo half is applied on its own, and the draft is left alone.
+  // The logo routes answer with the WHOLE company block. Handing it to `onChanged` replaces the
+  // `company` prop, and the draft rule decides what happens to the text on its own: unsaved text
+  // survives, an untouched form takes the block as it came. Nothing here has to say "this one was
+  // mine".
   function applyLogoOnly(next: CompanyProfile) {
-    ownChangeRef.current = true;
     onChanged(next);
   }
 

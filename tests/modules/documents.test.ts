@@ -620,6 +620,21 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
         appDb,
       ),
     ).rejects.toThrow(/100/);
+    // The blocks a CALLER writes are checked the way a write checks them, unknown property and all.
+    // Tolerance belongs to what came out of storage — a property a newer build wrote — and never to
+    // what the caller just sent: a preview that accepts it renders a PDF nobody can save.
+    await expect(
+      previewDocumentTemplate(
+        ctx(tenantA),
+        {
+          id: templateId,
+          blocks: [
+            { id: "cabecalho", type: "header", title: "X", tagline: "?" },
+          ],
+        },
+        appDb,
+      ),
+    ).rejects.toThrow(/tagline/);
     // A preview has to show what the SAVE would produce, so it merges a partial style the way the
     // patch does. Replacing outright rendered a saved template without its footer while saving the
     // same patch kept it — the preview approving a document the apply would not make.
@@ -1305,6 +1320,17 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     });
     const keptBlocks = raw?.blocks as { id: string }[] | undefined;
     expect(keptBlocks?.find((b) => b.id === "assinatura")).toBeDefined();
+
+    // …and the PREVIEW says the same thing. It used to read the parsed DTO, where the unknown block
+    // has already been dropped, so a style-only preview rendered a clean PDF and the MCP dry run
+    // built on it reported the write as fine — a dry run approving a write that cannot be applied.
+    await expect(
+      previewDocumentTemplate(
+        ctx(tenantA),
+        { id, style: { font: "mono" } },
+        appDb,
+      ),
+    ).rejects.toThrow(/newer version wrote/);
   });
 
   // The template can be deleted between the read that loads it and the insert that references it.
@@ -1758,6 +1784,31 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     await upload("image/jpeg", jpg);
     expect(await Bun.file(`${dir}/${jpgKey}`).exists()).toBe(true);
     expect(await Bun.file(`${dir}/${pngKey}`).exists()).toBe(false);
+    // A failure BEFORE anything is published — the lock, or the read that precedes the publish —
+    // has nothing of this request's on disk to undo. The rollback used to remove "the new file"
+    // unconditionally, which over a database hiccup deleted the live letterhead the row still names.
+    const failsBeforePublish = appDb.$extends({
+      query: {
+        tenant: {
+          findUnique() {
+            throw new Error("settings read failed");
+          },
+        },
+      },
+    }) as unknown as typeof appDb;
+    await expect(
+      setCompanyLogo(
+        ctx(tenantB),
+        {
+          type: "image/jpeg",
+          size: jpg.length,
+          arrayBuffer: async () => new Uint8Array(jpg).buffer as ArrayBuffer,
+        },
+        failsBeforePublish,
+      ),
+    ).rejects.toThrow();
+    expect(await Bun.file(`${dir}/${jpgKey}`).exists()).toBe(true);
+
     // The ORDER: file after row, never before. A clear whose row write fails must leave the file
     // alone — the settings still name it, and a logo the settings name has to be on disk.
     const failing = appDb.$extends({

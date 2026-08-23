@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { CompanyProfile } from "@/client/pages/resources/documents/CompanyProfileCard";
 import {
+  afterCompanySave,
   blankCompanyDraft,
   companyToDraft,
   emptyCompanyForm,
@@ -118,5 +119,45 @@ describe("nextCompanyDraft", () => {
     const seeded = nextCompanyDraft(emptyCompanyForm(), partial);
     expect(seeded.draft.website).toBe("");
     expect(nextCompanyDraft(seeded, partial).draft).toEqual(seeded.draft);
+  });
+});
+
+// A save is the other event that moves the baseline. Without it the form is permanently "typed in"
+// after its FIRST successful save — the text matches what the server stores, the baseline still
+// holds what it stored before — so it stops adopting anything ever again, and the next Save
+// overwrites whatever another writer put there in between.
+describe("afterCompanySave", () => {
+  test("a saved form is untouched again, and takes the next server copy", () => {
+    const seeded = seedCompanyDraft(stored());
+    const edited = {
+      ...seeded,
+      draft: { ...seeded.draft, name: "ACME Ltda ME" },
+    };
+    const saved = afterCompanySave(edited, edited.draft);
+    // The echo of our own write changes nothing…
+    const echo = stored({ name: "ACME Ltda ME" });
+    expect(nextCompanyDraft(saved, echo).draft).toEqual(edited.draft);
+    // …and a LATER change from somewhere else now lands, which is what stops the next Save from
+    // overwriting it.
+    const elsewhere = stored({
+      name: "ACME Ltda ME",
+      phone: "+55 11 3333-3333",
+    });
+    expect(nextCompanyDraft(saved, elsewhere).draft.phone).toBe(
+      "+55 11 3333-3333",
+    );
+  });
+
+  // The request is not instant, and the operator can keep typing through it. What was SENT becomes
+  // the baseline; what they have now stays in the form, and stays unsaved.
+  test("keystrokes made during the request survive it, still unsaved", () => {
+    const seeded = seedCompanyDraft(stored());
+    const sent = { ...seeded.draft, name: "ACME Ltda ME" };
+    const typedMeanwhile = { ...seeded, draft: { ...sent, phone: "+55 11 1" } };
+    const saved = afterCompanySave(typedMeanwhile, sent);
+    expect(saved.draft.phone).toBe("+55 11 1");
+    expect(nextCompanyDraft(saved, stored({ name: "ACME Ltda ME" }))).toBe(
+      saved,
+    );
   });
 });

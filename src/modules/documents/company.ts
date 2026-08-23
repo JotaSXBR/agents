@@ -8,6 +8,7 @@ import {
   type CompanySettings,
   readCompanySettings,
   setCompanyLogoKey,
+  withCompanyLock,
 } from "@/modules/tenant-settings/service";
 
 // The tenant's letterhead logo: bytes on disk, file name in the settings block. Same split as
@@ -147,7 +148,6 @@ export async function setCompanyLogo(
   base: PrismaClient = basePrisma,
 ): Promise<CompanySettings> {
   if (ctx.tenantId === null) throw new AppError("tenant required", 400);
-  const tenantId = ctx.tenantId;
   const ext = LOGO_EXT_BY_TYPE[file.type];
   if (!ext) {
     throw new AppError(
@@ -180,11 +180,6 @@ export async function setCompanyLogo(
     );
   }
   const key = logoKeyFor(ctx.tenantId, ext);
-  // The key a DIFFERENT format was stored under. Replacing a PNG with a JPEG writes a new path and
-  // leaves the old one behind — referenced by nothing, kept forever, and carried into every backup.
-  const replaced = await runScopedOn(base, ctx, (db) =>
-    readCompanySettings(db, tenantId),
-  );
   // Bytes first, then the row: a crash between the two leaves an unreferenced file, which costs
   // disk. The other order leaves a row pointing at nothing, which costs every render after it.
   //
@@ -209,13 +204,17 @@ export async function setCompanyLogo(
   // transaction, so uploads serialise and a row that does not commit takes its bytes back with it.
   // The reader-facing swap is still a rename, so nobody ever sees a partial file.
   let hadPrevious = false;
+  // The block as it stood UNDER the lock, and whether the publish below actually ran. Both are read
+  // by the rollback: what to put back, and whether there is anything of ours to put back at all.
+  const published: { before: CompanySettings | null } = { before: null };
   try {
     const saved = await setCompanyLogoKey(
       ctx,
       key,
       base,
       Date.now(),
-      async () => {
+      async (current) => {
+        published.before = current;
         // COPIED aside, not moved. Renaming the live file away leaves the configured path EMPTY for
         // the length of the swap, and a preview or an issuance landing in that gap renders a document
         // with no letterhead at all — permanently, because the document it produces is frozen. A copy
@@ -236,10 +235,10 @@ export async function setCompanyLogo(
     );
     // AFTER the row commits: the old key is no longer referenced, so its file is disk nobody will
     // ever read again. Only when the FORMAT changed — a same-format replacement wrote over the one
-    // path, and removing it here would delete the letterhead that was just installed.
-    if (replaced.logoKey && replaced.logoKey !== key) {
-      await removeLogoFile(replaced.logoKey);
-    }
+    // path, and removing it here would delete the letterhead that was just installed. Read from
+    // under the lock, so it names the file this write actually superseded.
+    const previousKey = published.before?.logoKey;
+    if (previousKey && previousKey !== key) await removeLogoFile(previousKey);
     return saved;
   } catch (e) {
     // The transaction rolled back (the publish itself failed, or the row write did), so the file
@@ -247,8 +246,28 @@ export async function setCompanyLogo(
     // that is NO file: leaving the new one behind would keep an unreferenced letterhead on disk for
     // a row that never committed. (Round 24 folded two restore branches into one and dropped this
     // half with them.)
-    if (hadPrevious) await rename(previous, path).catch(() => undefined);
-    else await rm(path, { force: true });
+    //
+    // Under the lock again, and conditional, because this runs AFTER our transaction ended: an
+    // upload that was waiting on the lock can have published its own bytes and committed in
+    // between, and restoring over those would leave a committed logoKey/logoVersion describing the
+    // wrong image — or, in the no-previous branch, delete the letterhead that just won. The version
+    // is strictly increasing, so "unchanged" is the whole test. And when the publish never ran (a
+    // failure before it: the lock, the read) there is nothing of ours on disk to undo — the rm
+    // branch would then delete a live logo this request never touched.
+    //
+    // NO LOCAL FAILURE MEASURED for the lock itself: reaching the interleaving needs a second
+    // upload that takes the lock between our transaction ending and this one starting, and a
+    // single-process test cannot schedule that — removing the lock here leaves the suite green
+    // (measured). What IS covered is the decision it protects, as a table, plus the reachable half
+    // of it: a failure before anything is published leaves the live letterhead alone.
+    await withCompanyLock(ctx, base, async (current) => {
+      const action = logoRollbackAction(published.before, current, hadPrevious);
+      if (action === "restore") {
+        await rename(previous, path).catch(() => undefined);
+      } else if (action === "remove") {
+        await rm(path, { force: true });
+      }
+    }).catch(() => undefined);
     throw e;
   } finally {
     await rm(temp, { force: true });
@@ -272,6 +291,34 @@ export async function clearCompanyLogo(
   // taken after it — an operator asking for it to be gone means gone.
   await removeLogoFile(before.logoKey);
   return cleared;
+}
+
+// What a failed upload should do about the bytes it put on disk, decided against the block as it
+// stands under the lock — because by the time this runs, our own transaction is over.
+//
+// One question decides it: is the committed version still the one we published under?
+//
+//   none    — it is not. Either something else committed in between (restoring over that would
+//             leave the committed logoKey/logoVersion describing the wrong image, and the remove
+//             branch would delete the letterhead that just won), or the publish never ran at all —
+//             a failure in the lock or in the read that precedes it — in which case there is
+//             nothing of ours on disk and removing "the new file" would delete a live logo this
+//             request never touched, over a database hiccup. A never-published upload has no
+//             version, so the same comparison answers both; the null case needed its own clause
+//             only until this was written as a comparison, and mutation testing is what showed the
+//             clause was doing nothing.
+//   restore — it is, and we moved a letterhead aside, so it goes back.
+//   remove  — it is, and there was none: the file we wrote belongs to a row that never committed.
+//
+// logoVersion is strictly increasing (see setCompanyLogoKey), which is what makes "unchanged" a
+// usable test rather than a coincidence.
+export function logoRollbackAction(
+  before: CompanySettings | null,
+  current: CompanySettings,
+  hadPrevious: boolean,
+): "restore" | "remove" | "none" {
+  if (current.logoVersion !== before?.logoVersion) return "none";
+  return hadPrevious ? "restore" : "remove";
 }
 
 // The file a key names, if it names one. Best-effort by design: the row no longer references it, so

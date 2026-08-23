@@ -306,6 +306,25 @@ export async function updateCompanySettings(
 
 // Written only by the logo upload/clear path, after the bytes are on disk (or gone from it). The
 // version moves with every write, including a replacement that lands on the same key.
+// Run work under the same per-tenant lock the writers take, with the current company block in hand.
+//
+// For COMPENSATIONS. A rollback runs after its own transaction is over, so by the time it executes
+// the lock is gone and the state it means to undo may no longer be the state on disk: a second
+// upload can have taken the lock, published its own bytes and committed. Restoring blindly then
+// overwrites a file the committed row does point at. Under this lock, the rollback can ask whether
+// it is still undoing its own write before it undoes anything.
+export async function withCompanyLock<T>(
+  ctx: TenantContext,
+  base: PrismaClient,
+  fn: (current: CompanySettings) => Promise<T>,
+): Promise<T> {
+  const tenantId = requireTenantId(ctx);
+  return runScopedOn(base, ctx, async (db) => {
+    await db.$queryRaw`SELECT 1 FROM "tenants" WHERE "id" = ${tenantId} FOR UPDATE`;
+    return fn(await readCompanySettings(db, tenantId));
+  });
+}
+
 export async function setCompanyLogoKey(
   ctx: TenantContext,
   logoKey: string | null,
@@ -314,11 +333,13 @@ export async function setCompanyLogoKey(
   // Runs INSIDE the per-tenant lock, before the row is written: the logo upload puts its bytes in
   // place here so the file and the version that describes it cannot be interleaved by a second
   // upload. Throwing from it aborts the write, which is what leaves the previous letterhead intact.
-  publish?: () => Promise<void>,
+  // It is handed the block as it stands under the lock — the only reading of it that is not already
+  // stale, and the one a rollback has to compare against.
+  publish?: (current: CompanySettings) => Promise<void>,
 ): Promise<CompanySettings> {
   return patchBlock(ctx, base, "company", async (raw) => {
-    await publish?.();
     const current = parseCompanySettings(raw);
+    await publish?.(current);
     return companySettingsSchema.parse({
       ...current,
       logoKey,

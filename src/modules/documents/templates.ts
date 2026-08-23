@@ -340,6 +340,25 @@ export async function getDocumentTemplate(
   return toDto(row);
 }
 
+// The stored row as it IS, not as this version reads it. The preview needs this: `toDto` drops a
+// block a newer build wrote, and a preview built on that promises a save the apply will refuse.
+async function rawTemplateRow(
+  ctx: TenantContext,
+  id: bigint,
+  base: PrismaClient,
+): Promise<Row> {
+  const row = await runScopedOn(base, ctx, (db) =>
+    db.documentTemplate.findUnique({ where: { id }, select: SELECT }),
+  );
+  if (!row) {
+    throw new NotFoundError(
+      "document template not found",
+      "errors.documentTemplateNotFound",
+    );
+  }
+  return row;
+}
+
 export async function createDocumentTemplate(
   ctx: TenantContext,
   input: DocumentTemplateInput,
@@ -466,6 +485,119 @@ function applyBlockText(
   });
 }
 
+// What this patch would make the template's content BE, validated exactly once.
+//
+// Shared by the apply and by the preview that promises what the apply will do, because they were
+// answering the same question from different sources and disagreeing: the preview read the parsed
+// DTO, where a block a NEWER build wrote has already been dropped, so a style-only dry run rendered
+// happily and the apply then refused the very same patch as unreadable. A dry run that approves a
+// write which cannot be performed is worse than no dry run.
+//
+// `stored` is null when there is nothing saved yet — a create, or a preview of one.
+export function patchedContent(
+  stored: {
+    blocks?: unknown;
+    fields?: unknown;
+    style?: unknown;
+  } | null,
+  patch: {
+    blocks?: unknown;
+    fields?: unknown;
+    style?: unknown;
+    blockText?: Record<string, string>;
+  },
+): {
+  content: {
+    blocks: DocumentBlock[];
+    fields: DocumentField[];
+    style: DocumentStyle;
+  };
+  blocks: unknown[];
+  fields: unknown[];
+  rawStyle: Record<string, unknown>;
+} {
+  // The RAW stored columns are the base, not the parsed DTO. `toDto` reads tolerantly — it drops a
+  // property this version does not know, and falls back to empty arrays when a row does not parse
+  // at all — and writing that reading back would make an ordinary console save (which always sends
+  // style and blockText) permanently delete layout a newer build wrote. Storage is tolerant on the
+  // way OUT precisely so it survives; writing the parsed view back is how that guarantee is lost.
+  const rawBlocks = (patch.blocks ?? stored?.blocks ?? []) as unknown[];
+  const blocks = patch.blockText
+    ? applyBlockText(rawBlocks, patch.blockText)
+    : rawBlocks;
+  const rawFields = (patch.fields ?? stored?.fields ?? []) as unknown[];
+  // `blockText` does NOT make the blocks caller-authored: it writes strings into blocks that were
+  // already there and can introduce no property of its own. Counting it here is what would make a
+  // console save trip over a property a newer build wrote — the very save this is protecting.
+  const authored = {
+    blocks: patch.blocks !== undefined,
+    fields: patch.fields !== undefined,
+    // The caller's style is checked strictly on its OWN, just below, because the value VALIDATED
+    // here is the patch merged over the stored style — which carries whatever a newer build put
+    // there, and which the caller did not write.
+    style: false,
+  };
+  if (patch.style !== undefined) {
+    const problem = authoredStyleProblem(patch.style);
+    if (problem) {
+      throw new AppError(problem, 400, "errors.invalidDocumentTemplate");
+    }
+  }
+  // MERGED BEFORE validation, not after. A partial patch like {font:"mono"} validated on its own
+  // makes parseDocumentStyle fill every omitted property with a DEFAULT, and spreading that result
+  // over the stored style then resets the operator's colour, margin, locale, currency and page
+  // numbers — an edit to one setting silently rewriting the other eight. Merging first means the
+  // parse sees the style the template actually has.
+  const rawStyle = (stored?.style ?? {}) as Record<string, unknown>;
+  const mergedStyle =
+    patch.style !== undefined
+      ? { ...rawStyle, ...(patch.style as Record<string, unknown>) }
+      : rawStyle;
+  let content: ReturnType<typeof validated>;
+  try {
+    // Strict only where the CALLER wrote. A half that came out of storage belongs to whoever
+    // wrote it, and refusing this save because that half carries a property we do not know would
+    // make every save of such a template impossible.
+    content = validated({
+      blocks,
+      fields: rawFields,
+      style: mergedStyle,
+      authored,
+    });
+  } catch (e) {
+    // A stored block this version cannot read at all (an unknown TYPE, not just an unknown
+    // property) fails the shared parse, and there is no safe way to save around it: writing what
+    // parsed would drop it. Refusing keeps it, and says why — the generic "invalid discriminator"
+    // reads like the operator's own edit is at fault when they only changed a word.
+    //
+    // Conditioned on the STORED content actually being unreadable: without that test, any failure
+    // on a wording-only or style-only patch — including one caused by what the caller just sent —
+    // was reported as a newer version's doing, pointing them at the wrong remedy while the dry run
+    // answered correctly.
+    const storedUnreadable =
+      stored !== null &&
+      !parseTemplateContent(
+        stored.blocks ?? [],
+        stored.fields ?? [],
+        stored.style,
+      ).ok;
+    if (
+      e instanceof AppError &&
+      storedUnreadable &&
+      !authored.blocks &&
+      !authored.fields
+    ) {
+      throw new AppError(
+        `this template contains content a newer version wrote and this one cannot read, so saving from here would drop it (${e.message}) — edit it from the client that wrote it, or send blocks explicitly to replace them.`,
+        409,
+        "errors.documentTemplateUnreadable",
+      );
+    }
+    throw e;
+  }
+  return { content, blocks, fields: rawFields, rawStyle };
+}
+
 // The body of the patch, run inside the caller's lock. Split out so the transaction above reads as
 // what it is — read, decide, write, once — rather than as a wall of field handling.
 async function patched(
@@ -506,83 +638,12 @@ async function patched(
     patch.fields !== undefined ||
     patch.style !== undefined
   ) {
-    // The RAW stored columns are the base, not the parsed DTO. `toDto` reads tolerantly — it drops a
-    // property this version does not know, and falls back to empty arrays when a row does not parse
-    // at all — and writing that reading back would make an ordinary console save (which always sends
-    // style and blockText) permanently delete layout a newer build wrote. Storage is tolerant on the
-    // way OUT precisely so it survives; writing the parsed view back is how that guarantee is lost.
-    const rawBlocks = (patch.blocks ?? stored.blocks ?? []) as unknown[];
-    const blocks = patch.blockText
-      ? applyBlockText(rawBlocks, patch.blockText)
-      : rawBlocks;
-    const rawFields = (patch.fields ?? stored.fields ?? []) as unknown[];
-    // `blockText` does NOT make the blocks caller-authored: it writes strings into blocks that were
-    // already there and can introduce no property of its own. Counting it here is what would make a
-    // console save trip over a property a newer build wrote — the very save this is protecting.
-    const authored = {
-      blocks: patch.blocks !== undefined,
-      fields: patch.fields !== undefined,
-      // The caller's style is checked strictly on its OWN, just below, because the value VALIDATED
-      // here is the patch merged over the stored style — which carries whatever a newer build put
-      // there, and which the caller did not write.
-      style: false,
-    };
-    if (patch.style !== undefined) {
-      const problem = authoredStyleProblem(patch.style);
-      if (problem) {
-        throw new AppError(problem, 400, "errors.invalidDocumentTemplate");
-      }
-    }
-    // MERGED BEFORE validation, not after. A partial patch like {font:"mono"} validated on its own
-    // makes parseDocumentStyle fill every omitted property with a DEFAULT, and spreading that result
-    // over the stored style then resets the operator's colour, margin, locale, currency and page
-    // numbers — an edit to one setting silently rewriting the other eight. Merging first means the
-    // parse sees the style the template actually has.
-    const rawStyle = (stored.style ?? {}) as Record<string, unknown>;
-    const mergedStyle =
-      patch.style !== undefined
-        ? { ...rawStyle, ...(patch.style as Record<string, unknown>) }
-        : rawStyle;
-    let content: ReturnType<typeof validated>;
-    try {
-      // Strict only where the CALLER wrote. A half that came out of storage belongs to whoever
-      // wrote it, and refusing this save because that half carries a property we do not know would
-      // make every save of such a template impossible.
-      content = validated({
-        blocks,
-        fields: rawFields,
-        style: mergedStyle,
-        authored,
-      });
-    } catch (e) {
-      // A stored block this version cannot read at all (an unknown TYPE, not just an unknown
-      // property) fails the shared parse, and there is no safe way to save around it: writing what
-      // parsed would drop it. Refusing keeps it, and says why — the generic "invalid discriminator"
-      // reads like the operator's own edit is at fault when they only changed a word.
-      //
-      // Conditioned on the STORED content actually being unreadable: without that test, any failure
-      // on a wording-only or style-only patch — including one caused by what the caller just sent —
-      // was reported as a newer version's doing, pointing them at the wrong remedy while the dry run
-      // answered correctly.
-      const storedUnreadable = !parseTemplateContent(
-        stored.blocks ?? [],
-        stored.fields ?? [],
-        stored.style,
-      ).ok;
-      if (
-        e instanceof AppError &&
-        storedUnreadable &&
-        !authored.blocks &&
-        !authored.fields
-      ) {
-        throw new AppError(
-          `this template contains content a newer version wrote and this one cannot read, so saving from here would drop it (${e.message}) — edit it from the client that wrote it, or send blocks explicitly to replace them.`,
-          409,
-          "errors.documentTemplateUnreadable",
-        );
-      }
-      throw e;
-    }
+    const {
+      content,
+      blocks,
+      fields: rawFields,
+      rawStyle,
+    } = patchedContent(stored, patch);
     // Written back RAW, so anything this version does not understand survives the save. Each column
     // is written only when the patch actually addressed it.
     if (patch.blocks !== undefined || patch.blockText !== undefined) {
@@ -710,9 +771,10 @@ export async function previewDocumentTemplate(
   input: PreviewInput,
   base: PrismaClient = basePrisma,
 ): Promise<Buffer> {
-  const saved = input.id
-    ? await getDocumentTemplate(ctx, input.id, base)
-    : null;
+  // The RAW row, not the DTO: a preview built on the tolerant reading renders a template whose
+  // unreadable half has already been dropped, and then says "this would work" about a patch the
+  // apply refuses. Same source, same answer.
+  const saved = input.id ? await rawTemplateRow(ctx, input.id, base) : null;
   // The same metadata gate a write passes. Without it a preview renders a prefix the create would
   // refuse — preview and apply disagreeing again — and feeds an unbounded string into a PDF built on
   // the request thread.
@@ -725,21 +787,13 @@ export async function previewDocumentTemplate(
   if (metadata) {
     throw new AppError(metadata, 400, "errors.invalidDocumentTemplate");
   }
-  const previewBlocks = (input.blocks ??
-    saved?.blocks ??
-    []) as DocumentBlock[];
-  const content = validated({
-    blocks: input.blockText
-      ? applyBlockText(previewBlocks, input.blockText)
-      : previewBlocks,
-    fields: input.fields ?? saved?.fields ?? [],
-    // MERGED over the saved style, the way the patch merges it — a preview whose style semantics
-    // differ from the write's shows a PDF the apply will not produce. Previewing a style that omits
-    // the saved footerText rendered without the footer, while saving the same patch kept it.
-    style:
-      input.style !== undefined && saved
-        ? { ...(saved.style as Record<string, unknown>), ...input.style }
-        : (input.style ?? saved?.style),
+  // The same statement the apply runs, from the same source: strictness on the halves the caller
+  // wrote, the style merged over the stored one, and the stored halves read as they are.
+  const { content } = patchedContent(saved, {
+    ...(input.blocks !== undefined ? { blocks: input.blocks } : {}),
+    ...(input.fields !== undefined ? { fields: input.fields } : {}),
+    ...(input.style !== undefined ? { style: input.style } : {}),
+    ...(input.blockText ? { blockText: input.blockText } : {}),
   });
   const style = content.style;
   const now = input.now ?? new Date();

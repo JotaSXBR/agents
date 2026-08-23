@@ -51,6 +51,22 @@ export function emptyCompanyForm(): CompanyDraftState {
   return { draft: blankCompanyDraft(), seededFrom: blankCompanyDraft() };
 }
 
+// What the form holds once a save succeeds: the same text, now baselined on what was SENT.
+//
+// Without this the form is permanently "typed in" after its first save — the text matches what the
+// server stores and the baseline still holds what it stored before — so it stops adopting anything
+// ever again, and a later Save overwrites whatever another writer put there in the meantime.
+//
+// The draft is deliberately NOT replaced by the echo: the operator can keep typing while the
+// request is in flight, and the echo carries what we sent, not what they have now. Keystrokes made
+// during the request stay, and stay marked as unsaved.
+export function afterCompanySave(
+  current: CompanyDraftState,
+  sent: CompanyDraft,
+): CompanyDraftState {
+  return { ...current, seededFrom: sent };
+}
+
 // What the form becomes when a `company` arrives: the operator's unsaved text if there is any,
 // otherwise the server's copy — which is how a change made elsewhere (another tab, REST, MCP)
 // reaches a form nobody is editing.
