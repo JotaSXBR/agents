@@ -16,6 +16,7 @@ import {
   deleteDocumentTemplate,
   getDocumentTemplate,
   previewDocumentTemplate,
+  SLUG_MAX,
   updateDocumentTemplate,
 } from "@/modules/documents/templates";
 import {
@@ -989,5 +990,91 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
         appDb,
       ),
     ).rejects.toThrow(/not a text block/);
+  });
+
+  // The date a document carries is the day in the AGENT's zone, not in UTC. A quote issued at 22:00
+  // in São Paulo is 01:00 UTC the next day, so slicing the instant hands the customer a document
+  // dated tomorrow — on paper, with a number on it. Frozen at issuance so a re-render cannot drift.
+  test("dates the document by the issuing timezone, not by UTC", async () => {
+    const at = new Date("2026-09-06T01:30:00.000Z"); // 22:30 on the 5th in São Paulo
+    const doc = await issueDocument({
+      tenantId: tenantA,
+      templateId,
+      idempotencyKey: `tz-${process.pid}`,
+      values: VALUES,
+      now: at,
+      timezone: "America/Sao_Paulo",
+      base: appDb,
+      storageDir: DIR,
+    });
+    const row = await suDb.issuedDocument.findUnique({
+      where: { id: BigInt(doc.id) },
+      select: { snapshot: true },
+    });
+    const snapshot = row?.snapshot as { issuedAt: string; issuedDate: string };
+    expect(snapshot.issuedDate).toBe("2026-09-05");
+    // The instant itself is unchanged — it is the DAY that is resolved, not the timestamp.
+    expect(snapshot.issuedAt).toBe("2026-09-06T01:30:00.000Z");
+
+    // And a tenant east of UTC lands on the other side of the same instant.
+    const tokyo = await issueDocument({
+      tenantId: tenantA,
+      templateId,
+      idempotencyKey: `tz-tokyo-${process.pid}`,
+      values: VALUES,
+      now: new Date("2026-09-05T22:30:00.000Z"), // 07:30 on the 6th in Tokyo
+      timezone: "Asia/Tokyo",
+      base: appDb,
+      storageDir: DIR,
+    });
+    const tokyoRow = await suDb.issuedDocument.findUnique({
+      where: { id: BigInt(tokyo.id) },
+      select: { snapshot: true },
+    });
+    const tokyoSnapshot = tokyoRow?.snapshot as
+      | { issuedDate: string }
+      | undefined;
+    expect(tokyoSnapshot?.issuedDate).toBe("2026-09-06");
+  });
+
+  // Both bounds live at the SERVICE, not on the REST schema, because MCP and an imported bundle do
+  // not pass through it. The slug becomes `send_<slug>`, and a provider rejects the whole request
+  // over a tool name past its cap — the agent stops replying. The description is appended verbatim
+  // to that tool's model-facing description on every turn.
+  test("bounds the slug and the description for every transport", async () => {
+    await expect(
+      createDocumentTemplate(
+        ctx(tenantA),
+        {
+          name: "Longo",
+          slug: "a".repeat(SLUG_MAX + 1),
+          blocks: [],
+          fields: [],
+        },
+        appDb,
+      ),
+    ).rejects.toThrow(new RegExp(String(SLUG_MAX)));
+    await expect(
+      createDocumentTemplate(
+        ctx(tenantA),
+        {
+          name: "Descritivo",
+          slug: "descritivo",
+          description: "x".repeat(2_001),
+          blocks: [],
+          fields: [],
+        },
+        appDb,
+      ),
+    ).rejects.toThrow(/2000/);
+    // …and on the patch, which is the half an operator reaches by pasting.
+    await expect(
+      updateDocumentTemplate(
+        ctx(tenantA),
+        templateId,
+        { description: "x".repeat(2_001) },
+        appDb,
+      ),
+    ).rejects.toThrow(/2000/);
   });
 });

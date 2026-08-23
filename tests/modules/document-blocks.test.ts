@@ -7,6 +7,7 @@ import {
   MAX_LINE_ITEMS,
   parseDocumentStyle,
 } from "@/modules/documents/blocks";
+import { printedDate } from "@/modules/documents/issue";
 import {
   parseAuthoredTemplate,
   parseDocumentValues,
@@ -522,5 +523,27 @@ describe("documentAuthoringSchema", () => {
     expect(open).toEqual([]);
     // …and it does reach inside a block, not just the top of one.
     expect(JSON.stringify(schema.blocks)).toContain("additionalProperties");
+  });
+});
+
+// Which day a document PRINTS. Two fields can answer, and only one of them is right for a customer
+// east or west of UTC — the mistake is invisible in the bytes, so it is pinned here.
+describe("printedDate", () => {
+  test("prints the frozen day, not the UTC slice of the instant", () => {
+    expect(
+      printedDate({
+        // 22:30 on the 5th in São Paulo, which is the 6th in UTC.
+        issuedAt: "2026-09-06T01:30:00.000Z",
+        issuedDate: "2026-09-05",
+      }),
+    ).toBe("2026-09-05");
+  });
+
+  // A row written before the frozen day existed was rendered from the slice; re-rendering it must
+  // not silently move its date.
+  test("falls back to the instant's day only when nothing was frozen", () => {
+    expect(printedDate({ issuedAt: "2026-09-06T01:30:00.000Z" })).toBe(
+      "2026-09-06",
+    );
   });
 });

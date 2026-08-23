@@ -36,6 +36,7 @@
     "invalidCredentials": "Email ou senha inválidos",
     "invalidDocumentSlug": "Este identificador não é válido",
     "invalidDocumentTemplate": "Este modelo de documento não é válido",
+    "invalidDocumentTemplateDescription": "A descrição do modelo de documento é longa demais",
     "invalidDocumentTemplateName": "O nome do modelo de documento deve ter entre 1 e 120 caracteres",
     "invalidDocumentValues": "Os valores não correspondem ao que este modelo declara",
     "invalidPassword": "Senha incorreta",

@@ -52,9 +52,18 @@ export function documentToolName(slug: string): string {
 // A slug whose tool name would collide with a native tool is refused HERE, when it is written,
 // because the collision only shows up later as an agent that has two tools with one name and no way
 // for the operator to tell which one the model called.
+// The REST schema caps this at 40, but MCP and an imported bundle do not go through it, and the slug
+// becomes a TOOL NAME: providers cap a function name (OpenAI at 64), and a name over the cap is
+// rejected with the whole request — the agent stops replying, for one template nobody thought was
+// dangerous. The bound belongs where every transport passes.
+export const SLUG_MAX = 40;
+
 export function slugProblem(slug: string): string | null {
   if (!/^[a-z][a-z0-9_]*$/.test(slug)) {
     return "the slug must start with a letter and contain only lowercase letters, digits and underscores";
+  }
+  if (slug.length > SLUG_MAX) {
+    return `the slug must be at most ${SLUG_MAX} characters (it becomes the tool name send_${"<slug>"}, and providers cap a tool name)`;
   }
   if (
     (NATIVE_TOOL_NAMES as readonly string[]).includes(documentToolName(slug))
@@ -200,11 +209,27 @@ export interface DocumentTemplateInput {
 }
 
 export const templateNameSchema = z.string().trim().min(1).max(120);
+// Appended VERBATIM to the model-facing tool description, on every turn of every agent granted the
+// template. Unbounded, one accidental paste makes every one of those turns carry it — the same
+// ceiling HTTP tool descriptions are already held to, and for the same reason.
+export const templateDescriptionSchema = z.string().max(2_000).nullable();
 
 // Both writes name a template, and a raw `.parse` here is not a validation response: nothing maps a
 // ZodError, so it reaches the fallback handler as an INTERNAL_SERVER_ERROR and an operator who left
 // the name empty is told the server broke. The create route in particular CANNOT require the name at
 // the transport — the body schema is shared with the patch — so this is where the answer is decided.
+function parseTemplateDescription(value: unknown): string | null {
+  const parsed = templateDescriptionSchema.safeParse(value ?? null);
+  if (!parsed.success) {
+    throw new AppError(
+      "description: must be at most 2000 characters.",
+      400,
+      "errors.invalidDocumentTemplateDescription",
+    );
+  }
+  return parsed.data;
+}
+
 function parseTemplateName(value: unknown): string {
   const parsed = templateNameSchema.safeParse(value);
   if (!parsed.success) {
@@ -290,7 +315,7 @@ export async function createDocumentTemplate(
           tenantId,
           name,
           slug,
-          description: input.description ?? null,
+          description: parseTemplateDescription(input.description ?? null),
           blocks: content.blocks as unknown as Prisma.InputJsonValue,
           fields: content.fields as unknown as Prisma.InputJsonValue,
           style: style as unknown as Prisma.InputJsonValue,
@@ -387,7 +412,9 @@ async function patched(
     }
     data.slug = patch.slug;
   }
-  if (patch.description !== undefined) data.description = patch.description;
+  if (patch.description !== undefined) {
+    data.description = parseTemplateDescription(patch.description);
+  }
   if (patch.numberPrefix !== undefined) data.numberPrefix = patch.numberPrefix;
   if (patch.enabled !== undefined) data.enabled = patch.enabled;
   // NOTE: blocks, fields and style are validated TOGETHER even when only one was sent, because the

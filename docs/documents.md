@@ -140,6 +140,11 @@ values, so an agent asked to send the same quote again lands on the row the oper
 retry path refuses it (409) rather than handing back the stored bytes, which is the answer the
 download route already gives, decided at a different stage.
 
+The **date is resolved in the issuing agent's timezone** and frozen with the snapshot. Slicing the
+calendar day off the UTC instant is wrong for every tenant that is not on UTC: a document issued at
+22:00 in São Paulo is 01:00 UTC the next day, and the customer would receive a quote dated tomorrow.
+The REST route, which has no agent, falls back to the fleet default zone.
+
 The template's **number prefix is frozen onto the issued row**, not joined when the number is
 printed. The number is how a document identifies itself to the customer holding it: renaming the
 template's prefix must not rewrite numbers already in circulation, and deleting the template (which

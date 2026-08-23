@@ -36,6 +36,7 @@
     "invalidCredentials": "Invalid email or password",
     "invalidDocumentSlug": "This identifier is not valid",
     "invalidDocumentTemplate": "This document template is not valid",
+    "invalidDocumentTemplateDescription": "The document template description is too long",
     "invalidDocumentTemplateName": "The document template name must be between 1 and 120 characters",
     "invalidDocumentValues": "The values do not match what this template declares",
     "invalidPassword": "Incorrect password",

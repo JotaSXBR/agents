@@ -1138,6 +1138,9 @@ export async function buildToolset(
       conversationDbId: cfg.conversationDbId,
       base: ctx.base,
       storageDir: ctx.documentsStorageDir,
+      // The same zone the agent tells the time in, so a document's date and a message saying "hoje"
+      // cannot disagree by a day.
+      timezone: cfg.timezone,
       toolInstructions,
     }),
     ...buildHttpTools(cfg.httpToolDefs, {

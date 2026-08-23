@@ -35,6 +35,10 @@ export interface DocumentToolDeps {
   conversationDbId?: bigint | null;
   base?: PrismaClient;
   storageDir?: string;
+  // The agent's own IANA zone (from its business hours). It decides the calendar day the document is
+  // DATED — a document issued at 22:00 in São Paulo is 01:00 UTC the next day, and the customer must
+  // not receive a quote dated tomorrow.
+  timezone?: string;
   toolInstructions?: Record<string, string>;
 }
 
@@ -180,6 +184,7 @@ export function buildDocumentTools(
             withBytes: true,
             base: deps.base,
             storageDir: deps.storageDir,
+            timezone: deps.timezone,
           });
           if (!issued.bytes) {
             return toolFailure(

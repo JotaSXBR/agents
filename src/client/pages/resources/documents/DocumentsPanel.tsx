@@ -172,7 +172,12 @@ export function DocumentsPanel() {
   // it after the await spends the browser's transient user activation on a fetch, and the popup
   // blocker then swallows the call: the button downloads the bytes and appears to do nothing.
   async function openPdf(doc: IssuedDocument) {
-    const tab = window.open("", "_blank", "noopener");
+    // No `noopener` FEATURE here: by spec it makes window.open return null, which would leave a real
+    // blank tab open with no handle to point at the blob — and the fallback would then navigate the
+    // console itself away while that tab sat there empty. The handle is kept and `opener` is severed
+    // on it instead, which is the same protection without losing the tab.
+    const tab = window.open("", "_blank");
+    if (tab) tab.opener = null;
     const res = await mediaFetch(`/api/v1/documents/${doc.id}/pdf`);
     if (!res.ok) {
       tab?.close();
@@ -186,8 +191,8 @@ export function DocumentsPanel() {
     if (tab) {
       tab.location.href = url;
     } else {
-      // Blocked anyway (a browser that refuses even the synchronous open). Falling back to a
-      // same-tab navigation is better than a button that silently does nothing.
+      // The popup blocker refused even the synchronous open. Navigating this tab is better than a
+      // button that silently does nothing.
       window.location.href = url;
     }
     // The tab has the bytes by the time it paints; holding the handle any longer leaks it for as

@@ -1,6 +1,7 @@
 import { Prisma, type PrismaClient } from "@/../generated/prisma/client";
 import basePrisma from "@/api/lib/prisma";
 import config from "@/config";
+import { DEFAULT_TIMEZONE, partsInTimezone } from "@/graph/time";
 import { AppError, NotFoundError } from "@/lib/errors";
 import { runScopedOn, type ScopedDb, type TenantContext } from "@/lib/tenancy";
 import type { CompanySettings } from "@/modules/tenant-settings/service";
@@ -38,6 +39,11 @@ export interface DocumentSnapshot {
   company: CompanySettings;
   values: DocumentValues;
   issuedAt: string;
+  // The calendar day the document is DATED, resolved in the issuing agent's timezone and frozen
+  // here. Slicing the UTC day off `issuedAt` is wrong for every tenant that is not on UTC: a
+  // document issued at 22:00 in São Paulo is 01:00 UTC the next day, so the customer receives a
+  // quote dated tomorrow. Frozen rather than recomputed so a re-render cannot drift from it.
+  issuedDate?: string;
 }
 
 export interface IssueDocumentParams {
@@ -54,6 +60,9 @@ export interface IssueDocumentParams {
   base?: PrismaClient;
   storageDir?: string;
   now?: Date;
+  // IANA zone the document's DATE is resolved in — the issuing agent's, from its business hours.
+  // The REST route has no agent, so it falls back to the fleet default.
+  timezone?: string;
 }
 
 export interface IssuedDocumentResult {
@@ -63,6 +72,24 @@ export interface IssuedDocumentResult {
   status: string;
   fileName: string;
   bytes?: ArrayBuffer;
+}
+
+// Which day a stored document is DATED. The frozen one, never a slice of the instant:
+// `issuedAt.slice(0, 10)` is the UTC calendar day, a day ahead of the customer's for every evening
+// issuance east of UTC-0. The slice survives only as the fallback for a row written before the
+// frozen day existed — that row was rendered with exactly that answer, so re-rendering it must not
+// silently move its date.
+export function printedDate(snapshot: {
+  issuedAt: string;
+  issuedDate?: string;
+}): string {
+  return snapshot.issuedDate ?? snapshot.issuedAt.slice(0, 10);
+}
+
+// The calendar day at an instant, in one zone, as YYYY-MM-DD.
+export function calendarDay(at: Date, timezone: string): string {
+  const parts = partsInTimezone(at, timezone);
+  return `${parts.YYYY}-${parts.MM}-${parts.DD}`;
 }
 
 function sysCtx(tenantId: bigint): TenantContext {
@@ -173,6 +200,7 @@ export async function issueDocument(
     company,
     values: parsedValues.values,
     issuedAt: now.toISOString(),
+    issuedDate: calendarDay(now, params.timezone ?? DEFAULT_TIMEZONE),
   };
 
   // `create` rather than `createMany({ skipDuplicates })` because the counter must be bumped exactly
@@ -348,7 +376,7 @@ async function finish(
     logo,
     meta: {
       number: numberLabel,
-      date: formatDate(stored.issuedAt.slice(0, 10), style.locale),
+      date: formatDate(printedDate(stored), style.locale),
       title: row.title,
     },
   });
