@@ -595,9 +595,14 @@ export async function listIssuedDocuments(
   const take = Math.min(Math.max(opts.limit ?? 50, 1), 200);
   const rows = await runScopedOn(base, ctx, (db) =>
     db.issuedDocument.findMany({
+      // `!== undefined`, not truthiness: a caller filtering by template 0 or by the empty thread key
+      // would otherwise have its filter dropped and receive the tenant's whole recent list — the
+      // widest possible answer to the narrowest possible question.
       where: {
-        ...(opts.templateId ? { templateId: opts.templateId } : {}),
-        ...(opts.threadId ? { threadId: opts.threadId } : {}),
+        ...(opts.templateId !== undefined
+          ? { templateId: opts.templateId }
+          : {}),
+        ...(opts.threadId !== undefined ? { threadId: opts.threadId } : {}),
       },
       orderBy: { id: "desc" },
       take,

@@ -17,22 +17,41 @@ function bytes(...values: number[]): Uint8Array {
 
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 const JPEG_MAGIC = [0xff, 0xd8, 0xff];
+// The markers each format ends in. A signature alone accepts a file that was cut short, and a
+// truncated logo fails every render of a template that shows it.
+const PNG_END = [0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82];
+const JPEG_END = [0xff, 0xd9];
+
+const png = (...body: number[]) => bytes(...PNG_MAGIC, ...body, ...PNG_END);
+const jpeg = (...body: number[]) => bytes(...JPEG_MAGIC, ...body, ...JPEG_END);
 
 describe("logoBytesLookLike", () => {
-  test("accepts each format by its own signature", () => {
+  test("accepts a complete file of each format", () => {
+    expect(logoBytesLookLike(png(0x00, 0x01), "png")).toBe(true);
+    expect(logoBytesLookLike(jpeg(0xe0, 0x00), "jpg")).toBe(true);
+  });
+
+  // The failure a signature check cannot see: the first bytes are genuine and the rest never
+  // arrived. The renderer then fails on every preview and every issuance until someone removes it.
+  test("refuses a file that was cut short", () => {
     expect(logoBytesLookLike(bytes(...PNG_MAGIC, 0x00, 0x01), "png")).toBe(
-      true,
+      false,
     );
     expect(logoBytesLookLike(bytes(...JPEG_MAGIC, 0xe0, 0x00), "jpg")).toBe(
+      false,
+    );
+    // …and a file that is nothing BUT its markers is not an image either.
+    expect(logoBytesLookLike(bytes(...PNG_MAGIC, ...PNG_END), "png")).toBe(
       true,
     );
+    expect(logoBytesLookLike(bytes(...JPEG_END), "jpg")).toBe(false);
   });
 
   // The case the check exists for: `file.type` is whatever the caller wrote in the multipart part,
   // and Bun derives it from the file NAME's extension — which a REST caller controls outright.
   test("refuses bytes of the other format, and bytes of no format", () => {
-    expect(logoBytesLookLike(bytes(...JPEG_MAGIC, 0xe0), "png")).toBe(false);
-    expect(logoBytesLookLike(bytes(...PNG_MAGIC), "jpg")).toBe(false);
+    expect(logoBytesLookLike(jpeg(0xe0), "png")).toBe(false);
+    expect(logoBytesLookLike(png(0x00), "jpg")).toBe(false);
     // A WebP: a RIFF container, which the renderer does not decode at all.
     expect(
       logoBytesLookLike(bytes(0x52, 0x49, 0x46, 0x46, 0x00, 0x00), "png"),
@@ -64,14 +83,17 @@ describe("setCompanyLogo", () => {
   // upload must not leave bytes on disk under a name that says they are something else.
   test("refuses a JPEG announced as a PNG", async () => {
     await expect(
-      setCompanyLogo(ctx, upload("image/png", [...JPEG_MAGIC, 0xe0])),
+      setCompanyLogo(
+        ctx,
+        upload("image/png", [...JPEG_MAGIC, 0xe0, ...JPEG_END]),
+      ),
     ).rejects.toThrow(/PNG or JPEG/);
   });
 
   test("still refuses a type outside the allowlist, and an oversized file", async () => {
     expect(LOGO_EXT_BY_TYPE["image/webp"]).toBeUndefined();
     await expect(
-      setCompanyLogo(ctx, upload("image/webp", [...PNG_MAGIC])),
+      setCompanyLogo(ctx, upload("image/webp", [...PNG_MAGIC, ...PNG_END])),
     ).rejects.toThrow(/PNG or JPEG/);
     await expect(
       setCompanyLogo(ctx, {

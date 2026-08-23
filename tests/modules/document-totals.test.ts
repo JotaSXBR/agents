@@ -118,6 +118,64 @@ describe("format", () => {
 // customer holding three numbers that do not agree. This is the exact failure the module's header
 // names, one level below where it was being checked.
 describe("what is printed is what is computed", () => {
+  // The case the naive `Math.round(v * 100)` gets wrong, and the reason the rounding is done through
+  // the decimal representation: the multiplication is binary, so 1.005 * 100 is 100.49999999999999
+  // and rounds DOWN — while the renderer prints R$ 1,01. The document would contradict itself.
+  test("rounds the way the renderer rounds, ties included", () => {
+    const money = (v: number) =>
+      new Intl.NumberFormat("pt-BR", {
+        style: "currency",
+        currency: "BRL",
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }).format(v);
+    for (const unitPrice of [1.005, 2.675, 1.115, 0.615, 1.1 * 1.15]) {
+      const total = lineTotal({ description: "x", quantity: 1, unitPrice });
+      expect(money(total)).toBe(money(unitPrice));
+    }
+  });
+
+  // Every intermediate stays a whole number of cents. `1.01 * 100` is 101.00000000000001, and a
+  // fraction here would travel through the sums and back out as a total that is not a cent amount.
+  test("keeps the arithmetic on whole cents", () => {
+    const items = [
+      { description: "a", quantity: 3, unitPrice: 1.005 },
+      { description: "b", quantity: 7, unitPrice: 2.675 },
+    ];
+    // Compared with a tolerance, not with Number.isInteger: 3.03 is a whole number of cents and
+    // `3.03 * 100` is still 302.99999999999994, which says something about the multiplication in the
+    // assertion rather than about the value being asserted.
+    for (const item of items) {
+      const v = lineTotal(item);
+      expect(Math.abs(v * 100 - Math.round(v * 100))).toBeLessThan(1e-6);
+    }
+    // And exactly, not nearly. `0.07 * 100` is 7.000000000000001, so a cents() that MULTIPLIES
+    // instead of shifting through the decimal hands back 0.07000000000000002 — a number that is not
+    // an amount of money, and that every later sum carries. (0.07, 0.14, 0.28, 0.29, 0.55 and 0.56
+    // are the first six two-decimal values with that property; most do multiply exactly, which is
+    // why an arbitrary example proves nothing here.)
+    // …and exactly across a whole document, which is where it becomes visible. `0.07 * 100` is
+    // 7.000000000000001, and one line absorbs that on the way back through /100 — a hundred lines do
+    // not. The subtotal is also returned to REST and MCP callers, so it has to BE the number, not
+    // print like it.
+    const many = Array.from({ length: 100 }, () => ({
+      description: "x",
+      quantity: 1,
+      unitPrice: 0.07,
+    }));
+    expect(computeTotals(many).subtotal).toBe(7);
+
+    const totals = computeTotals(items, { discount: 1.005, tax: 2.675 });
+    for (const v of [
+      totals.subtotal,
+      totals.discount,
+      totals.tax,
+      totals.total,
+    ]) {
+      expect(Math.abs(v * 100 - Math.round(v * 100))).toBeLessThan(1e-6);
+    }
+  });
+
   test("multiplies the factors at the precision the document shows them", () => {
     const item = { description: "x", quantity: 3, unitPrice: 0.105 };
     expect(lineTotal(item)).toBe(0.33);

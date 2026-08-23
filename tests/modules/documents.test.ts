@@ -1407,4 +1407,18 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       ),
     ).rejects.toThrow(/fontt/);
   });
+
+  // Truthiness on a filter is the widest possible answer to the narrowest possible question: a
+  // caller asking for template 0 or for the empty thread key had its filter dropped and received
+  // the tenant's whole recent list instead of nothing.
+  test("an explicit filter that is falsy still filters", async () => {
+    const all = await listIssuedDocuments(ctx(tenantA), {}, appDb);
+    expect(all.length).toBeGreaterThan(0);
+    expect(
+      await listIssuedDocuments(ctx(tenantA), { templateId: 0n }, appDb),
+    ).toEqual([]);
+    expect(
+      await listIssuedDocuments(ctx(tenantA), { threadId: "" }, appDb),
+    ).toEqual([]);
+  });
 });

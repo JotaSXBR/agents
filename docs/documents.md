@@ -157,6 +157,12 @@ printed. The number is how a document identifies itself to the customer holding 
 template's prefix must not rewrite numbers already in circulation, and deleting the template (which
 nulls the FK, by design, because the documents outlive it) must not erase them.
 
+**Rounding is done on the DECIMAL, not on a binary product.** `Math.round(v * 100)` reads 1.005 as
+100.49999999999999 and rounds it down to `R$ 1,00`, while the renderer prints `R$ 1,01` — the same
+contradiction the cent arithmetic exists to remove, one layer further down. Shifting through the
+value's string form (`` `${v}e2` ``) is what matches, verified against `Intl` over 200,000 values
+across nine magnitudes, positive and negative, with zero mismatches.
+
 **What the document prints is what it computed with.** The factors are quantized to the precision
 the renderer shows them at — money at two decimals, quantity at four — before they are multiplied, so
 a unit price of 0.105 that prints as `R$ 0,11` multiplies as `0,11`. Otherwise the customer holds

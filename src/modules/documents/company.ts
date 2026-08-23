@@ -1,3 +1,4 @@
+import { rename, rm } from "node:fs/promises";
 import type { PrismaClient } from "@/../generated/prisma/client";
 import basePrisma from "@/api/lib/prisma";
 import config from "@/config";
@@ -32,14 +33,32 @@ const LOGO_SIGNATURES: Record<"png" | "jpg", number[]> = {
   jpg: [0xff, 0xd8, 0xff],
 };
 
+// The END of the file as well as its start. A signature check alone accepts a TRUNCATED upload —
+// the first bytes are genuine, the rest never arrived — and the renderer then fails on every preview
+// and every issuance of a template showing the logo, until somebody thinks to remove it. Both
+// formats end in a fixed marker, so the cheap test for "the whole file is here" is that the marker
+// is.
+//
+// This is a structural check, not a decode: it catches a file that was cut short, which is the
+// failure that actually happens on an upload. A file that is complete and still undecodable
+// (corrupt pixel data) reaches the renderer, and the render is where it is caught.
+const LOGO_TERMINATORS: Record<"png" | "jpg", number[]> = {
+  png: [0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82], // IEND + its CRC
+  jpg: [0xff, 0xd9], // EOI
+};
+
 export function logoBytesLookLike(
   bytes: Uint8Array,
   ext: "png" | "jpg",
 ): boolean {
-  // No length guard: `every` walks the SIGNATURE, so a file shorter than it compares a byte against
-  // `undefined` and fails. Measured — the guard survived removal against the whole table, which is
-  // the definition of a clause that decides nothing.
-  return LOGO_SIGNATURES[ext].every((byte, i) => bytes[i] === byte);
+  // No length guard on the signature: `every` walks the SIGNATURE, so a file shorter than it
+  // compares a byte against `undefined` and fails. Measured — the guard survived removal against the
+  // whole table, which is the definition of a clause that decides nothing.
+  if (!LOGO_SIGNATURES[ext].every((byte, i) => bytes[i] === byte)) return false;
+  const end = LOGO_TERMINATORS[ext];
+  const at = bytes.length - end.length;
+  // `at > 0` and not `>= 0`: a file that is ONLY its terminator has no image in it.
+  return at > 0 && end.every((byte, i) => bytes[at + i] === byte);
 }
 
 export const LOGO_CONTENT_TYPE: Record<"png" | "jpg", string> = {
@@ -97,7 +116,20 @@ export async function setCompanyLogo(
   const key = logoKeyFor(ctx.tenantId, ext);
   // Bytes first, then the row: a crash between the two leaves an unreferenced file, which costs
   // disk. The other order leaves a row pointing at nothing, which costs every render after it.
-  await Bun.write(logoPath(key), bytes);
+  //
+  // And the bytes go down through a RENAME, like an issued PDF. A same-format replacement reuses one
+  // filename by design (that is what logoVersion exists for), so a plain write truncates the file a
+  // preview or an issuance may be reading at that moment — the reader gets empty or partial bytes
+  // and the render fails.
+  const path = logoPath(key);
+  const temp = `${path}.${process.pid}-${Math.random().toString(36).slice(2, 10)}.part`;
+  await Bun.write(temp, bytes);
+  try {
+    await rename(temp, path);
+  } catch (e) {
+    await rm(temp, { force: true });
+    throw e;
+  }
   return setCompanyLogoKey(ctx, key, base);
 }
 
