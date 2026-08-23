@@ -125,8 +125,12 @@ export function buildGroups(
     .filter((g) => g.source === "DOCUMENT")
     .map(
       (g) =>
-        catalog.documentTemplates.find((d) => d.id === g.documentTemplateId)
-          ?.toolName,
+        catalog.documentTemplates.find(
+          // ENABLED, because the runtime skips a disabled template when it builds the toolset. The
+          // map is the operator's answer to "what can this agent call"; drawing a tool that is not
+          // in the graph is worse than drawing nothing, since the picture reads as complete.
+          (d) => d.id === g.documentTemplateId && d.enabled,
+        )?.toolName,
     )
     .filter((n): n is string => !!n);
   if (documentNames.length > 0) {

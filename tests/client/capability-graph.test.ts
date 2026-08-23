@@ -82,7 +82,8 @@ describe("buildGroups — every grant source is drawn", () => {
       { id: "4", name: "CRM", tools: [{ name: "crm_lookup" }] },
     ],
     documentTemplates: [
-      { id: "5", name: "Orçamento", toolName: "send_orcamento" },
+      { id: "5", name: "Orçamento", toolName: "send_orcamento", enabled: true },
+      { id: "6", name: "Antigo", toolName: "send_antigo", enabled: false },
     ],
   } as unknown as ToolCatalog;
 
@@ -120,6 +121,17 @@ describe("buildGroups — every grant source is drawn", () => {
     const groups = buildGroups(catalog, [grantFor.DOCUMENT as GrantState], t);
     const documents = groups.find((g) => g.key === "document");
     expect(documents?.items).toEqual(["send_orcamento"]);
+  });
+
+  // A grant on a DISABLED template draws nothing either: the runtime skips those when it builds the
+  // toolset, so drawing it claims a tool that is not in the agent's graph.
+  test("a grant on a disabled template draws nothing", () => {
+    const groups = buildGroups(
+      catalog,
+      [{ source: "DOCUMENT", documentTemplateId: "6" }],
+      t,
+    );
+    expect(groups.find((g) => g.key === "document")).toBeUndefined();
   });
 
   // A grant pointing at a template that is gone resolves to nothing, the way a stale MCP or

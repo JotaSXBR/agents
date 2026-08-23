@@ -289,6 +289,12 @@ export const tenantSettingsController = new Elysia({
           // The asset is tenant-scoped, so it must not be shared by a proxy the way the global
           // branding assets are.
           "Cache-Control": "private, max-age=60",
+          // …and not shared between TENANTS inside one browser either. The URL carries only
+          // `logoVersion`, which is a millisecond timestamp: two tenants uploading in the same
+          // millisecond get the same URL, and a SUPER_ADMIN switching between them would be served
+          // the other one's letterhead out of cache, without the scoped read ever running. The
+          // tenant travels in a header, so the cache key has to say so.
+          Vary: "X-Tenant-Id",
         },
       });
     },

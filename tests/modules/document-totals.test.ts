@@ -5,7 +5,11 @@ import {
   formatMoney,
   formatNumber,
 } from "@/modules/documents/format";
-import { computeTotals, lineTotal } from "@/modules/documents/totals";
+import {
+  computeTotals,
+  displayedMoney,
+  lineTotal,
+} from "@/modules/documents/totals";
 
 // The arithmetic as a table. The property that matters is not "the total is right" in the abstract:
 // it is that the numbers the renderer PRINTS add up to each other, because a customer reading three
@@ -249,5 +253,42 @@ describe("what is printed is what is computed", () => {
     ];
     const printed = items.reduce((acc, i) => acc + lineTotal(i), 0);
     expect(computeTotals(items).subtotal).toBeCloseTo(printed, 10);
+  });
+});
+
+// What the document PRINTS has to be what it COMPUTED with, and the formatter is the last place
+// that can break that. Neither `Intl` nor `toFixed` rounds the way this project does — both work on
+// the binary double, so 1.005 comes back "1,00" from them and 1,01 from `displayedMoney`. A line
+// printing one cent away from the total it was added into is the error a customer photographs.
+describe("formatMoney prints the quantized amount", () => {
+  // Values where binary and decimal rounding genuinely disagree.
+  const AMBIGUOUS = [1.005, 2.675, 0.145, 1299.905, 8.615];
+
+  test("agrees with displayedMoney, symbol or fallback", () => {
+    for (const value of AMBIGUOUS) {
+      const cents = Math.round(displayedMoney(value) * 100);
+      // A currency whose symbol the fonts can draw, and one whose symbol they cannot (so the code
+      // falls back). Both have to print the same number.
+      const withSymbol = formatMoney(value, "pt-BR", "BRL");
+      const fallback = formatMoney(value, "pt-BR", "INR");
+      const expected = (cents / 100).toFixed(2);
+      expect(fallback).toBe(`${expected} INR`);
+      expect(withSymbol.replace(/[^0-9,]/g, "").replace(",", ".")).toBe(
+        expected,
+      );
+    }
+  });
+
+  // The one that matters end to end: a line total and the amount printed for it are the same
+  // number, whichever currency the template is set to.
+  test("a line total prints as the value it computed", () => {
+    const total = lineTotal({
+      description: "x",
+      quantity: 1,
+      unitPrice: 1.005,
+    });
+    expect(total).toBe(1.01);
+    expect(formatMoney(total, "pt-BR", "INR")).toBe("1.01 INR");
+    expect(formatMoney(1.005, "pt-BR", "INR")).toBe("1.01 INR");
   });
 });
