@@ -918,6 +918,22 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
     );
   });
 
+  // The other side of the tolerant fallback: a grant from a source we DO know, missing its required
+  // field, is a broken bundle — not a newer version's doing. Swallowing it would drop the grant in
+  // silence and blame the wrong thing.
+  test("refuses a malformed grant from a source it knows", async () => {
+    const exp = await exportAgent(srcCtx(), srcAgentId, appDb, {
+      includeComponents: true,
+    });
+    const tampered = structuredClone(exp) as unknown as {
+      agent: { tools: unknown[] };
+    };
+    tampered.agent.tools.push({ source: "DOCUMENT" });
+    await expect(
+      importAgent(dstCtx(), tampered as never, appDb),
+    ).rejects.toThrow();
+  });
+
   test("import canonicalizes legacy authoring shapes (JSON-Schema inputSchema, single-brace {var})", async () => {
     const exp = await exportAgent(srcCtx(), srcAgentId, appDb, {
       includeComponents: true,

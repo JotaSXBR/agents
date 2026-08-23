@@ -135,6 +135,36 @@ describe("what is printed is what is computed", () => {
     }
   });
 
+  // JavaScript writes small magnitudes in EXPONENT form, so a value like 1e-7 stringifies as "1e-7"
+  // and appending "e2" gives "1e-7e2" — not a number. The arithmetic then produced NaN and the
+  // customer's PDF printed NaN where its total belongs, for an amount that is simply zero cents.
+  test("handles amounts JavaScript writes in exponent notation", () => {
+    for (const unitPrice of [1e-7, 9e-7, 1e-21]) {
+      const total = lineTotal({ description: "x", quantity: 1, unitPrice });
+      expect(Number.isNaN(total)).toBe(false);
+      expect(total).toBe(0);
+    }
+    const totals = computeTotals(
+      [{ description: "x", quantity: 1, unitPrice: 10 }],
+      { discount: 1e-7, tax: 9e-7 },
+    );
+    for (const v of [
+      totals.subtotal,
+      totals.discount,
+      totals.tax,
+      totals.total,
+    ]) {
+      expect(Number.isNaN(v)).toBe(false);
+    }
+    expect(totals.total).toBe(10);
+    // …and the large end, which stringifies as "1e+21".
+    expect(
+      Number.isNaN(
+        lineTotal({ description: "x", quantity: 1, unitPrice: 1e21 }),
+      ),
+    ).toBe(false);
+  });
+
   // Every intermediate stays a whole number of cents. `1.01 * 100` is 101.00000000000001, and a
   // fraction here would travel through the sums and back out as a total that is not a cent amount.
   test("keeps the arithmetic on whole cents", () => {

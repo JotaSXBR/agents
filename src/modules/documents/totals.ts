@@ -27,19 +27,29 @@ export interface DocumentTotals {
 // Measured against Intl over 200,000 random values across nine magnitudes, positive and negative:
 // zero mismatches. The sign is taken out first because Math.round breaks ties toward +∞ while the
 // formatter breaks them away from zero.
+// Moves the decimal point by adjusting the EXPONENT rather than by pasting one on. JavaScript
+// stringifies small and large magnitudes in exponent form — `(1e-7).toString()` is "1e-7" — so
+// appending "e2" produced "1e-7e2", which is not a number at all: `cents()` returned NaN and the
+// customer's PDF printed NaN where its total belongs. Splitting the mantissa from the exponent
+// first handles both forms with one rule.
+function shiftDecimal(value: number, by: number): number {
+  const [mantissa, exponent] = value.toString().split("e");
+  return Number(`${mantissa}e${(exponent ? Number(exponent) : 0) + by}`);
+}
+
 export function roundDecimal(value: number, decimals: number): number {
   if (!Number.isFinite(value)) return value;
   const sign = value < 0 ? -1 : 1;
-  const shifted = Number(`${Math.abs(value)}e${decimals}`);
+  const shifted = shiftDecimal(Math.abs(value), decimals);
   if (!Number.isFinite(shifted)) return value;
-  return sign * Number(`${Math.round(shifted)}e-${decimals}`);
+  return sign * shiftDecimal(Math.round(shifted), -decimals);
 }
 
 // Shifted through the string again rather than multiplied: `1.01 * 100` is 101.00000000000001, and
 // a non-integer here would travel through every sum and back out as a total that is not a whole
 // number of cents.
 function cents(value: number): number {
-  return Number(`${roundDecimal(value, 2)}e2`);
+  return shiftDecimal(roundDecimal(value, 2), 2);
 }
 
 // The factors are QUANTIZED to the precision the document prints them at, before they are

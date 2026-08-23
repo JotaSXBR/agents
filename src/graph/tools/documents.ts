@@ -110,13 +110,27 @@ export function documentToolSchema(fields: DocumentField[]): z.ZodTypeAny {
 // Same values, same document. Derived from the thread and the values rather than taken as an
 // argument, so a retried turn — the model repeating itself, the graph resuming — reuses the row
 // instead of putting a second numbered document in front of one customer.
+// Key ORDER is not part of the value. Zod rebuilds the parsed object in the schema's order, and the
+// schema's order is the template's declared fields — so reordering those between a call and its
+// retry changes `JSON.stringify` and therefore the key, and the retry issues a SECOND numbered
+// document instead of recovering the frozen one. The values are the same values either way.
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([k, v]) => [k, canonical(v)]),
+  );
+}
+
 function idempotencyKey(
   templateId: bigint,
   threadId: string | undefined,
   values: unknown,
 ): string {
   const hasher = new Bun.CryptoHasher("sha256");
-  hasher.update(JSON.stringify(values ?? {}));
+  hasher.update(JSON.stringify(canonical(values ?? {})));
   return `doc:${templateId}:${threadId ?? "unbound"}:${hasher.digest("hex").slice(0, 32)}`;
 }
 

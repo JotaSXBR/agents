@@ -103,9 +103,22 @@ const exportedGrantSchema = z.discriminatedUnion("source", [
 // bumping the format version would only trade a confusing refusal for a clean one while making every
 // bundle without a document grant refusable too, which is the trade `riskTier` above already
 // rejected for the same reason. What it does is stop the next arm from breaking this direction.
+//
+// Restricted to sources this build has never HEARD of. Without that restriction the fallback also
+// swallowed a malformed grant from a source we do know — `{source:"DOCUMENT"}` with no template —
+// dropping it silently and blaming a newer version for it, when the honest answer is that the
+// bundle is broken and the import should say so.
+const KNOWN_GRANT_SOURCES = new Set(
+  exportedGrantSchema.options.map((o) => o.shape.source.value as string),
+);
 const importedGrantSchema = z.union([
   exportedGrantSchema,
-  z.object({ source: z.string() }).transform(() => null),
+  z
+    .object({ source: z.string() })
+    .refine((g) => !KNOWN_GRANT_SOURCES.has(g.source), {
+      message: "malformed grant for a known source",
+    })
+    .transform(() => null),
 ]);
 
 // Full component definitions (opt-in via ?components=true). Each references its credential BY NAME

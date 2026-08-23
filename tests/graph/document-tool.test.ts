@@ -341,6 +341,59 @@ describe.skipIf(!dbUp)("buildDocumentTools", () => {
     expect(queuedImages(turnState)).toHaveLength(0);
   });
 
+  // The KEY is about the values, not about the order they arrive in. Zod rebuilds the parsed object
+  // in the SCHEMA's order, and the schema's order is the template's declared fields — so an operator
+  // reordering those between a call and its retry would otherwise change the key and put a second
+  // numbered document in front of one customer.
+  test("the same values under a reordered field list are the same document", async () => {
+    const before = await suDb.issuedDocument.count({ where: { tenantId } });
+    const values = { ...ARGS, cliente: "Ordem", desconto: 10 };
+    // Reordering the INPUT proves nothing: Zod rebuilds the parsed object in the SCHEMA's order, so
+    // both calls stringify identically anyway. What changes the key is the schema order itself —
+    // the template's declared fields, which an operator can reorder between a call and its retry.
+    const [first] = buildDocumentTools(
+      [
+        {
+          templateId,
+          name: "Orçamento",
+          slug: "orcamento",
+          description: null,
+          fields: FIELDS,
+        },
+      ],
+      {
+        tenantId,
+        turnState: newTurnState(),
+        threadId: `${tenantId}:1:42`,
+        base: appDb,
+        storageDir: DIR,
+      },
+    );
+    const [reordered] = buildDocumentTools(
+      [
+        {
+          templateId,
+          name: "Orçamento",
+          slug: "orcamento",
+          description: null,
+          fields: [...FIELDS].reverse(),
+        },
+      ],
+      {
+        tenantId,
+        turnState: newTurnState(),
+        threadId: `${tenantId}:1:42`,
+        base: appDb,
+        storageDir: DIR,
+      },
+    );
+    await first?.invoke(values);
+    await reordered?.invoke(values);
+    expect(await suDb.issuedDocument.count({ where: { tenantId } })).toBe(
+      before + 1,
+    );
+  });
+
   // Same values, same document: a retried turn reuses the row instead of putting a second numbered
   // document in front of one customer.
   test("the same values on the same thread issue one document", async () => {
