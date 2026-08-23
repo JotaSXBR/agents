@@ -239,6 +239,7 @@ async function deliverPendingAttachments(
   conversationId: number,
   turnState: TurnState,
   flow: FlowContext,
+  document?: { tenantId: bigint; base: PrismaClient },
 ): Promise<boolean> {
   // NOTE: Sorted by the model's tool-call order, not by the order the downloads finished in — the
   // batch runs concurrently, and a caption only makes sense next to the picture it was written for.
@@ -247,6 +248,31 @@ async function deliverPendingAttachments(
     .sort((a, b) => a.order - b.order);
   let sent = false;
   for (const file of queued) {
+    // A document is queued as BYTES, and bytes cannot say whether the row is still deliverable. The
+    // operator can revoke between the tool issuing it and this loop running — the model still had a
+    // response to finish — and revocation has to win that race the same way it wins the download
+    // route's. Asked here, immediately before the send, because anywhere earlier leaves the same gap.
+    if (file.documentId && document) {
+      const live = await runScopedOn(
+        document.base,
+        { tenantId: document.tenantId, userId: null, role: "TENANT_ADMIN" },
+        (db) =>
+          db.issuedDocument.findUnique({
+            where: { id: file.documentId as bigint },
+            select: { revoked: true },
+          }),
+      );
+      if (live?.revoked !== false) {
+        emitFlowEvent(flow, {
+          stage: "tool",
+          // Skipped, not an error: the operator revoked it, and the trail should read as the
+          // decision it was.
+          status: "skipped",
+          detail: { tool: file.tool, outcome: "revoked_before_delivery" },
+        });
+        continue;
+      }
+    }
     try {
       await client.sendFileAttachment(
         conversationId,
@@ -957,6 +983,7 @@ export async function runLoadedTurn(
         conversationId,
         turnState,
         flow,
+        { tenantId: params.tenantId, base },
       );
       // NOTE: The attachments WERE the turn and none of them reached the customer. That is a failed
       // turn, not a silent one: returning "empty" here would let the deferred resolve close a
@@ -982,7 +1009,10 @@ export async function runLoadedTurn(
 
     // The image lands before the text that talks about it, and before the TTS branch: an audio
     // reply must not swallow the attachment.
-    await deliverPendingAttachments(client, conversationId, turnState, flow);
+    await deliverPendingAttachments(client, conversationId, turnState, flow, {
+      tenantId: params.tenantId,
+      base,
+    });
 
     deliveredBalloons = await deliverText(reply, recheck.voiceReply);
     await applyDeferredResolve(client, conversationId, turnState, flow, {

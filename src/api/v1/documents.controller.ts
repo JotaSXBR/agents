@@ -33,6 +33,7 @@ import {
 // translate('errors.documentRevoked', 'This document was revoked and cannot be issued again')
 // translate('errors.documentNotNumbered', 'This document could not be numbered because its template no longer exists')
 // translate('errors.invalidDocumentTemplateDescription', 'The document template description is too long')
+// translate('errors.documentTemplateUnreadable', 'This template contains content a newer version wrote, so it cannot be saved from here')
 // translate('errors.logoNotFound', 'Logo not found')
 
 function ctxOrThrow(ctx: TenantContext | null): TenantContext {

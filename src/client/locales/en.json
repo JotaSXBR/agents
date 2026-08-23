@@ -568,6 +568,7 @@
     },
     "created": "Template created.",
     "createError": "Could not create this template.",
+    "deleteChecking": "Checking which agents use it…",
     "deleted": "Deleted.",
     "deleteError": "Could not delete.",
     "deleteMessage": "Delete \"{{name}}\"?",

@@ -2089,6 +2089,83 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
     }
   });
 
+  // Revocation has to win the last race it can be in. The tool issues and queues BYTES, and the
+  // model still has a response to finish — an operator watching the conversation can revoke in that
+  // window, and bytes cannot say they were voided. Asked again immediately before the send.
+  test("a document revoked while the turn finishes is not delivered", async () => {
+    await seedConversation(944, null);
+    const dir = `/tmp/fazerai-runtime-revoked-${process.pid}`;
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const agent = await suDb.agent.findFirst({
+      where: { tenantId },
+      select: { id: true },
+    });
+    const tpl = await createDocumentTemplate(
+      { tenantId, userId: null, role: "TENANT_ADMIN" },
+      {
+        name: "Orçamento revogado",
+        slug: "orcamento_revogado",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+      },
+      appDb,
+    );
+    await suDb.agentToolSelection.create({
+      data: {
+        tenantId,
+        agentId: agent?.id as bigint,
+        source: "DOCUMENT",
+        documentTemplateId: BigInt(tpl.id),
+        enabledTools: [],
+        knowledgeBaseIds: [],
+      },
+    });
+    const calls: Array<[string, number, string]> = [];
+    try {
+      const outcome = await runAgentTurn({
+        tenantId,
+        instanceId,
+        agentBotId: 9,
+        event: incoming({ conversationId: 944 }),
+        base: appDb,
+        deps: {
+          makeModel: () =>
+            new SendDocumentThenReplyModel(
+              "Segue o orçamento!",
+              "send_orcamento_revogado",
+              {
+                cliente: "Ana Ribeiro",
+                itens: [
+                  { description: "Consultoria", quantity: 1, unitPrice: 100 },
+                ],
+              },
+              // Runs after the tool queued the document and before the runtime delivers it: the
+              // operator's revoke, in the only window where it can land.
+              async () => {
+                await suDb.issuedDocument.updateMany({
+                  where: { tenantId, templateId: BigInt(tpl.id) },
+                  data: { revoked: true },
+                });
+              },
+            ) as unknown as BaseChatModel,
+          makeClient: makeImageClient(calls),
+          checkpointer: new MemorySaver(),
+          documentsStorageDir: dir,
+        },
+      });
+      expect(outcome).toBe("posted");
+      // The reply still goes out; the voided document does not ride along with it.
+      expect(calls).toEqual([["sendMessage", 944, "Segue o orçamento!"]]);
+    } finally {
+      await suDb.$executeRawUnsafe(
+        `DELETE FROM agent_tool_selections WHERE tenant_id = ${tenantId}`,
+      );
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   // "Show me the three colours" is one response with three tool calls, which LangGraph runs with
   // Promise.all. Whoever answers first would otherwise be first in the conversation, and the customer
   // would read "a azul é essa" under the green one.

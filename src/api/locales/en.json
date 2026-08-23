@@ -18,6 +18,7 @@
     "documentTemplateDisabled": "This document template is disabled",
     "documentTemplateNotFound": "Document template not found",
     "documentTemplateSlugTaken": "A document template with this identifier already exists",
+    "documentTemplateUnreadable": "This template contains content a newer version wrote, so it cannot be saved from here",
     "documentTooLarge": "Document is too large to process",
     "emailDomainNotAllowed": "Email domain is not allowed",
     "emailInUse": "Email already in use",

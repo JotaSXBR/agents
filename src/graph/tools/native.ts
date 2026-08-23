@@ -149,6 +149,10 @@ export interface PendingAttachment {
   // they reach the customer on paper. Operator-authored block text is NOT here: screening a
   // template the operator wrote is moderating the operator, not the model.
   screenText?: string;
+  // The issued document this file IS, when it is one. Carried so delivery can ask the row whether it
+  // is still deliverable: an operator can revoke between the tool queueing the bytes and the runtime
+  // sending them, and bytes alone cannot answer that.
+  documentId?: bigint;
 }
 
 export interface ToolCtx {

@@ -412,7 +412,16 @@ export function DocumentsPanel() {
             >
               {t("common.cancel", "Cancel")}
             </Button>
-            <Button variant="danger" onClick={confirmDelete} loading={deleting}>
+            {/* Disabled while the reference lookup is in flight. The dialog's whole job is to say
+                what this deletion breaks — which agents lose the tool — and an operator who
+                confirms before that arrives deletes it without ever seeing the warning the dialog
+                promises (docs/modals.md). */}
+            <Button
+              variant="danger"
+              onClick={confirmDelete}
+              loading={deleting}
+              disabled={deleteRefs === null}
+            >
               {t("common.delete", "Delete")}
             </Button>
           </div>
@@ -430,6 +439,11 @@ export function DocumentsPanel() {
               "Documents already issued from it keep their own copy and stay readable.",
             )}
           </p>
+          {deleteRefs === null && (
+            <p className="text-sm text-text-muted">
+              {t("documents.deleteChecking", "Checking which agents use it…")}
+            </p>
+          )}
           {deleteRefs && deleteRefs.length > 0 && (
             <p className="text-sm text-warning">
               {t(

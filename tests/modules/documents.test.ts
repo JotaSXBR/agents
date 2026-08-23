@@ -1096,4 +1096,105 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       ),
     ).rejects.toThrow(/only an update/);
   });
+
+  // Storage is tolerant on the way OUT so a row written by a NEWER build still renders here. That
+  // guarantee is worth nothing if an ordinary save writes the tolerant READING back: the console
+  // always sends style and blockText, so one click would permanently delete the layout the newer
+  // build wrote. What the patch does not address is not rewritten.
+  test("an ordinary save does not delete content this version cannot read", async () => {
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const tpl = await createDocumentTemplate(
+      ctx(tenantA),
+      {
+        name: "Do futuro",
+        slug: "do_futuro",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+      },
+      appDb,
+    );
+    const id = BigInt(tpl.id);
+    const textBlock = tpl.blocks.find((b) => b.type === "text");
+    if (!textBlock) throw new Error("starter has no text block");
+
+    // What a newer build wrote: a property this version's schema does not know. The schema STRIPS it
+    // on the way out, which is the tolerance — and writing that stripped reading back is how the
+    // tolerance turns into deletion.
+    const fromTheFuture = tpl.blocks.map((b) =>
+      b.id === textBlock.id ? { ...b, glow: "neon" } : b,
+    );
+    await suDb.documentTemplate.update({
+      where: { id },
+      data: { blocks: fromTheFuture as never },
+    });
+
+    // …and an ordinary console save: the words, and the style.
+    await updateDocumentTemplate(
+      ctx(tenantA),
+      id,
+      {
+        blockText: { [textBlock.id]: "TEXTO NOVO" },
+        style: { ...tpl.style, font: "mono" },
+      },
+      appDb,
+    );
+
+    const raw = await suDb.documentTemplate.findUnique({
+      where: { id },
+      select: { blocks: true, style: true },
+    });
+    const saved = raw?.blocks as { id: string; glow?: string; text?: string }[];
+    expect(saved.find((b) => b.id === textBlock.id)?.glow).toBe("neon");
+    // …and the edit the operator actually made did land.
+    expect(saved.find((b) => b.id === textBlock.id)?.text).toBe("TEXTO NOVO");
+    expect((raw?.style as { font?: string })?.font).toBe("mono");
+  });
+
+  // A block whose TYPE this version cannot read at all is the other half of the same contract, and
+  // it cannot be saved around: writing what parsed would drop it. Refusing keeps it — and says why,
+  // because the raw schema error reads like the operator's own edit is at fault when all they
+  // changed was a word.
+  test("refuses to save a template holding a block type it cannot read", async () => {
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const tpl = await createDocumentTemplate(
+      ctx(tenantA),
+      {
+        name: "Bloco do futuro",
+        slug: "bloco_do_futuro",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+      },
+      appDb,
+    );
+    const id = BigInt(tpl.id);
+    const textBlock = tpl.blocks.find((b) => b.type === "text");
+    if (!textBlock) throw new Error("starter has no text block");
+    await suDb.documentTemplate.update({
+      where: { id },
+      data: {
+        blocks: [
+          ...tpl.blocks,
+          { id: "assinatura", type: "signature", label: "Assine aqui" },
+        ] as never,
+      },
+    });
+    await expect(
+      updateDocumentTemplate(
+        ctx(tenantA),
+        id,
+        { blockText: { [textBlock.id]: "x" } },
+        appDb,
+      ),
+    ).rejects.toThrow(/newer version wrote/);
+    const raw = await suDb.documentTemplate.findUnique({
+      where: { id },
+      select: { blocks: true },
+    });
+    const keptBlocks = raw?.blocks as { id: string }[] | undefined;
+    expect(keptBlocks?.find((b) => b.id === "assinatura")).toBeDefined();
+  });
 });

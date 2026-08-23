@@ -434,6 +434,9 @@ export class SendDocumentThenReplyModel {
     private reply: string,
     private toolName: string,
     private args: Record<string, unknown>,
+    // Runs between the tool call and the final message — the window in which a document has been
+    // issued and queued but not yet delivered. Lets a test act inside it.
+    private betweenTurns?: () => Promise<void>,
   ) {}
   async invoke(): Promise<AIMessage> {
     return new AIMessage(this.reply);
@@ -444,6 +447,7 @@ export class SendDocumentThenReplyModel {
     return {
       async invoke(): Promise<AIMessage> {
         n++;
+        if (n === 2) await self.betweenTurns?.();
         return n === 1
           ? new AIMessage({
               content: "",

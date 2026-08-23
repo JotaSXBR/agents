@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Prisma, PrismaClient } from "@/../generated/prisma/client";
 import basePrisma from "@/api/lib/prisma";
+import { DEFAULT_TIMEZONE } from "@/graph/time";
 import { NATIVE_TOOL_NAMES } from "@/graph/tools/catalog";
 import { AppError, ConflictError, NotFoundError } from "@/lib/errors";
 import { runScopedOn, type ScopedDb, type TenantContext } from "@/lib/tenancy";
@@ -16,9 +17,11 @@ import {
 } from "./blocks";
 import { type CompanyLogo, readCompanyLogo } from "./company";
 import { formatDate, formatDocumentNumber } from "./format";
+import { calendarDay } from "./issue";
 import { renderDocumentPdf } from "./render";
 import { sampleValues } from "./sample";
 import {
+  type AuthoredHalves,
   type DocumentValues,
   parseAuthoredTemplate,
   parseDocumentValues,
@@ -267,12 +270,18 @@ function validated(input: {
   blocks: unknown;
   fields: unknown;
   style: unknown;
+  authored?: AuthoredHalves;
 }): {
   blocks: DocumentBlock[];
   fields: DocumentField[];
   style: DocumentStyle;
 } {
-  const parsed = parseAuthoredTemplate(input.blocks, input.fields, input.style);
+  const parsed = parseAuthoredTemplate(
+    input.blocks,
+    input.fields,
+    input.style,
+    input.authored,
+  );
   if (!parsed.ok) {
     throw new AppError(parsed.reason, 400, "errors.invalidDocumentTemplate");
   }
@@ -391,7 +400,7 @@ export async function updateDocumentTemplate(
       );
     }
     const current = toDto(found);
-    const row = await patched(current, patch, db, id);
+    const row = await patched(current, found, patch, db, id);
     return toDto(row);
   });
 }
@@ -399,10 +408,15 @@ export async function updateDocumentTemplate(
 // Text by block id, onto the layout as it stands. An id that is not a `text` block is refused
 // rather than ignored: silently dropping it is how a caller believes it edited something it did not.
 function applyBlockText(
-  blocks: DocumentBlock[],
+  blocks: unknown[],
   text: Record<string, string>,
-): DocumentBlock[] {
-  const byId = new Map(blocks.map((b) => [b.id, b]));
+): unknown[] {
+  const byId = new Map(
+    blocks.map((b) => [
+      (b as { id?: unknown } | null)?.id,
+      b as { id?: unknown; type?: unknown },
+    ]),
+  );
   for (const id of Object.keys(text)) {
     if (byId.get(id)?.type !== "text") {
       throw new AppError(
@@ -412,17 +426,22 @@ function applyBlockText(
       );
     }
   }
-  return blocks.map((b) =>
-    b.type === "text" && text[b.id] !== undefined
-      ? { ...b, text: text[b.id] as string }
-      : b,
-  );
+  // Spread, so every property of the stored block survives — including ones this version does not
+  // know about. Only `text` is replaced.
+  return blocks.map((raw) => {
+    const b = raw as { id?: unknown; type?: unknown };
+    const id = typeof b.id === "string" ? b.id : "";
+    return b.type === "text" && text[id] !== undefined
+      ? { ...b, text: text[id] as string }
+      : raw;
+  });
 }
 
 // The body of the patch, run inside the caller's lock. Split out so the transaction above reads as
 // what it is — read, decide, write, once — rather than as a wall of field handling.
 async function patched(
   current: DocumentTemplateDto,
+  stored: Row,
   patch: Partial<DocumentTemplateInput>,
   db: ScopedDb,
   id: bigint,
@@ -456,19 +475,57 @@ async function patched(
     patch.fields !== undefined ||
     patch.style !== undefined
   ) {
-    // Merged against the blocks as they stand INSIDE the lock, which is what makes a text edit
-    // survive a reorder that landed while the operator was typing.
-    const base = (patch.blocks ?? current.blocks) as DocumentBlock[];
+    // The RAW stored columns are the base, not the parsed DTO. `toDto` reads tolerantly — it drops a
+    // property this version does not know, and falls back to empty arrays when a row does not parse
+    // at all — and writing that reading back would make an ordinary console save (which always sends
+    // style and blockText) permanently delete layout a newer build wrote. Storage is tolerant on the
+    // way OUT precisely so it survives; writing the parsed view back is how that guarantee is lost.
+    const rawBlocks = (patch.blocks ?? stored.blocks ?? []) as unknown[];
     const blocks = patch.blockText
-      ? applyBlockText(base, patch.blockText)
-      : base;
-    const content = validated({
-      blocks,
-      fields: patch.fields ?? current.fields,
-      style: patch.style ?? current.style,
-    });
-    data.blocks = content.blocks as unknown as Prisma.InputJsonValue;
-    data.fields = content.fields as unknown as Prisma.InputJsonValue;
+      ? applyBlockText(rawBlocks, patch.blockText)
+      : rawBlocks;
+    const rawFields = (patch.fields ?? stored.fields ?? []) as unknown[];
+    // `blockText` does NOT make the blocks caller-authored: it writes strings into blocks that were
+    // already there and can introduce no property of its own. Counting it here is what would make a
+    // console save trip over a property a newer build wrote — the very save this is protecting.
+    const authored = {
+      blocks: patch.blocks !== undefined,
+      fields: patch.fields !== undefined,
+      style: patch.style !== undefined,
+    };
+    let content: ReturnType<typeof validated>;
+    try {
+      // Strict only where the CALLER wrote. A half that came out of storage belongs to whoever
+      // wrote it, and refusing this save because that half carries a property we do not know would
+      // make every save of such a template impossible.
+      content = validated({
+        blocks,
+        fields: rawFields,
+        style: patch.style ?? stored.style,
+        authored,
+      });
+    } catch (e) {
+      // A stored block this version cannot read at all (an unknown TYPE, not just an unknown
+      // property) fails the shared parse, and there is no safe way to save around it: writing what
+      // parsed would drop it. Refusing keeps it, and says why — the generic "invalid discriminator"
+      // reads like the operator's own edit is at fault when they only changed a word.
+      if (e instanceof AppError && !authored.blocks && !authored.fields) {
+        throw new AppError(
+          `this template contains content a newer version wrote and this one cannot read, so saving from here would drop it (${e.message}) — edit it from the client that wrote it, or send blocks explicitly to replace them.`,
+          409,
+          "errors.documentTemplateUnreadable",
+        );
+      }
+      throw e;
+    }
+    // Written back RAW, so anything this version does not understand survives the save. Each column
+    // is written only when the patch actually addressed it.
+    if (patch.blocks !== undefined || patch.blockText !== undefined) {
+      data.blocks = blocks as unknown as Prisma.InputJsonValue;
+    }
+    if (patch.fields !== undefined) {
+      data.fields = rawFields as unknown as Prisma.InputJsonValue;
+    }
     if (patch.style !== undefined) {
       data.style = content.style as unknown as Prisma.InputJsonValue;
     }
@@ -610,7 +667,18 @@ export async function previewDocumentTemplate(
     meta: {
       // A believable number, not a real one: the preview must not consume the template's counter.
       number: formatDocumentNumber(42, prefix ?? null),
-      date: formatDate(now.toISOString().slice(0, 10), style.locale),
+      // The same day calculation an issuance freezes, so the preview and the document it previews
+      // cannot disagree on a date the customer reads. A template has no agent of its own — it can be
+      // granted to several — so this is the fleet default zone, which is also what the REST issue
+      // path falls back to.
+      //
+      // NOT COVERED BY A TEST, deliberately and measured: a rendered PDF exposes neither greppable
+      // text (react-pdf subsets its fonts, so the content stream carries glyph ids) nor a
+      // deterministic byte stream (two renders of identical input differ), so nothing here can
+      // observe the date that came out. The equivalent decision on the ISSUE path is covered, and
+      // this line calls the same helper — that is the whole of the assurance, and it is written down
+      // rather than implied.
+      date: formatDate(calendarDay(now, DEFAULT_TIMEZONE), style.locale),
       title: input.name ?? saved?.name ?? "",
     },
   });

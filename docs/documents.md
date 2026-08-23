@@ -96,6 +96,13 @@ rather than keeping a second copy of every schema — one vocabulary, and a copy
 `document_template_schema` publishes `additionalProperties: false` so the contract a client authors
 against says what the write enforces.
 
+The strict pass applies to the halves the **caller wrote**, never to what came out of storage. An
+update that only changes the wording is validated against the stored blocks but does not re-author
+them, and the columns it does not address are not rewritten — otherwise the tolerant read (which
+drops what this version does not know) would be written back, and an ordinary console save would
+permanently delete layout a newer build wrote. A stored block whose TYPE this version cannot read at
+all cannot be saved around, so that save is refused and says why.
+
 Sizes stay clamped rather than refused (`baseFontSize`), because a clamp changes a value and never a
 key: "type and choice, never size" (`docs/mcp.md`).
 
@@ -168,6 +175,11 @@ captions: a field value and a line-item description are model-written text the c
 they reach them as a numbered PDF they keep. Operator-authored block text is not screened — that
 would be moderating the operator, not the model. A trip drops the whole queue, so a document whose
 values violate is never sent.
+
+Revocation is asked again **immediately before the send**. The tool queues bytes, and the model
+still has a response to finish: an operator watching the conversation can revoke in that window, and
+bytes cannot say they were voided. The queue entry carries the document's identity so the row can be
+asked.
 
 A document that was issued and then not delivered — a turn taken over, superseded, or blocked — is
 **left as it is**, not revoked. The idempotency key is derived from the values, so the next turn's

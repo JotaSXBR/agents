@@ -170,10 +170,22 @@ export type AuthoredTemplateParse =
   | { ok: true; content: ParsedAuthoredTemplate }
   | { ok: false; reason: string };
 
+// Which halves the CALLER wrote. The strict pass applies to those and only those: a half that came
+// out of storage is the newer build's, and refusing an ordinary save because a column carries a
+// property this version does not know would make every such save impossible — the opposite of the
+// tolerance storage is supposed to have. Defaults to all three, which is every path except an
+// update patching one half.
+export interface AuthoredHalves {
+  blocks?: boolean;
+  fields?: boolean;
+  style?: boolean;
+}
+
 export function parseAuthoredTemplate(
   rawBlocks: unknown,
   rawFields: unknown,
   rawStyle: unknown,
+  authored: AuthoredHalves = { blocks: true, fields: true, style: true },
 ): AuthoredTemplateParse {
   const blocksIn = rawBlocks ?? [];
   const fieldsIn = rawFields ?? [];
@@ -182,10 +194,12 @@ export function parseAuthoredTemplate(
   const shared = parseTemplateContent(blocksIn, fieldsIn, styleIn);
   if (!shared.ok) return shared;
 
-  for (const [label, input, parsed] of [
-    ["blocks", blocksIn, shared.content.blocks],
-    ["fields", fieldsIn, shared.content.fields],
-  ] as const) {
+  for (const [label, input, parsed] of (
+    [
+      ["blocks", blocksIn, shared.content.blocks],
+      ["fields", fieldsIn, shared.content.fields],
+    ] as const
+  ).filter(([label]) => authored[label])) {
     const dropped = droppedKey(input, parsed, "");
     if (dropped) {
       return {
@@ -195,11 +209,7 @@ export function parseAuthoredTemplate(
     }
   }
 
-  if (
-    fieldsIn &&
-    Array.isArray(fieldsIn) &&
-    fieldsIn.length > MAX_FIELDS_PER_DOCUMENT
-  ) {
+  if (Array.isArray(fieldsIn) && fieldsIn.length > MAX_FIELDS_PER_DOCUMENT) {
     return {
       ok: false,
       reason: `fields: at most ${MAX_FIELDS_PER_DOCUMENT} per document, got ${fieldsIn.length} — the declared fields become the agent's tool schema, published on every turn.`,
@@ -209,16 +219,18 @@ export function parseAuthoredTemplate(
   // The style, strictly: the tolerant reader answers ANY invalid value by returning every default,
   // so an operator who mistyped one colour would have their font, margin and currency silently
   // replaced too — and be told it saved.
-  const styleParsed = documentStyleSchema.partial().safeParse(styleIn);
-  if (!styleParsed.success) {
-    return { ok: false, reason: `style: ${issues(styleParsed.error)}` };
-  }
-  const droppedInStyle = droppedKey(styleIn, styleParsed.data, "");
-  if (droppedInStyle) {
-    return {
-      ok: false,
-      reason: `style: "${droppedInStyle}" is not a style property, so it would be stored and never take effect. Check the spelling against document_template_schema, or remove it.`,
-    };
+  if (authored.style) {
+    const styleParsed = documentStyleSchema.partial().safeParse(styleIn);
+    if (!styleParsed.success) {
+      return { ok: false, reason: `style: ${issues(styleParsed.error)}` };
+    }
+    const droppedInStyle = droppedKey(styleIn, styleParsed.data, "");
+    if (droppedInStyle) {
+      return {
+        ok: false,
+        reason: `style: "${droppedInStyle}" is not a style property, so it would be stored and never take effect. Check the spelling against document_template_schema, or remove it.`,
+      };
+    }
   }
 
   return {

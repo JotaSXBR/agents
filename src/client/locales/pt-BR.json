@@ -571,6 +571,7 @@
     },
     "created": "Modelo criado.",
     "createError": "Não foi possível criar este modelo.",
+    "deleteChecking": "Verificando quais agentes usam este modelo…",
     "deleted": "Excluído.",
     "deleteError": "Não foi possível excluir.",
     "deleteMessage": "Excluir \"{{name}}\"?",

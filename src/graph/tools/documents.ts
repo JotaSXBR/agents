@@ -199,6 +199,7 @@ export function buildDocumentTools(
             tool: name,
             kind: "document",
             screenText: screenableValues(input),
+            documentId: BigInt(issued.id),
           });
           // NOTE: no field values here, and no customer name. This string is the tool's OUTPUT, and
           // ToolFlowLogger stores tool outputs verbatim in `ExecutionLog.detail` — a column that
