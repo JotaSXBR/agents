@@ -1271,9 +1271,10 @@ async function maybeConsumeCommandOrGate(params: {
     //
     // Resolved from the CONFIG rather than from the contact: contact ids are account-wide, so "every
     // ladder this contact is in" also cancels another agent's live funnel. `sibling` stays null when
-    // the redirect is off, when the contact is unmirrored, or when this conversation is not one of
-    // the two sides — and then every step below falls back to naming this conversation alone, which
-    // is all it can honestly claim.
+    // the redirect is off, when the contact is unmirrored, when this conversation is not one of the
+    // two sides, and when it is a side but no conversation is RECORDED as the other one — and then
+    // every step below falls back to naming this conversation alone, which is all it can honestly
+    // claim.
     let redirectSibling: number | null = null;
     let ladderConversationId = conversationId;
     if (ctx.conv.contactId !== null && ctx.agentSettings != null) {
@@ -1287,28 +1288,20 @@ async function maybeConsumeCommandOrGate(params: {
             tenantId,
             instanceId,
             contactDbId,
+            conversationId,
             redirectCfg,
             base,
           );
-          const isEntry = ep.entryConversationId === conversationId;
-          const isWidget = ep.widgetConversationId === conversationId;
-          if (!isEntry && !isWidget) return;
-          // Only an EVIDENCED pair is widened to. Without it the sibling is the contact's latest
+          // Only a NAMED pair is widened to. Without one the sibling would be the contact's latest
           // conversation on the other inbox, which for a contact starting a new funnel is last
           // month's — and this command tombstones that conversation's appointment reminders.
-          redirectSibling = ep.paired
-            ? isEntry
-              ? ep.widgetConversationId
-              : ep.entryConversationId
-            : null;
-          // The ladder is keyed by the WIDGET thread. Typed on the widget that is this conversation,
-          // whatever the pairing says; typed on the entry it is only reachable through the pair.
+          redirectSibling = ep.siblingConversationId;
+          // The ladder is keyed by the WIDGET thread. Typed on the widget it is this conversation,
+          // linked or not; typed on the entry it is only reachable through the pair.
           ladderConversationId =
-            (isWidget
+            (ep.side === "widget"
               ? conversationId
-              : ep.paired
-                ? ep.widgetConversationId
-                : null) ?? conversationId;
+              : ep.siblingConversationId) ?? conversationId;
         },
       );
     }
@@ -1593,7 +1586,7 @@ async function maybeConsumeCommandOrGate(params: {
     // that already clears `testNoticeSentAt`.
     // The redirect anchors go to BOTH sides, and everything else stays on this one. The split is the
     // whole point: `lastInboundAt`, the three notice watermarks and the failure state describe THIS
-    // conversation and mean nothing about its sibling, while the four redirect anchors describe the
+    // conversation and mean nothing about its sibling, while the five redirect anchors describe the
     // EPISODE and happen to be stored one pair of columns per side. Clearing only this row left
     // `redirectClosedAt` set on the widget conversation, so the re-armed ladder's closing returned
     // `already-closed` and the funnel could be run again but never finished again.
@@ -1602,6 +1595,9 @@ async function maybeConsumeCommandOrGate(params: {
       // A counter, so it goes back to zero rather than to null.
       redirectCount: 0,
       redirectLinkedAt: null,
+      // With them, because it is what names the pair: leaving it behind would let a ladder that
+      // reads the episode AFTER the command still find a sibling to say goodbye to and resolve.
+      redirectEntryConversationId: null,
       redirectClosedAt: null,
     };
     await step("clear the conversation's watermarks", "marcadores", () =>

@@ -111,6 +111,13 @@ export async function linkRedirectConversations(
       where: { id: p.widgetConv.id },
       data: {
         redirectLinkedAt: now,
+        // The episode's identity, written HERE because here is the only moment the two sides are
+        // known to belong together: this widget chat opened from the link that conversation sent,
+        // minutes ago. Everything downstream that asks "which entry is this widget's" reads this
+        // instead of comparing anchors, because the anchors admit any LATER episode's widget too.
+        // Null when the contact has no conversation on the entry inbox, which is honest: there is no
+        // pair, and the callers then act on one conversation alone.
+        redirectEntryConversationId: sibling?.chatwootConversationId ?? null,
         ...(propagate ? { testActivatedAt: now } : {}),
       },
     }),

@@ -151,6 +151,10 @@ describe.skipIf(!dbUp)("the redirect closing records its own origin", () => {
         // The link this chat opened from, AFTER the sibling's redirect below. That ordering is what
         // makes the two one episode rather than the contact's latest row on each inbox.
         redirectLinkedAt: new Date(Date.now() - 59_000),
+        // The conversation this chat opened from, which is what names the pair. The two anchors
+        // alone cannot: a link stamped after an entry's redirect is also what every LATER episode's
+        // widget looks like.
+        redirectEntryConversationId: SIBLING_CONV,
       },
     });
     const waInbox = await suDb.inbox.create({
@@ -223,6 +227,7 @@ describe.skipIf(!dbUp)("the redirect closing records its own origin", () => {
         lastInboundAt: new Date(),
         // What the command leaves behind on both sides.
         redirectLinkedAt: null,
+        redirectEntryConversationId: null,
       },
     });
     const waInbox = await suDb.inbox.create({
@@ -263,5 +268,88 @@ describe.skipIf(!dbUp)("the redirect closing records its own origin", () => {
     // The claim is still taken — there is simply no paired conversation left to reach.
     expect(outcome).toBe("delivered");
     expect(s.statuses).toEqual([]);
+  });
+
+  // WHICH WhatsApp conversation, when the contact has more than one on the entry inbox. The one the
+  // chat opened FROM, which is recorded on the widget row — not the one they messaged most recently.
+  // Recency is what this used to ask, and it is wrong in the direction that costs the most: the
+  // goodbye lands in a live conversation the funnel never touched, and that conversation is then
+  // RESOLVED out from under whoever was working it.
+  test("the sibling is the conversation the chat opened from, not the latest one", async () => {
+    const WIDGET = 504;
+    const OPENED_FROM = 8804;
+    const LATEST = 8805;
+    const contact = await suDb.contact.create({
+      data: { tenantId, chatwootInstanceId: instanceId, chatwootContactId: 79 },
+    });
+    const widgetInbox = await suDb.inbox.findFirstOrThrow({
+      where: { tenantId, chatwootInboxId: 41 },
+    });
+    await suDb.conversation.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        inboxId: widgetInbox.id,
+        contactId: contact.id,
+        chatwootConversationId: WIDGET,
+        status: "open",
+        threadId: `${tenantId}:${instanceId}:${WIDGET}`,
+        lastInboundAt: new Date(),
+        redirectLinkedAt: new Date(Date.now() - 59_000),
+        redirectEntryConversationId: OPENED_FROM,
+      },
+    });
+    const waInbox = await suDb.inbox.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        chatwootInboxId: 44,
+        name: "WhatsApp (two)",
+        channelType: "Channel::Whatsapp",
+      },
+    });
+    await suDb.conversation.createMany({
+      data: [
+        {
+          tenantId,
+          chatwootInstanceId: instanceId,
+          inboxId: waInbox.id,
+          contactId: contact.id,
+          chatwootConversationId: OPENED_FROM,
+          status: "open",
+          threadId: `${tenantId}:${instanceId}:${OPENED_FROM}`,
+          lastInboundAt: new Date(Date.now() - 60_000),
+          lastEventAt: new Date(Date.now() - 60_000),
+          redirectSentAt: new Date(Date.now() - 60_000),
+        },
+        // The contact's LATEST conversation on the same inbox, and nothing to do with this episode.
+        {
+          tenantId,
+          chatwootInstanceId: instanceId,
+          inboxId: waInbox.id,
+          contactId: contact.id,
+          chatwootConversationId: LATEST,
+          status: "open",
+          threadId: `${tenantId}:${instanceId}:${LATEST}`,
+          lastInboundAt: new Date(),
+          lastEventAt: new Date(),
+        },
+      ],
+    });
+    const s = stubClient();
+
+    const outcome = await deliverRedirectClosing({
+      tenantId,
+      instanceId,
+      widgetConversationId: WIDGET,
+      entryInboxId: 44,
+      closingMessage: "Até logo!",
+      closeChat: false,
+      base: appDb,
+      deps: { makeClient: s.makeClient },
+    });
+
+    expect(outcome).toBe("delivered");
+    expect(s.statuses).toEqual([[OPENED_FROM, "resolved"]]);
   });
 });

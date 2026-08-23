@@ -4,6 +4,7 @@ import { MemorySaver } from "@langchain/langgraph";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/../generated/prisma/client";
 import { encryptJson } from "@/api/lib/crypto";
+import { linkRedirectConversations } from "@/modules/channel-redirect/cross-link";
 import {
   armRedirectChatFollowUp,
   chatFollowupNudge,
@@ -11,6 +12,7 @@ import {
   minutesFromNow,
   parseRedirectFollowUpPayload,
   redirectFollowUpHandler,
+  resolveRedirectEpisode,
   retireRedirectFollowUp,
 } from "@/modules/channel-redirect/followup";
 import { CHANNEL_REDIRECT_DEFAULTS } from "@/modules/channel-redirect/service";
@@ -405,9 +407,9 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
         threadId: `${tenantId}:${instanceId}:${ENTRY_CONV}`,
         lastEventAt: new Date(),
         lastInboundAt: new Date(),
-        // The anchors a real episode carries, in the order the funnel writes them: the entry side
-        // sends the redirect, then the chat it opened is linked. Without them the two rows are
-        // simply the contact's latest conversation on each inbox, which is not an episode.
+        // The anchors a real episode carries. What names the PAIR is the entry conversation id
+        // recorded on the widget row below; without it the two rows are simply the contact's latest
+        // conversation on each inbox, which is not an episode.
         redirectSentAt: new Date(Date.now() - 60_000),
       },
     });
@@ -423,6 +425,7 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
         lastEventAt: new Date(),
         lastInboundAt: new Date(),
         redirectLinkedAt: new Date(Date.now() - 59_000),
+        redirectEntryConversationId: ENTRY_CONV,
       },
     });
   });
@@ -866,5 +869,94 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
 
     // The control the negative above needs: a fence that stood every ladder down would pass it.
     expect(s.sent.map(([c]) => c)).toEqual([WIDGET_CONV]);
+  });
+
+  // The WRITE the whole pairing rule rests on, and the read that consumes it, in one pass. Every
+  // other fixture in the suite seeds `redirectEntryConversationId` by hand, so nothing else would
+  // notice if the cross-link stopped recording it — and the failure would be silent in the safe
+  // direction: no pair, no goodbye, no reset reaching the sibling.
+  test("the cross-link records which entry conversation the chat opened from", async () => {
+    const FRESH_CONV = 7173;
+    const widgetInbox = await suDb.inbox.findFirstOrThrow({
+      where: { tenantId, chatwootInboxId: 111 },
+    });
+    const contact = await suDb.contact.findFirstOrThrow({
+      where: { tenantId, chatwootContactId: 991 },
+    });
+    const fresh = await suDb.conversation.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        inboxId: widgetInbox.id,
+        contactId: contact.id,
+        chatwootConversationId: FRESH_CONV,
+        status: "pending",
+        threadId: `${tenantId}:${instanceId}:${FRESH_CONV}`,
+        lastEventAt: new Date(),
+      },
+    });
+    globalThis.fetch = httpDouble;
+    try {
+      await linkRedirectConversations({
+        tenantId,
+        instanceId,
+        agentId,
+        mode: "production",
+        cfg: {
+          ...CHANNEL_REDIRECT_DEFAULTS,
+          enabled: true,
+          entryInboxId: 110,
+          widgetInboxId: 111,
+        },
+        widgetConv: {
+          id: fresh.id,
+          displayId: FRESH_CONV,
+          testActivatedAt: null,
+          contactId: contact.id,
+        },
+        base: appDb,
+      });
+
+      const row = await suDb.conversation.findUniqueOrThrow({
+        where: { id: fresh.id },
+        select: {
+          redirectLinkedAt: true,
+          redirectEntryConversationId: true,
+        },
+      });
+      expect(row.redirectLinkedAt).not.toBeNull();
+      expect(row.redirectEntryConversationId).toBe(ENTRY_CONV);
+
+      // And what that buys: the pair is now nameable from either end.
+      const cfg = {
+        ...CHANNEL_REDIRECT_DEFAULTS,
+        enabled: true,
+        entryInboxId: 110,
+        widgetInboxId: 111,
+      };
+      expect(
+        await resolveRedirectEpisode(
+          tenantId,
+          instanceId,
+          contact.id,
+          FRESH_CONV,
+          cfg,
+          appDb,
+        ),
+      ).toEqual({ side: "widget", siblingConversationId: ENTRY_CONV });
+      expect(
+        await resolveRedirectEpisode(
+          tenantId,
+          instanceId,
+          contact.id,
+          ENTRY_CONV,
+          cfg,
+          appDb,
+        ),
+      ).toEqual({ side: "entry", siblingConversationId: FRESH_CONV });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await suDb.conversation.delete({ where: { id: fresh.id } });
+    }
   });
 });

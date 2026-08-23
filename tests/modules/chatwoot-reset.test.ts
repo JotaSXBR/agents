@@ -1261,10 +1261,9 @@ describe.skipIf(!dbUp)(
         },
       });
       const widgetThread = `${tenantId}:${instanceId}:44`;
-      // The anchors a real episode leaves behind, and the order the funnel writes them in: the entry
-      // side sends the redirect, then the widget chat that opens from it is linked. That order is
-      // what tells one episode from two conversations of the same contact, so a fixture without it
-      // is a pair the funnel could never have produced.
+      // What a real episode leaves behind: the entry side's redirect anchors, and on the widget row
+      // the id of the conversation it opened FROM. That id is what names the pair, so a fixture
+      // without it is two conversations of the same contact, not an episode.
       const sentAt = new Date(Date.now() - 60_000);
       await suDb.conversation.updateMany({
         where: { tenantId, chatwootConversationId: CONV_ID },
@@ -1281,6 +1280,7 @@ describe.skipIf(!dbUp)(
           status: "pending",
           threadId: widgetThread,
           redirectLinkedAt: new Date(sentAt.getTime() + 1_000),
+          redirectEntryConversationId: CONV_ID,
         },
       });
       try {
@@ -1437,11 +1437,16 @@ describe.skipIf(!dbUp)(
           select: {
             redirectLinkedAt: true,
             redirectClosedAt: true,
+            redirectEntryConversationId: true,
             testNoticeSentAt: true,
           },
         });
         expect(widget.redirectLinkedAt).toBeNull();
         expect(widget.redirectClosedAt).toBeNull();
+        // The one that names the pair, and the one a run in flight reads: left behind, a closing
+        // that reads the episode after the command still finds a sibling to say goodbye to and
+        // resolve — on an episode the operator was told had been erased.
+        expect(widget.redirectEntryConversationId).toBeNull();
         expect(widget.testNoticeSentAt).not.toBeNull();
       });
     });
@@ -1725,81 +1730,150 @@ describe.skipIf(!dbUp)(
       });
     });
 
-    // A contact who has been through the funnel before and starts a NEW entry conversation, without
-    // having opened its widget chat yet. "Latest on each side" pairs the new entry with LAST MONTH's
-    // widget conversation, and this command then tombstones that conversation's appointment
-    // reminders — a booking that is still ahead stops being remembered, in a conversation the
-    // operator never touched. The anchors are the evidence: the old widget chat was linked before
-    // this entry conversation ever sent a redirect, so the two are not one episode.
-    test("a stale widget conversation is not adopted as this episode's sibling", async () => {
+    // The reported defect, and the shape that made it reachable. A contact who has been through the
+    // funnel before has an OLD pair and a LIVE one, and the operator types /reset on the old entry
+    // conversation. Picking each side by recent activity got this exactly backwards: /reset is
+    // itself activity, so the command's own message made the old entry the latest on its inbox while
+    // the widget side stayed the live episode's — and the ordering check could not reject that pair,
+    // because a widget linked LATER than an entry's redirect is precisely what a real pair looks
+    // like. The command then cleared the live chat's anchors and tombstoned its ladder and the
+    // appointment reminder of a booking that was still ahead.
+    //
+    // Both halves are asserted, because only together do they say identity is what decides: the OLD
+    // pair is cleared (it is genuinely this conversation's) and the LIVE one is untouched.
+    test("a reset on an old entry conversation leaves the live episode alone", async () => {
       await withRedirectPair(async (_convId, widgetThread) => {
-        // The redirect this conversation sent is NEWER than the old chat's link: a fresh funnel run.
-        const sentAt = new Date();
-        await suDb.conversation.updateMany({
+        const mine = await suDb.conversation.findFirstOrThrow({
           where: { tenantId, chatwootConversationId: CONV_ID },
-          data: { redirectSentAt: sentAt },
+          select: { inboxId: true, contactId: true },
         });
+        const widget = await suDb.conversation.findFirstOrThrow({
+          where: { tenantId, chatwootConversationId: 44 },
+          select: { inboxId: true },
+        });
+        // The old pair goes quiet, so nothing but the command can make it the latest anywhere.
         await suDb.conversation.updateMany({
           where: { tenantId, chatwootConversationId: 44 },
-          data: {
-            redirectLinkedAt: new Date(sentAt.getTime() - 30 * 86_400_000),
-            lastEventAt: new Date(sentAt.getTime() - 30 * 86_400_000),
-          },
+          data: { lastEventAt: new Date(Date.now() - 30 * 86_400_000) },
         });
-        // What the old episode still owns: a reminder for a booking that is still ahead.
-        await suDb.schedulerJob.create({
+        // The LIVE episode: a newer entry conversation that redirected, and the chat that opened
+        // from it. Its link is stamped after the old entry's redirect, which is what the ordering
+        // check accepted.
+        const liveSentAt = new Date(Date.now() - 5_000);
+        await suDb.conversation.create({
           data: {
             tenantId,
-            kind: "APPOINTMENT_REMINDER",
-            dedupeKey: "reminder:old-evt:60",
-            runAt: new Date(Date.now() + 3_600_000),
-            payload: {
-              threadId: widgetThread,
-              eventId: "old-evt",
-              calendarId: "primary",
-              startISO: new Date(Date.now() + 7 * 86_400_000).toISOString(),
-            },
+            chatwootInstanceId: instanceId,
+            inboxId: mine.inboxId,
+            contactId: mine.contactId,
+            chatwootConversationId: 45,
+            contactInboxId: 305,
+            status: "open",
+            threadId: `${tenantId}:${instanceId}:45`,
+            lastEventAt: liveSentAt,
+            redirectSentAt: liveSentAt,
           },
         });
+        const liveThread = `${tenantId}:${instanceId}:49`;
+        await suDb.conversation.create({
+          data: {
+            tenantId,
+            chatwootInstanceId: instanceId,
+            inboxId: widget.inboxId,
+            contactId: mine.contactId,
+            chatwootConversationId: 49,
+            contactInboxId: 309,
+            status: "open",
+            threadId: liveThread,
+            lastEventAt: new Date(),
+            redirectLinkedAt: new Date(liveSentAt.getTime() + 1_000),
+            redirectEntryConversationId: 45,
+            redirectClosedAt: new Date(),
+          },
+        });
+        await suDb.schedulerJob.createMany({
+          data: [
+            {
+              tenantId,
+              kind: "REDIRECT_FOLLOWUP",
+              dedupeKey: `redirect-followup:${liveThread}`,
+              runAt: new Date(Date.now() + 3_600_000),
+              payload: { stage: "chat", widgetThreadId: liveThread },
+            },
+            {
+              tenantId,
+              kind: "REDIRECT_FOLLOWUP",
+              dedupeKey: `redirect-followup:${widgetThread}`,
+              runAt: new Date(Date.now() + 3_600_000),
+              payload: { stage: "chat", widgetThreadId: widgetThread },
+            },
+            // What the live episode still owns: a reminder for a booking that is still ahead.
+            {
+              tenantId,
+              kind: "APPOINTMENT_REMINDER",
+              dedupeKey: "reminder:live-evt:60",
+              runAt: new Date(Date.now() + 3_600_000),
+              payload: {
+                threadId: liveThread,
+                eventId: "live-evt",
+                calendarId: "primary",
+                startISO: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+              },
+            },
+          ],
+        });
+
         const cw = fakeChatwoot();
         globalThis.fetch = cw.impl;
         await sendReset();
 
-        const reminder = await suDb.schedulerJob.findFirstOrThrow({
-          where: { tenantId, dedupeKey: "reminder:old-evt:60" },
-          select: { status: true, payload: true },
+        const jobs = await suDb.schedulerJob.findMany({
+          where: { tenantId },
+          select: { dedupeKey: true, status: true, payload: true },
         });
-        expect(reminder.status).toBe("PENDING");
+        const at = (key: string) => jobs.find((j) => j.dedupeKey === key);
+        expect(at(`redirect-followup:${widgetThread}`)?.status).toBe("DONE");
+        expect(at(`redirect-followup:${liveThread}`)?.status).toBe("PENDING");
+        const reminder = at("reminder:live-evt:60");
+        expect(reminder?.status).toBe("PENDING");
         expect(
-          (reminder.payload as { cancelledAt?: unknown }).cancelledAt,
+          (reminder?.payload as { cancelledAt?: unknown } | undefined)
+            ?.cancelledAt,
         ).toBeUndefined();
+        // And the live chat's own watermark, which the command would have wiped along with them.
+        const live = await suDb.conversation.findFirstOrThrow({
+          where: { tenantId, chatwootConversationId: 49 },
+          select: { redirectClosedAt: true, redirectEntryConversationId: true },
+        });
+        expect(live.redirectClosedAt).not.toBeNull();
+        expect(live.redirectEntryConversationId).toBe(45);
+
+        await suDb.conversation.deleteMany({
+          where: { tenantId, chatwootConversationId: { in: [45, 49] } },
+        });
       });
     });
 
-    // Which conversation is "the widget side" when the contact has been through the funnel before.
-    // The live one: an old widget conversation is a previous episode, and its ladder was retired when
-    // it resolved. Picking it instead would cancel nothing and leave the running ladder armed.
-    test("the pair resolves to the live conversation of each side", async () => {
+    // The one place recency still decides, and it decides between rows that all name THIS
+    // conversation. One entry conversation may send the link up to `maxResends` times and the lead
+    // can open a new chat from each, so several widget rows can carry the same recorded entry — and
+    // the pair is the most recently linked of them. Picking an older one would cancel a ladder that
+    // was already retired when that chat closed, and leave the running one armed.
+    test("the widget side is the most recently linked chat of this entry", async () => {
       await withRedirectPair(async (_convId, widgetThread) => {
         const widget = await suDb.conversation.findFirstOrThrow({
           where: { tenantId, chatwootConversationId: 44 },
-          select: { inboxId: true, contactId: true },
+          select: { inboxId: true, contactId: true, redirectLinkedAt: true },
         });
-        // 44 becomes the PREVIOUS episode: older activity, and a link that predates the redirect
-        // this entry conversation sent.
+        // 44 becomes the PREVIOUS chat of this same entry conversation: linked a day ago, and the
+        // most recently ACTIVE of the two, so recency on activity would pick it.
         await suDb.conversation.updateMany({
           where: { tenantId, chatwootConversationId: 44 },
           data: {
-            lastEventAt: new Date(Date.now() - 86_400_000),
+            lastEventAt: new Date(),
             redirectLinkedAt: new Date(Date.now() - 86_400_000),
           },
         });
-        const entryRow = await suDb.conversation.findFirstOrThrow({
-          where: { tenantId, chatwootConversationId: CONV_ID },
-          select: { redirectSentAt: true },
-        });
-        // A newer widget conversation on the same inbox: this episode's real chat, linked after the
-        // entry side sent its redirect.
         const liveThread = `${tenantId}:${instanceId}:49`;
         await suDb.conversation.create({
           data: {
@@ -1811,10 +1885,9 @@ describe.skipIf(!dbUp)(
             contactInboxId: 309,
             status: "pending",
             threadId: liveThread,
-            lastEventAt: new Date(),
-            redirectLinkedAt: new Date(
-              (entryRow.redirectSentAt as Date).getTime() + 1_000,
-            ),
+            lastEventAt: new Date(Date.now() - 86_400_000),
+            redirectLinkedAt: new Date(),
+            redirectEntryConversationId: CONV_ID,
           },
         });
         await suDb.schedulerJob.createMany({
