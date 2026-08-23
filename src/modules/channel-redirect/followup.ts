@@ -4,6 +4,7 @@ import basePrisma from "@/api/lib/prisma";
 import { type AgentNudge, parseThreadId, runAgentNudge } from "@/graph/nudge";
 import type { RuntimeDeps } from "@/graph/runtime";
 import { runScopedOn, type ScopedDb, type TenantContext } from "@/lib/tenancy";
+import { isTestSilenced } from "@/modules/agents/test-mode";
 import { loadAgentBot, loadChatwootClient } from "@/modules/chatwoot/instance";
 import {
   type ObservedConversation,
@@ -99,6 +100,22 @@ export async function retireRedirectFollowUp(
     followUpDedupeKey(widgetThreadId),
     base,
   );
+}
+
+export interface RedirectFollowUpLiveness {
+  // Agent.enabled — an operator switched the agent off after the ladder was armed.
+  agentEnabled: boolean;
+  // Agent.mode + the WIDGET conversation's testActivatedAt: a test agent is silent until /teste.
+  agentMode: string;
+  testActivatedAt: Date | null;
+}
+
+// The ladder's own liveness gate. The generic follow-up cannot cover this path by construction —
+// its managedByRedirect term excludes exactly these conversations — and two of the three stages
+// send FIXED text (the WhatsApp link re-send, the closing) without ever passing through
+// runAgentNudge, where the test-mode gate lives. So the ladder asks here, for EVERY stage.
+export function isRedirectFollowUpLive(s: RedirectFollowUpLiveness): boolean {
+  return s.agentEnabled && !isTestSilenced(s.agentMode, s.testActivatedAt);
 }
 
 export type RedirectFollowUpStage = "chat" | "whatsapp" | "closing";
@@ -395,15 +412,42 @@ export async function redirectFollowUpHandler(
 
   // Reload the redirect config FRESH — an operator may have changed or disabled it since this job
   // was armed, and a scheduled delay can span that change. Never trust the arm-time snapshot.
-  const agent = await runScopedOn(base, sysCtx(tenantId), (db) =>
-    db.agent.findUnique({
+  // The agent's own state travels with the config, for the same reason: a scheduled delay can span
+  // an operator switching the agent off, and a test agent whose widget conversation was never
+  // activated with /teste must not be chased either.
+  const loaded = await runScopedOn(base, sysCtx(tenantId), async (db) => {
+    const agent = await db.agent.findUnique({
       where: { id: agentId },
-      select: { settings: true },
-    }),
-  );
-  if (!agent) return { outcome: "done" };
+      select: { enabled: true, mode: true, settings: true },
+    });
+    if (!agent) return null;
+    const conv = await db.conversation.findUnique({
+      where: {
+        tenantId_chatwootInstanceId_chatwootConversationId: {
+          tenantId,
+          chatwootInstanceId: parsed.instanceId,
+          chatwootConversationId: parsed.conversationId,
+        },
+      },
+      select: { testActivatedAt: true },
+    });
+    return { agent, testActivatedAt: conv?.testActivatedAt ?? null };
+  });
+  if (!loaded) return { outcome: "done" };
+  const { agent } = loaded;
   const cfg = readChannelRedirectConfig(agent.settings);
   if (!cfg.enabled) return { outcome: "done" };
+  // Dropping the ladder (not rescheduling) matches the !cfg.enabled arm above: a fresh customer
+  // message re-arms it from stage "chat" via the dedupeKey upsert.
+  if (
+    !isRedirectFollowUpLive({
+      agentEnabled: agent.enabled,
+      agentMode: agent.mode,
+      testActivatedAt: loaded.testActivatedAt,
+    })
+  ) {
+    return { outcome: "done" };
+  }
   const entryInboxId = cfg.entryInboxId ?? payload.entryInboxId;
 
   // Reschedule this same job to the next stage after its configured delay. The payload is authoritative

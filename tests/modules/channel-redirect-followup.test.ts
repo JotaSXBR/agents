@@ -8,6 +8,7 @@ import {
   armRedirectChatFollowUp,
   chatFollowupNudge,
   deliverRedirectClosing,
+  isRedirectFollowUpLive,
   minutesFromNow,
   parseRedirectFollowUpPayload,
   redirectFollowUpHandler,
@@ -1202,5 +1203,52 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
 
     // The control the negative above needs: a fence that stood every ladder down would pass it.
     expect(s.sent.map(([c]) => c)).toEqual([WIDGET_CONV]);
+  });
+});
+
+describe("isRedirectFollowUpLive", () => {
+  const live = {
+    agentEnabled: true,
+    agentMode: "production",
+    testActivatedAt: null,
+  };
+
+  test("a production agent that is enabled keeps the ladder running", () => {
+    expect(isRedirectFollowUpLive(live)).toBe(true);
+  });
+
+  test("a disabled agent delivers nothing, in any mode", () => {
+    expect(isRedirectFollowUpLive({ ...live, agentEnabled: false })).toBe(
+      false,
+    );
+    expect(
+      isRedirectFollowUpLive({
+        ...live,
+        agentEnabled: false,
+        agentMode: "test",
+        testActivatedAt: new Date("2026-01-01"),
+      }),
+    ).toBe(false);
+  });
+
+  test("a test agent is silent until the widget conversation gets a /teste", () => {
+    expect(isRedirectFollowUpLive({ ...live, agentMode: "test" })).toBe(false);
+    expect(
+      isRedirectFollowUpLive({
+        ...live,
+        agentMode: "test",
+        testActivatedAt: new Date("2026-01-01"),
+      }),
+    ).toBe(true);
+  });
+
+  test("an activation stamp never revives a production agent that is off", () => {
+    expect(
+      isRedirectFollowUpLive({
+        ...live,
+        agentEnabled: false,
+        testActivatedAt: new Date("2026-01-01"),
+      }),
+    ).toBe(false);
   });
 });
