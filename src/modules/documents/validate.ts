@@ -263,7 +263,9 @@ export function parseAuthoredTemplate(
   // A divider on its own is the same thing, and so is a text block with no text or a header with
   // nothing turned on: the rule is about what PRINTS, not about the count or the type.
   if (authored.blocks) {
-    const draws = shared.content.blocks.some(blockDraws);
+    const draws = shared.content.blocks.some((b) =>
+      blockDraws(b, shared.content.fields),
+    );
     if (!draws) {
       return {
         ok: false,

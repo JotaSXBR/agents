@@ -829,6 +829,37 @@ describe("a layout has to print something", () => {
     ).toBe(false);
   });
 
+  // A line-items table draws its HEADER row before any item arrives, so a table is content by
+  // itself. With the header switched off, all it draws is rows — and only a required field
+  // guarantees there is one, because a required lineItems value must be non-empty while an optional
+  // one can simply be omitted. As the whole layout, that is a numbered blank page.
+  test("a table with no header needs a field that must be filled", () => {
+    const items = { name: "itens", label: "Itens", type: "lineItems" };
+    const table = { id: "i", type: "lineItems", field: "itens" };
+    expect(parseAuthoredTemplate([table], [items], {}).ok).toBe(true);
+    expect(
+      parseAuthoredTemplate([{ ...table, showHeader: false }], [items], {}).ok,
+    ).toBe(false);
+    expect(
+      parseAuthoredTemplate(
+        [{ ...table, showHeader: false }],
+        [{ ...items, required: true }],
+        {},
+      ).ok,
+    ).toBe(true);
+    // …and beside a block that draws, the hidden table is not the question at all.
+    expect(
+      parseAuthoredTemplate(
+        [
+          { id: "h", type: "header", title: "Orçamento" },
+          { ...table, showHeader: false },
+        ],
+        [items],
+        {},
+      ).ok,
+    ).toBe(true);
+  });
+
   // …and a header draws as soon as ANY of its parts is on, including the two that carry no text of
   // their own.
   test("a header draws when any of its parts is on", () => {

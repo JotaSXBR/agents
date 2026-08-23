@@ -219,10 +219,15 @@ export function parseDocumentStyle(value: unknown): DocumentStyle {
 // rows, both parse and both draw nothing. A template made of those consumes a number from its
 // sequence and attaches an empty PDF to a customer's conversation.
 //
-// A `fields` block always has at least one row and a `totals` block at least one line, by schema; a
-// `lineItems` block draws its own table. Those three are settled where they are declared, which is
-// why they are not re-asked here.
-export function blockDraws(block: DocumentBlock): boolean {
+// A `fields` block always has at least one row by schema, and a `totals` block draws its lines
+// whatever the numbers are — a total of zero is still a total. Those two are settled where they are
+// declared. A `lineItems` block is not: with its header switched off, all it draws is rows, and
+// only a REQUIRED field guarantees there is one (a required lineItems value must be non-empty, see
+// the values gate). That is why the declared fields are an argument here.
+export function blockDraws(
+  block: DocumentBlock,
+  fields: DocumentField[] = [],
+): boolean {
   switch (block.type) {
     case "divider":
       return false;
@@ -236,6 +241,14 @@ export function blockDraws(block: DocumentBlock): boolean {
           block.showLogo ||
           block.showCompany ||
           block.meta?.length,
+      );
+    case "lineItems":
+      // The header row is content of its own: a table announcing its columns is a table, even
+      // before an item arrives. Switched off, an omitted optional field leaves an empty view — and
+      // if that is the whole layout, a numbered blank page.
+      return (
+        block.showHeader !== false ||
+        fields.some((f) => f.name === block.field && f.required === true)
       );
     default:
       return true;
