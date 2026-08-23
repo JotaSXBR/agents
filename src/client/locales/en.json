@@ -557,6 +557,7 @@
       "email": "Email",
       "logo": "Logo",
       "logoError": "Could not upload. The logo must be a PNG or JPEG under 512 KB.",
+      "logoRemoveError": "Could not remove the logo.",
       "name": "Company name",
       "noLogo": "No logo",
       "phone": "Phone",

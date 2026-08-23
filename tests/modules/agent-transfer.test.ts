@@ -732,6 +732,61 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
     expect(exp.meta?.appVersion).toBeDefined();
   });
 
+  // A template's prose is TENANT CONTENT, like a knowledge-base document's text. The scanner cannot
+  // tell an operator writing "api_key=abcdef" into a quote's terms from a leaked credential, and
+  // refusing there would make that operator's own agent unexportable — the guard blocking the thing
+  // it exists to protect.
+  test("exports a template whose prose looks like a secret", async () => {
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const tpl = await createDocumentTemplate(
+      srcCtx(),
+      {
+        name: "Termos técnicos",
+        slug: "termos_tecnicos",
+        blocks: [
+          {
+            id: "t",
+            type: "text",
+            text: "Configure o webhook com api_key=abcdef0123456789abcdef e avise o time.",
+          },
+        ],
+        fields: [],
+        style: starter.style,
+      },
+      appDb,
+    );
+    const agent = await suDb.agent.findUnique({ where: { id: srcAgentId } });
+    if (!agent) throw new Error("no agent");
+    await suDb.agentToolSelection.create({
+      data: {
+        tenantId: srcTenant,
+        agentId: srcAgentId,
+        source: "DOCUMENT",
+        documentTemplateId: BigInt(tpl.id),
+        enabledTools: [],
+        knowledgeBaseIds: [],
+      },
+    });
+    try {
+      const exp = await exportAgent(srcCtx(), srcAgentId, appDb, {
+        includeComponents: true,
+      });
+      const exported = exp.components?.documentTemplates?.find(
+        (t) => t.slug === "termos_tecnicos",
+      );
+      // …and the prose is still THERE: blanking happens on the scan clone, not on the bundle.
+      expect(JSON.stringify(exported?.blocks)).toContain("api_key=");
+    } finally {
+      await suDb.$executeRawUnsafe(
+        `DELETE FROM agent_tool_selections WHERE document_template_id = ${BigInt(tpl.id)}`,
+      );
+      await suDb.$executeRawUnsafe(
+        `DELETE FROM document_templates WHERE id = ${BigInt(tpl.id)}`,
+      );
+    }
+  });
+
   test("import into a fresh tenant creates the missing components (fresh token, empty KB) then grants", async () => {
     const exp = await exportAgent(srcCtx(), srcAgentId, appDb, {
       includeComponents: true,

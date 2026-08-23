@@ -44,6 +44,10 @@ function ctxOrThrow(ctx: TenantContext | null): TenantContext {
   return ctx;
 }
 
+// Ids are constrained HERE, at the transport, rather than left to the global handler that turns a
+// BigInt parse error into a 400 by matching the word "BigInt" in an engine's message. That mapping
+// was measured and it does work today — but it is a coupling to wording nobody here controls, and a
+// malformed id is a validation failure the route can name on its own.
 export const documentsController = new Elysia({
   prefix: "/v1/documents",
   tags: ["Resources"],
@@ -110,6 +114,7 @@ export const documentsController = new Elysia({
       requireRole: "TENANT_ADMIN",
       body: t.Object({
         templateId: t.String({
+          pattern: "^[0-9]+$",
           description: "Template to issue from (BigInt string).",
         }),
         idempotencyKey: t.String({
@@ -156,7 +161,10 @@ export const documentsController = new Elysia({
     {
       requireRole: "TENANT_ADMIN",
       params: t.Object({
-        id: t.String({ description: "Document id (BigInt string)." }),
+        id: t.String({
+          pattern: "^[0-9]+$",
+          description: "Document id (BigInt string).",
+        }),
       }),
       detail: doc(
         "Revoke document",
@@ -190,7 +198,10 @@ export const documentsController = new Elysia({
     {
       requireAuth: true,
       params: t.Object({
-        id: t.String({ description: "Document id (BigInt string)." }),
+        id: t.String({
+          pattern: "^[0-9]+$",
+          description: "Document id (BigInt string).",
+        }),
       }),
       detail: doc(
         "Download document PDF",

@@ -560,6 +560,7 @@
       "email": "E-mail",
       "logo": "Logo",
       "logoError": "Não foi possível enviar. O logo precisa ser PNG ou JPEG com até 512 KB.",
+      "logoRemoveError": "Não foi possível remover o logo.",
       "name": "Nome da empresa",
       "noLogo": "Sem logo",
       "phone": "Telefone",

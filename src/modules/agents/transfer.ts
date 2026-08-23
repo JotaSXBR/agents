@@ -404,6 +404,16 @@ function blankDocumentContent(data: AgentExport): AgentExport {
       for (const d of kb.documents) d.content = "";
     }
   }
+  // A document template's blocks and style are TENANT PROSE, exactly like a knowledge-base
+  // document's text, and the scanner cannot tell an operator writing "api_key=abcdef" in a quote's
+  // terms from a leaked credential. Left in, that quote makes its own agent unexportable — the
+  // scanner refusing the export it exists to protect. Blanked in the CLONE only; what is returned
+  // still carries the prose.
+  for (const tpl of clone.components?.documentTemplates ?? []) {
+    tpl.blocks = [];
+    tpl.style = {};
+    tpl.description = null;
+  }
   return clone;
 }
 

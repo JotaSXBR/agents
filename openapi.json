@@ -24710,6 +24710,7 @@
                 "type": "object",
                 "properties": {
                   "id": {
+                    "pattern": "^[0-9]+$",
                     "description": "Saved template to preview, or to inherit style/name from when previewing a draft.",
                     "type": "string"
                   },
@@ -24778,6 +24779,7 @@
                 "type": "object",
                 "properties": {
                   "id": {
+                    "pattern": "^[0-9]+$",
                     "description": "Saved template to preview, or to inherit style/name from when previewing a draft.",
                     "type": "string"
                   },
@@ -24846,6 +24848,7 @@
                 "type": "object",
                 "properties": {
                   "id": {
+                    "pattern": "^[0-9]+$",
                     "description": "Saved template to preview, or to inherit style/name from when previewing a draft.",
                     "type": "string"
                   },
@@ -24999,6 +25002,7 @@
             "in": "path",
             "required": true,
             "schema": {
+              "pattern": "^[0-9]+$",
               "description": "Template id (BigInt string).",
               "type": "string"
             }
@@ -25107,6 +25111,7 @@
             "in": "path",
             "required": true,
             "schema": {
+              "pattern": "^[0-9]+$",
               "description": "Template id (BigInt string).",
               "type": "string"
             }
@@ -25476,6 +25481,7 @@
             "in": "path",
             "required": true,
             "schema": {
+              "pattern": "^[0-9]+$",
               "description": "Template id (BigInt string).",
               "type": "string"
             }
@@ -25586,6 +25592,7 @@
             "in": "path",
             "required": true,
             "schema": {
+              "pattern": "^[0-9]+$",
               "description": "Template id (BigInt string).",
               "type": "string"
             }
@@ -25769,6 +25776,7 @@
                 "type": "object",
                 "properties": {
                   "templateId": {
+                    "pattern": "^[0-9]+$",
                     "description": "Template to issue from (BigInt string).",
                     "type": "string"
                   },
@@ -25805,6 +25813,7 @@
                 "type": "object",
                 "properties": {
                   "templateId": {
+                    "pattern": "^[0-9]+$",
                     "description": "Template to issue from (BigInt string).",
                     "type": "string"
                   },
@@ -25841,6 +25850,7 @@
                 "type": "object",
                 "properties": {
                   "templateId": {
+                    "pattern": "^[0-9]+$",
                     "description": "Template to issue from (BigInt string).",
                     "type": "string"
                   },
@@ -26000,6 +26010,7 @@
             "in": "path",
             "required": true,
             "schema": {
+              "pattern": "^[0-9]+$",
               "description": "Document id (BigInt string).",
               "type": "string"
             }
@@ -26110,6 +26121,7 @@
             "in": "path",
             "required": true,
             "schema": {
+              "pattern": "^[0-9]+$",
               "description": "Document id (BigInt string).",
               "type": "string"
             }

@@ -174,6 +174,7 @@ export const documentTemplatesController = new Elysia({
       body: t.Object({
         id: t.Optional(
           t.String({
+            pattern: "^[0-9]+$",
             description:
               "Saved template to preview, or to inherit style/name from when previewing a draft.",
           }),
@@ -225,7 +226,10 @@ export const documentTemplatesController = new Elysia({
     {
       requireRole: "TENANT_ADMIN",
       params: t.Object({
-        id: t.String({ description: "Template id (BigInt string)." }),
+        id: t.String({
+          pattern: "^[0-9]+$",
+          description: "Template id (BigInt string).",
+        }),
       }),
       detail: doc("Get document template", "Returns one document template."),
       response: errors(400, 401, 403, 404),
@@ -243,7 +247,10 @@ export const documentTemplatesController = new Elysia({
     {
       requireRole: "TENANT_ADMIN",
       params: t.Object({
-        id: t.String({ description: "Template id (BigInt string)." }),
+        id: t.String({
+          pattern: "^[0-9]+$",
+          description: "Template id (BigInt string).",
+        }),
       }),
       detail: doc(
         "List template references",
@@ -265,7 +272,10 @@ export const documentTemplatesController = new Elysia({
     {
       requireRole: "TENANT_ADMIN",
       params: t.Object({
-        id: t.String({ description: "Template id (BigInt string)." }),
+        id: t.String({
+          pattern: "^[0-9]+$",
+          description: "Template id (BigInt string).",
+        }),
       }),
       body: writeBody,
       detail: doc(
@@ -288,7 +298,10 @@ export const documentTemplatesController = new Elysia({
     {
       requireRole: "TENANT_ADMIN",
       params: t.Object({
-        id: t.String({ description: "Template id (BigInt string)." }),
+        id: t.String({
+          pattern: "^[0-9]+$",
+          description: "Template id (BigInt string).",
+        }),
       }),
       detail: doc(
         "Delete document template",

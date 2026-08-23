@@ -137,9 +137,27 @@ export function CompanyProfileCard({
     applyLogoOnly(data.company);
   }
 
+  // Both halves of a failure: Eden RESOLVES an HTTP error as `{ error }`, and the fetch can reject
+  // outright. Neither said anything before — the logo simply stayed where it was, which reads as a
+  // button that does not work.
   async function removeLogo() {
-    const { data } = await api.api.v1["tenant-settings"].company.logo.delete();
-    if (data) applyLogoOnly(data.company);
+    try {
+      const { data, error } =
+        await api.api.v1["tenant-settings"].company.logo.delete();
+      if (error || !data) {
+        showToast(
+          t("documents.company.logoRemoveError", "Could not remove the logo."),
+          "error",
+        );
+        return;
+      }
+      applyLogoOnly(data.company);
+    } catch {
+      showToast(
+        t("documents.company.logoRemoveError", "Could not remove the logo."),
+        "error",
+      );
+    }
   }
 
   return (
