@@ -1422,13 +1422,34 @@ async function createMissingComponents(
       });
       continue;
     }
+    // The NAME is unique per tenant too, and separately from the slug — so a bundle can arrive with a
+    // free slug and a name this account already uses. Not reused like a slug match: the grant below
+    // resolves by SLUG, so binding it to the template that holds the name would hand the agent a
+    // tool with a different name than the bundle asked for. Skipped and said out loud instead, which
+    // leaves the operator one rename away on either side.
+    //
+    // Asked AFTER the validity gate, and the order is the message: a bundle carrying a template that
+    // is both unreadable and named like an existing one is more usefully told about the first.
+    const approvedName = templateNameSchema.parse(tpl.name);
+    const nameHolder = await db.documentTemplate.findFirst({
+      where: { name: approvedName },
+      select: { slug: true },
+    });
+    if (nameHolder) {
+      warnings.push({
+        code: "documentTemplateNameTaken",
+        params: { name: approvedName, existing: nameHolder.slug },
+        target: { kind: "document", name: tpl.slug },
+      });
+      continue;
+    }
     await db.documentTemplate.create({
       data: {
         tenantId,
         // The value the gate APPROVED, not the one it was handed: `templateNameSchema` trims before
         // it measures, so a name padded with whitespace passes a bound the raw string fails. The
         // name becomes the tool's title, carried by every granted agent on every turn.
-        name: templateNameSchema.parse(tpl.name),
+        name: approvedName,
         slug: tpl.slug,
         description: tpl.description ?? null,
         blocks: content.content.blocks as unknown as Prisma.InputJsonValue,

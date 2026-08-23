@@ -232,6 +232,14 @@ that until it reaches a customer, so the write refuses instead — in terms of t
 what the operator typed, naming the template that already holds it. The console asks for the name at
 creation for the same reason, prefilled from the starter.
 
+The constraint is its **own** unique index, `(tenant_id, name)`, separate from the slug's. Deriving
+uniqueness from the slug looks equivalent and is not: a caller can supply its own `slug`, and a
+rename keeps the slug it already has, so both roads reach two templates with one name. All four write
+paths are fenced — create, rename, the MCP dry run, and the bundle import, which **skips** a template
+whose name the destination already holds (`documentTemplateNameTaken`) rather than reusing it, since
+the grant resolves by slug and binding it to another template would hand the agent a tool the bundle
+never asked for.
+
 **But a derivation that cannot produce a usable identifier is a different thing**: a wall in front of
 an ordinary name, about something the operator did not choose and cannot see. "2026 Orçamento"
 derived `2026_orcamento`, which a tool name may not start with, so `slugifyTemplateName` prefixes

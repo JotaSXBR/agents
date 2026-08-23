@@ -975,6 +975,7 @@
       "credentialPending": "A credencial \"{{name}}\" não foi encontrada aqui, então criamos um espaço reservado. Preencha o segredo para ativá-la.",
       "documentGrantNotFound": "O modelo de documento \"{{name}}\" não foi encontrado, então a concessão foi ignorada.",
       "documentTemplateInvalid": "O modelo de documento \"{{name}}\" não pôde ser importado: {{reason}}",
+      "documentTemplateNameTaken": "O modelo de documento \"{{name}}\" não foi importado: esta conta já tem um modelo com esse nome ({{existing}}). Os nomes precisam ser únicos, porque é por eles que o agente escolhe entre os documentos.",
       "documentTemplateReused": "O modelo de documento \"{{name}}\" já existia e foi reaproveitado; confira se está certo.",
       "guidanceClipped": "O texto em \"{{field}}\" passava de {{max}} caracteres e foi cortado na importação.",
       "hoursNotFound": "O horário \"{{name}}\" não foi encontrado aqui, então ficou em branco.",

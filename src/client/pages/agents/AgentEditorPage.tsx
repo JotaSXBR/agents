@@ -1831,6 +1831,12 @@ function AgentEditor() {
           'Document template "{{name}}" already existed and was reused; check it is right.',
           p,
         );
+      case "documentTemplateNameTaken":
+        return t(
+          "editor.importWarning.documentTemplateNameTaken",
+          'Document template "{{name}}" was not imported: this account already has a template with that name ({{existing}}). Names have to be unique, because the agent picks between documents by name.',
+          p,
+        );
       case "documentTemplateInvalid":
         return t(
           "editor.importWarning.documentTemplateInvalid",

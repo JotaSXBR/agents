@@ -105,6 +105,34 @@ interface Refusal {
   params: Record<string, string>;
 }
 
+// The two unique constraints this table carries, asked as one question. Separate rows can hold them
+// — a template with my name under another slug, a template with my slug under another name — so both
+// are looked up, and the NAME is reported first because it is the one the operator typed.
+async function existingClash(
+  ctx: TenantContext,
+  base: PrismaClient,
+  slug: string,
+  name: string | undefined,
+  excludeId?: bigint,
+): Promise<{ byName?: { name: string }; bySlug?: { name: string } }> {
+  const not = excludeId ? { id: { not: excludeId } } : {};
+  const [byName, bySlug] = await runScopedOn(base, ctx, (db) =>
+    Promise.all([
+      name === undefined
+        ? Promise.resolve(null)
+        : db.documentTemplate.findFirst({
+            where: { name, ...not },
+            select: { name: true },
+          }),
+      db.documentTemplate.findFirst({
+        where: { slug, ...not },
+        select: { name: true },
+      }),
+    ]),
+  );
+  return { byName: byName ?? undefined, bySlug: bySlug ?? undefined };
+}
+
 function nameTaken(
   existingName: string,
   name: string | undefined,
@@ -136,14 +164,40 @@ function nameTaken(
 // The same constraint arriving from the database instead of the pre-check, which is the concurrent
 // case and the MCP/import case. Answering it two different ways is how a rename ends up as a 500 for
 // something the operator can fix by typing another name, so the mapping lives here.
-function slugConflict(slug: string, name?: string): (e: unknown) => never {
+// Which INDEX fired is the difference between "that name is taken" and "that identifier is taken",
+// and Prisma reports it in `meta.target`. Read leniently, because it is a driver detail: an unknown
+// shape falls back to the slug message, which is the one that was correct before the name constraint
+// existed.
+function conflictTarget(e: unknown): "name" | "slug" {
+  const target = (e as { meta?: { target?: unknown } } | null)?.meta?.target;
+  const text = Array.isArray(target) ? target.join(",") : String(target ?? "");
+  return /(^|[^a-z])name/.test(text) ? "name" : "slug";
+}
+
+// The unique indexes deciding what the pre-check could not: the concurrent case, and every write
+// that does not pass through the console (MCP, an imported bundle).
+function writeConflict(slug: string, name?: string): (e: unknown) => never {
   return (e: unknown) => {
     if (e instanceof Error && (e as { code?: string }).code === "P2002") {
-      throw new ConflictError(
-        name === undefined
-          ? `a document template with the slug "${slug}" already exists`
-          : `you already have a document template whose name produces the tool ${documentToolName(slug)}; pick another name`,
-        "errors.documentTemplateSlugTaken",
+      if (name !== undefined && conflictTarget(e) === "name") {
+        throw new AppError(
+          `you already have a document template called "${name}"`,
+          409,
+          "errors.documentTemplateNameTaken",
+          { name },
+        );
+      }
+      if (name === undefined) {
+        throw new ConflictError(
+          `a document template with the slug "${slug}" already exists`,
+          "errors.documentTemplateSlugTaken",
+        );
+      }
+      throw new AppError(
+        `you already have a document template whose name produces the tool ${documentToolName(slug)}; pick another name`,
+        409,
+        "errors.documentTemplateNameCollidesUnknown",
+        { tool: documentToolName(slug) },
       );
     }
     throw e;
@@ -182,7 +236,8 @@ function slugRefusal(
 // the same answer as the apply — a preview that renders the document and then reports "valid" for a
 // blank name or a slug that collides is worse than no preview, because the caller acts on it.
 //
-// The database's unique index stays the authority on a slug taken concurrently (slugConflict); this
+// The database's unique indexes stay the authority on a name or slug taken concurrently
+// (writeConflict); this
 // is the check that can run without writing anything.
 export async function documentTemplateWriteProblem(
   ctx: TenantContext,
@@ -216,13 +271,9 @@ export async function documentTemplateWriteProblem(
   if (problem) {
     return slugRefusal(problem, name, input.slug !== undefined, slug).message;
   }
-  const taken = await runScopedOn(base, ctx, (db) =>
-    db.documentTemplate.findFirst({
-      where: { slug, ...(excludeId ? { id: { not: excludeId } } : {}) },
-      select: { name: true },
-    }),
-  );
-  return taken ? nameTaken(taken.name, name, slug).message : null;
+  const clash = await existingClash(ctx, base, slug, name, excludeId);
+  if (clash.byName) return nameTaken(clash.byName.name, name, slug).message;
+  return clash.bySlug ? nameTaken(clash.bySlug.name, name, slug).message : null;
 }
 
 export interface DocumentTemplateDto {
@@ -513,17 +564,16 @@ export async function createDocumentTemplate(
   // index is still the authority — it is what catches two creates racing — but all it can say is
   // that the slug is taken, and the operator needs to know WHICH of their templates already has this
   // name. One extra read on a path that already does several.
-  const clash = await runScopedOn(base, ctx, (db) =>
-    db.documentTemplate.findFirst({ where: { slug }, select: { name: true } }),
-  );
-  if (clash) {
-    const refusal = nameTaken(clash.name, derived ? name : undefined, slug);
+  const clash = await existingClash(ctx, base, slug, name);
+  const holder = clash.byName ?? clash.bySlug;
+  if (holder) {
+    const refusal = nameTaken(holder.name, name, slug);
     throw new AppError(refusal.message, 409, refusal.key, refusal.params);
   }
   const row = await runScopedOn(base, ctx, (db) =>
     db.documentTemplate
       .create({ data: { ...data, slug }, select: SELECT })
-      .catch(slugConflict(slug, derived ? name : undefined)),
+      .catch(writeConflict(slug, name)),
   );
   return toDto(row);
 }
@@ -792,9 +842,36 @@ async function patched(
       } as unknown as Prisma.InputJsonValue;
     }
   }
-  return db.documentTemplate
-    .update({ where: { id }, data, select: SELECT })
-    .catch(slugConflict(patch.slug ?? current.slug));
+  // A RENAME can collide too, and on the NAME index rather than the slug one: the slug is kept (it is
+  // a tool name an agent may already be granted), so renaming template B onto template A's name used
+  // to pass every check here and produce exactly the two indistinguishable tools the uniqueness
+  // exists to prevent. Asked under the same row lock the write runs in.
+  if (typeof data.name === "string" && data.name !== current.name) {
+    const taken = await db.documentTemplate.findFirst({
+      where: { name: data.name, id: { not: id } },
+      select: { name: true },
+    });
+    if (taken) {
+      const refusal = nameTaken(
+        taken.name,
+        data.name,
+        patch.slug ?? current.slug,
+      );
+      throw new AppError(refusal.message, 409, refusal.key, refusal.params);
+    }
+  }
+  return (
+    db.documentTemplate
+      .update({ where: { id }, data, select: SELECT })
+      // The name is handed over only when THIS patch set it. Passing the current one made a slug-only
+      // collision answer with the name message — a refusal about a field the request never touched.
+      .catch(
+        writeConflict(
+          patch.slug ?? current.slug,
+          typeof data.name === "string" ? data.name : undefined,
+        ),
+      )
+  );
 }
 
 export async function deleteDocumentTemplate(

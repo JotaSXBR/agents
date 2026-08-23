@@ -27,6 +27,7 @@ export function CompanyProfileCard({
   onChanged,
   onSaved,
   onDirtyChange,
+  session,
 }: {
   company: CompanyProfile | null;
   onChanged: (next: CompanyProfile) => void;
@@ -37,12 +38,26 @@ export function CompanyProfileCard({
   // Reported out so the modal can guard its own close with the same answer the nav guard uses. One
   // definition of "unsaved", or the dialog warns about edits the save would not send.
   onDirtyChange?: (dirty: boolean) => void;
+  // Which OPENING of the editor this is. A save is slow enough for the operator to close the modal
+  // and reopen it while the request is out, and `onSaved` closes whatever is open when it lands — so
+  // without this an older save closes a modal the operator has just reopened and is typing into.
+  // A number, like the preview's, so a template id cannot be passed here by mistake.
+  session?: number;
 }) {
   const { t } = useTranslation();
   const { showToast } = useToast();
   // Carries the copy it was seeded from, which is what separates "typed in" from "changed
   // elsewhere". See nextCompanyDraft.
   const [form, setForm] = useState(emptyCompanyForm);
+  // The CURRENT form, readable from inside a request that started before it. Kept in step on every
+  // render rather than only where it is read, so it can never be one keystroke behind.
+  const formRef = useRef(form);
+  formRef.current = form;
+  // Read at RESPONSE time, so it has to be a ref: the `session` in scope when the request started is
+  // the one this save belongs to, and the current one is what decides whether it still owns the
+  // screen.
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
   const draft = form.draft;
   // The letterhead is the one form on this tab that is not a modal, so nothing else stands between
   // an unsaved edit and a click on another tab — or a tenant switch, which is a full reload. The
@@ -111,10 +126,19 @@ export function CompanyProfileCard({
       }
       // The text is now stored, so it becomes the baseline — see afterCompanySave. Anything typed
       // while the request was in flight stays, and stays unsaved.
-      setForm((current) => afterCompanySave(current, sent));
+      // Computed from the ref, not from the closed-over `form`: the operator can type during the
+      // request, and the closure holds the snapshot from before it. Outside the updater, because a
+      // state updater is expected to be pure and React runs it twice in development.
+      const next = afterCompanySave(formRef.current, sent);
+      const clean = Object.keys(companyChanges(next)).length === 0;
+      setForm(next);
       onChanged(data.company);
       showToast(t("common.saved", "Saved."), "success");
-      onSaved?.();
+      // Reported only when nothing is left unsaved. The line above deliberately KEEPS what was typed
+      // during the request, and the parent closes the modal on this callback — so announcing the
+      // save unconditionally threw those edits away, which is the one thing the preservation exists
+      // to prevent.
+      if (clean && session === sessionRef.current) onSaved?.();
     } catch {
       // Eden RESOLVES an HTTP error as `{ error }` and REJECTS on a transport failure — offline, a
       // reset connection. Only the first half was handled, so the second left the operator with a

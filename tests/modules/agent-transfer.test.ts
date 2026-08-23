@@ -968,8 +968,10 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
     );
     if (!tpl) throw new Error("bundle missing the document template");
     tpl.slug = "orcamento_espacado";
-    // Under the 120-character bound once trimmed, far past it as written.
-    tpl.name = `${" ".repeat(500)}Orçamento${" ".repeat(500)}`;
+    // Under the 120-character bound once trimmed, far past it as written. The name is also distinct
+    // from every template this destination holds: names are unique per tenant, so reusing "Orçamento"
+    // here would be testing that constraint instead of the trim.
+    tpl.name = `${" ".repeat(500)}Orçamento espaçado${" ".repeat(500)}`;
     const { agent, warnings } = await importAgent(dstCtx(), tampered, appDb);
     expect(warnings.some((w) => w.code === "documentTemplateInvalid")).toBe(
       false,
@@ -978,10 +980,48 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
       where: { tenantId: dstTenant, slug: "orcamento_espacado" },
       select: { name: true },
     });
-    expect(row?.name).toBe("Orçamento");
+    expect(row?.name).toBe("Orçamento espaçado");
     await suDb.$executeRawUnsafe(
       `DELETE FROM document_templates WHERE tenant_id = ${dstTenant} AND slug = 'orcamento_espacado'`,
     );
+    await suDb.$executeRawUnsafe(
+      `DELETE FROM agent_tool_selections WHERE agent_id = ${BigInt(agent.id)}`,
+    );
+    await suDb.$executeRawUnsafe(
+      `DELETE FROM agents WHERE id = ${BigInt(agent.id)}`,
+    );
+  });
+
+  // Names are unique per tenant, so a bundle can arrive with a free slug and a name this account
+  // already uses. That has to be a WARNING: it used to reach the unique index and come back as a
+  // driver error, which fails the whole import over one component.
+  test("warns instead of failing when the bundle's template name is taken here", async () => {
+    const exp = await exportAgent(srcCtx(), srcAgentId, appDb, {
+      includeComponents: true,
+    });
+    const tampered = structuredClone(exp);
+    const tpl = tampered.components?.documentTemplates?.find(
+      (t) => t.slug === "orcamento",
+    );
+    if (!tpl) throw new Error("bundle missing the document template");
+    const taken = await suDb.documentTemplate.findFirst({
+      where: { tenantId: dstTenant },
+      select: { name: true },
+    });
+    if (!taken) throw new Error("destination has no template to collide with");
+    tpl.slug = "orcamento_outro_slug";
+    tpl.name = taken.name;
+    const { agent, warnings } = await importAgent(dstCtx(), tampered, appDb);
+    expect(warnings.some((w) => w.code === "documentTemplateNameTaken")).toBe(
+      true,
+    );
+    // Nothing was written under the free slug, and the import still produced an agent.
+    const row = await suDb.documentTemplate.findFirst({
+      where: { tenantId: dstTenant, slug: "orcamento_outro_slug" },
+      select: { id: true },
+    });
+    expect(row).toBeNull();
+    expect(agent.id).toBeTruthy();
     await suDb.$executeRawUnsafe(
       `DELETE FROM agent_tool_selections WHERE agent_id = ${BigInt(agent.id)}`,
     );

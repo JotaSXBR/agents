@@ -1188,6 +1188,11 @@ model SchedulerJob {
 model DocumentTemplate {
   id          BigInt   @id @default(autoincrement())
   tenantId    BigInt   @map("tenant_id")
+  // UNIQUE per tenant, and not for tidiness: the name is what the MODEL reads to choose between the
+  // document tools an agent was granted. Two templates called "Orçamento" publish two tools with the
+  // same description and nothing to pick between them, so the agent sends whichever it happens to
+  // choose. Enforced separately from the slug because a caller can supply its own slug, which would
+  // otherwise let the same name through twice.
   name        String
   // Tool-name-safe identifier. UNIQUE per tenant because it becomes the agent's tool name
   // (send_<slug>) and two tools with one name is a grant the operator cannot tell apart.
@@ -1209,6 +1214,7 @@ model DocumentTemplate {
   toolSelections  AgentToolSelection[]
 
   @@unique([tenantId, slug])
+  @@unique([tenantId, name])
   @@index([tenantId])
   @@map("document_templates")
 }

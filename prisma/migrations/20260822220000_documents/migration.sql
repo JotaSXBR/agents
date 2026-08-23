@@ -57,6 +57,12 @@ ALTER TABLE "agent_tool_selections" ADD COLUMN "document_template_id" BIGINT;
 CREATE UNIQUE INDEX "document_templates_tenant_id_slug_key" ON "document_templates"("tenant_id", "slug");
 
 -- CreateIndex
+-- The NAME is unique per tenant too, and separately from the slug: the name is what the model reads
+-- to choose between the document tools an agent holds, and a caller supplying its own slug would
+-- otherwise get two templates with one name and two indistinguishable tools.
+CREATE UNIQUE INDEX "document_templates_tenant_id_name_key" ON "document_templates"("tenant_id", "name");
+
+-- CreateIndex
 CREATE INDEX "document_templates_tenant_id_idx" ON "document_templates"("tenant_id");
 
 -- CreateIndex

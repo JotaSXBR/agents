@@ -203,6 +203,78 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     ).rejects.toThrow(/already have a document template/);
   });
 
+  // The uniqueness is on the NAME, not on what the name happens to derive to. A caller that supplies
+  // its own slug takes the derivation out of the picture entirely, and the rule has to survive that:
+  // otherwise two templates called "Orçamento" sit under different tool names, publish the same
+  // description, and the agent picks between them by accident.
+  test("refuses a duplicate name even when the caller brings its own slug", async () => {
+    await createDocumentTemplate(
+      ctx(tenantA),
+      { name: "Ordem interna", blocks: MINIMAL_BLOCKS, fields: [] },
+      appDb,
+    );
+    await expect(
+      createDocumentTemplate(
+        ctx(tenantA),
+        {
+          name: "Ordem interna",
+          slug: "ordem_interna_b",
+          blocks: MINIMAL_BLOCKS,
+          fields: [],
+        },
+        appDb,
+      ),
+    ).rejects.toThrow(/Ordem interna/);
+    // …and the dry run agrees, which is the pair the MCP surface acts on.
+    expect(
+      await documentTemplateWriteProblem(
+        ctx(tenantA),
+        { name: "Ordem interna", slug: "ordem_interna_c" },
+        appDb,
+      ),
+    ).toMatch(/Ordem interna/);
+  });
+
+  // A RENAME reaches the same place by the other road: the slug is kept, so nothing about the slug
+  // changes and every slug check passes.
+  test("refuses renaming a template onto a name another one holds", async () => {
+    const a = await createDocumentTemplate(
+      ctx(tenantA),
+      { name: "Termo A", blocks: MINIMAL_BLOCKS, fields: [] },
+      appDb,
+    );
+    const b = await createDocumentTemplate(
+      ctx(tenantA),
+      { name: "Termo B", blocks: MINIMAL_BLOCKS, fields: [] },
+      appDb,
+    );
+    await expect(
+      updateDocumentTemplate(
+        ctx(tenantA),
+        BigInt(b.id),
+        { name: "Termo A" },
+        appDb,
+      ),
+    ).rejects.toThrow(/Termo A/);
+    // Renaming to its OWN name is not a collision, and neither is any other free name.
+    const same = await updateDocumentTemplate(
+      ctx(tenantA),
+      BigInt(a.id),
+      { name: "Termo A" },
+      appDb,
+    );
+    expect(same.name).toBe("Termo A");
+    const moved = await updateDocumentTemplate(
+      ctx(tenantA),
+      BigInt(b.id),
+      { name: "Termo C" },
+      appDb,
+    );
+    expect(moved.name).toBe("Termo C");
+    // The slug is NOT re-derived by a rename: it is a tool name an agent may already be granted.
+    expect(moved.slug).toBe("termo_b");
+  });
+
   // The near-miss: two names that LOOK different and normalise the same. Refusing "Orcamento"
   // because "Orçamento" exists reads as a bug unless the message names both.
   test("names both templates when it is the normalisation that collides", async () => {
@@ -287,7 +359,7 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
   // the next call rejects.
   test("refuses a preview of a draft that issuance would call blank", async () => {
     const draft = {
-      name: "Só observações",
+      name: "Só observações do preview",
       blocks: [{ id: "obs", type: "text", text: "{{notas}}" }],
       fields: [{ name: "notas", label: "Notas", type: "text" }],
       // Explicit and empty: the sample values a preview generates would fill the token, and this is

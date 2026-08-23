@@ -107,6 +107,9 @@ export function DocumentsPanel() {
   // Reported by the letterhead form so its modal can guard its own close with the same answer the
   // nav guard uses.
   const [companyDirty, setCompanyDirty] = useState(false);
+  // One per opening of the letterhead editor, so a save that lands after the operator closed and
+  // reopened it does not close the modal they are typing into now.
+  const [companySession, setCompanySession] = useState(0);
 
   const editModal = useModalController<{ template: DocumentTemplate }>();
   const companyModal = useModalController();
@@ -464,7 +467,10 @@ export function DocumentsPanel() {
               <Button
                 variant="secondary"
                 size="sm"
-                onClick={() => companyModal.open()}
+                onClick={() => {
+                  setCompanySession((n) => n + 1);
+                  companyModal.open();
+                }}
               >
                 {company?.name?.trim()
                   ? t("common.edit", "Edit")
@@ -671,6 +677,7 @@ export function DocumentsPanel() {
             companyModal.close();
           }}
           onDirtyChange={setCompanyDirty}
+          session={companySession}
         />
       </Modal>
 
