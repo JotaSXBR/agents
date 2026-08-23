@@ -612,6 +612,17 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
         appDb,
       ),
     ).rejects.toThrow(/100/);
+    // The metadata gate is the preview's own, not one it inherits from a caller: the REST route
+    // reaches this function directly, and a prefix the create would refuse must not render — nor be
+    // fed unbounded into a PDF built on the request thread.
+    await expect(
+      previewDocumentTemplate(
+        ctx(tenantA),
+        { id: templateId, numberPrefix: "P".repeat(21) },
+        appDb,
+      ),
+    ).rejects.toThrow(/numberPrefix/);
+
     // The sample-value path is untouched: omitting values still renders.
     const bytes = await previewDocumentTemplate(
       ctx(tenantA),
@@ -1161,7 +1172,10 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     );
     await suDb.documentTemplate.update({
       where: { id },
-      data: { blocks: fromTheFuture as never },
+      data: {
+        blocks: fromTheFuture as never,
+        style: { ...tpl.style, watermark: "RASCUNHO" } as never,
+      },
     });
 
     // …and an ordinary console save: the words, and the style.
@@ -1181,6 +1195,9 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     });
     const saved = raw?.blocks as { id: string; glow?: string; text?: string }[];
     expect(saved.find((b) => b.id === textBlock.id)?.glow).toBe("neon");
+    // The STYLE half of the same contract: the console sends style on every save, so writing the
+    // parsed object alone would delete a newer build's settings on an edit to the wording.
+    expect((raw?.style as { watermark?: string })?.watermark).toBe("RASCUNHO");
     // …and the edit the operator actually made did land.
     expect(saved.find((b) => b.id === textBlock.id)?.text).toBe("TEXTO NOVO");
     expect((raw?.style as { font?: string })?.font).toBe("mono");
@@ -1230,5 +1247,56 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     });
     const keptBlocks = raw?.blocks as { id: string }[] | undefined;
     expect(keptBlocks?.find((b) => b.id === "assinatura")).toBeDefined();
+  });
+
+  // The template can be deleted between the read that loads it and the insert that references it.
+  // The foreign key then refuses the row, and a raw P2003 reaches the caller as a 500 — and an agent
+  // turn as an integration-failure alert about somebody deleting their own template. It is the same
+  // event the read itself would have reported a moment earlier, so it gets the same answer.
+  test("answers a template deleted mid-issuance the way a missing one is answered", async () => {
+    const starter = documentStarter("receipt", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const tpl = await createDocumentTemplate(
+      ctx(tenantA),
+      {
+        name: "Recibo em fuga",
+        slug: "recibo_em_fuga",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+      },
+      appDb,
+    );
+    const id = BigInt(tpl.id);
+    let deleted = false;
+    // Deletes between the template read and the insert — the window the foreign key is guarding.
+    const racing = appDb.$extends({
+      query: {
+        issuedDocument: {
+          async create({ args, query }) {
+            if (!deleted) {
+              deleted = true;
+              await suDb.documentTemplate.delete({ where: { id } });
+            }
+            return query(args);
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+
+    const failed = await issueDocument({
+      tenantId: tenantA,
+      templateId: id,
+      idempotencyKey: `fk-race-${process.pid}`,
+      values: { cliente: "Ana", valor: 100, referencia: "serviço" },
+      base: racing,
+      storageDir: DIR,
+    }).catch((e: unknown) => e);
+    expect(deleted).toBe(true);
+    expect(failed).toBeInstanceOf(AppError);
+    expect((failed as AppError).statusCode).toBe(404);
+    expect((failed as AppError).translationKey).toBe(
+      "errors.documentTemplateNotFound",
+    );
   });
 });

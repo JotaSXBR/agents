@@ -557,7 +557,16 @@ async function patched(
       data.fields = rawFields as unknown as Prisma.InputJsonValue;
     }
     if (patch.style !== undefined) {
-      data.style = content.style as unknown as Prisma.InputJsonValue;
+      // Merged ONTO the raw stored style, for the same reason the blocks are: the tolerant read
+      // drops style properties this version does not know, and the console sends style on every
+      // save — so writing the parsed object alone would delete a newer build's settings on an
+      // ordinary edit to the wording. Every key this version understands comes from the validated
+      // parse; anything else is carried through untouched.
+      const rawStyle = (stored.style ?? {}) as Record<string, unknown>;
+      data.style = {
+        ...rawStyle,
+        ...content.style,
+      } as unknown as Prisma.InputJsonValue;
     }
   }
   return db.documentTemplate
@@ -671,6 +680,18 @@ export async function previewDocumentTemplate(
   const saved = input.id
     ? await getDocumentTemplate(ctx, input.id, base)
     : null;
+  // The same metadata gate a write passes. Without it a preview renders a prefix the create would
+  // refuse — preview and apply disagreeing again — and feeds an unbounded string into a PDF built on
+  // the request thread.
+  const metadata = templateMetadataProblem({
+    ...(input.name !== undefined ? { name: input.name } : {}),
+    ...(input.numberPrefix !== undefined
+      ? { numberPrefix: input.numberPrefix }
+      : {}),
+  });
+  if (metadata) {
+    throw new AppError(metadata, 400, "errors.invalidDocumentTemplate");
+  }
   const previewBlocks = (input.blocks ??
     saved?.blocks ??
     []) as DocumentBlock[];

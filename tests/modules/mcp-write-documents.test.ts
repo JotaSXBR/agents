@@ -308,6 +308,21 @@ describe.skipIf(!dbUp)("MCP document writes", () => {
     expect(taken.ok).toBe(false);
     if (!taken.ok) expect(taken.error).toContain("already exists");
 
+    // The PREVIEW asks it too: rendering a prefix the create would refuse is the same disagreement,
+    // and it feeds an unbounded string into a PDF built on the request thread.
+    const longPrefix = await documentTemplateCreate(
+      principal({ tenantId }),
+      {
+        starter: "quote",
+        name: "Prefixo enorme",
+        slug: "prefixo_enorme",
+        number_prefix: "P".repeat(21),
+      },
+      { base: appDb },
+    );
+    expect(longPrefix.ok).toBe(false);
+    if (!longPrefix.ok) expect(longPrefix.error).toContain("numberPrefix");
+
     // The UPDATE dry run asks the same question — it was the half that reported "valid" for a rename
     // the apply would then refuse.
     const [tpl] = await listDocumentTemplates(ctx(), appDb);

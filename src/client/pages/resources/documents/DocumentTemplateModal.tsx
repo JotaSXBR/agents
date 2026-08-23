@@ -58,6 +58,7 @@ export function DocumentTemplateModal({
   const [texts, setTexts] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const baselineRef = useRef<string | null>(null);
+  const sessionRef = useRef(0);
 
   // On OPEN, not on payload identity. The controller retains its payload after close (Radix needs it
   // for the exit animation), so an operator who cancels and reopens the same template gets an effect
@@ -65,6 +66,7 @@ export function DocumentTemplateModal({
   // would then persist. `useOnModalOpen` fires on every false→true transition, which is the event
   // this reset belongs to (docs/modals.md).
   useOnModalOpen(modal, () => {
+    sessionRef.current++;
     const tpl = modal.payload?.template;
     if (!tpl) return;
     const initialTexts = Object.fromEntries(
@@ -144,6 +146,10 @@ export function DocumentTemplateModal({
 
   async function save() {
     if (!template || !style) return;
+    // The session this save belongs to. An operator can close the modal and reopen it for another
+    // template while the request is in flight; when the old one lands, its success would close the
+    // NEW modal and report a result about a template that is no longer on screen.
+    const session = sessionRef.current;
     setSaving(true);
     try {
       const { error } = await api.api.v1["document-templates"]({
@@ -156,6 +162,7 @@ export function DocumentTemplateModal({
         blockText,
         style: style as unknown as Record<string, unknown>,
       });
+      if (session !== sessionRef.current) return;
       if (error) {
         showToast(
           t("documents.saveError", "Could not save this template."),
@@ -181,6 +188,9 @@ export function DocumentTemplateModal({
       modal={modal}
       size="xl"
       unsavedChanges={isDirty}
+      // While the save is in flight the modal stays put: closing it there is what creates the stale
+      // callback in the first place, and the request cannot be taken back (docs/modals.md).
+      onCloseRequest={saving ? () => undefined : undefined}
       title={t("documents.editTitle", "Edit document template")}
       footer={
         <div className="flex justify-end gap-2">

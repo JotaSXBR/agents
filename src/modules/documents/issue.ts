@@ -232,6 +232,19 @@ export async function issueDocument(
     }),
   ).catch((err: unknown) => {
     if (isUniqueViolation(err)) return null; // lost the race → the winner is read below
+    // The template can be DELETED between the read above and this insert, and the foreign key then
+    // refuses the row (P2003). That is the same event as "no such template", which the read itself
+    // would have reported a moment earlier — so it gets the same terminal answer instead of a 500
+    // for the REST caller and an integration-failure alert for an agent turn.
+    if (
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === "P2003"
+    ) {
+      throw new NotFoundError(
+        "document template not found",
+        "errors.documentTemplateNotFound",
+      );
+    }
     throw err;
   });
   if (created) {
