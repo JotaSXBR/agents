@@ -108,6 +108,17 @@ function idempotencyKey(
   return `doc:${templateId}:${threadId ?? "unbound"}:${hasher.digest("hex").slice(0, 32)}`;
 }
 
+// Refusals no retry can get past, because they are somebody's decision rather than a fault in the
+// call: the document was revoked, or the template was disabled or deleted while this turn was
+// running. Matched on the error key rather than the status code — those three arrive as 409, 400 and
+// 404 — because the status says how it failed and the key says what happened.
+const TERMINAL_ERROR_KEYS = new Set([
+  "errors.documentRevoked",
+  "errors.documentNotNumbered",
+  "errors.documentTemplateDisabled",
+  "errors.documentTemplateNotFound",
+]);
+
 // The text a MODEL wrote into the document, for the output guardrail to screen alongside the reply.
 // Only strings, because that is where policy-bearing text can be: a price or a date carries none, and
 // feeding numbers to a moderation pass costs tokens for nothing. Line-item descriptions are included
@@ -211,18 +222,24 @@ export function buildDocumentTools(
           // carries no customer data. The number is ours and identifies nobody.
           return `Documento ${issued.number} pronto; ele vai junto com a sua resposta deste turno.`;
         } catch (e) {
+          // TERMINAL, whatever the status code: the operator voided the document, turned the
+          // template off, or deleted it between this turn loading its tools and the model calling
+          // one. No argument the model could change reaches a different answer — the idempotency key
+          // comes from the values, so "try again" lands on the same row — and none of it is a
+          // failure of ours, so none of it goes to the alert channels. Keyed by the ERROR KEY rather
+          // than the status, because a disabled template is a 400 and a deleted one a 404 while both
+          // are the same kind of decision.
+          if (
+            e instanceof AppError &&
+            TERMINAL_ERROR_KEYS.has(e.translationKey ?? "")
+          ) {
+            return "Não é possível enviar esse documento. Siga a conversa sem prometer o envio, ou ofereça encaminhar para um atendente.";
+          }
           // A rejected argument is the model's to fix and it has the message to do it with — normal
           // operation, not an integration failure. Anything else (storage gone, render crashed) is
           // the operator's problem and has to reach the alert channels.
           if (e instanceof AppError && e.statusCode === 400) {
             return `Não consegui emitir o documento: ${e.message} Corrija os dados e tente de novo, ou siga a conversa sem prometer o envio.`;
-          }
-          // The document cannot be produced and no argument change would alter that: either the
-          // operator voided it (and the key that identifies it comes from these very values, so
-          // "try again" lands back on the same row), or the template it counts from is gone. Both
-          // are decisions someone made, not failures of ours, so neither goes to the alert channels.
-          if (e instanceof AppError && e.statusCode === 409) {
-            return "Não é possível enviar esse documento. Siga a conversa sem prometer o envio, ou ofereça encaminhar para um atendente.";
           }
           throw e;
         } finally {

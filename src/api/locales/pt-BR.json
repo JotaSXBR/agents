@@ -35,6 +35,7 @@
     "invalidColorMode": "Modo de cor inválido",
     "invalidColorToken": "Cor inválida",
     "invalidCredentials": "Email ou senha inválidos",
+    "invalidDocumentNumberPrefix": "O prefixo de numeração do documento é longo demais",
     "invalidDocumentSlug": "Este identificador não é válido",
     "invalidDocumentTemplate": "Este modelo de documento não é válido",
     "invalidDocumentTemplateDescription": "A descrição do modelo de documento é longa demais",

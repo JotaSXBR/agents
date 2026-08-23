@@ -1067,6 +1067,21 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
         appDb,
       ),
     ).rejects.toThrow(/2000/);
+    // The number prefix is rendered into every document AND returned in the tool's own result, which
+    // the flow log stores and the model reads back on the next turn.
+    await expect(
+      createDocumentTemplate(
+        ctx(tenantA),
+        {
+          name: "Prefixado",
+          slug: "prefixado",
+          numberPrefix: "P".repeat(21),
+          blocks: [],
+          fields: [],
+        },
+        appDb,
+      ),
+    ).rejects.toThrow(/numberPrefix/);
     // …and on the patch, which is the half an operator reaches by pasting.
     await expect(
       updateDocumentTemplate(
@@ -1076,6 +1091,14 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
         appDb,
       ),
     ).rejects.toThrow(/2000/);
+    await expect(
+      updateDocumentTemplate(
+        ctx(tenantA),
+        templateId,
+        { numberPrefix: "P".repeat(21) },
+        appDb,
+      ),
+    ).rejects.toThrow(/numberPrefix/);
   });
 
   // The shared write body carries `blockText` because the PATCH needs it, and it means nothing on a

@@ -103,21 +103,26 @@ export function sanitizeDocumentValue(
 }
 
 // Every token name a piece of text asks for, in order, deduplicated.
-// Anything shaped like a token that the resolver would NOT recognise: {{Company_name}} (capital),
-// {{company-name}} (hyphen), {{ 1st }} (leading digit), {{}}. These slip past `tokensIn` — it only
-// reports what MATCHES — so authoring accepted them, and then `resolveTokens` did not match them
-// either and the braces printed verbatim in a document the customer keeps. The invariant is that an
-// expression which will not resolve is refused when it is written, and "will not resolve" has to
-// include "we could not even read it as a name".
-const TOKEN_SHAPED_RE = /\{\{([^{}]*)\}\}/g;
-const VALID_TOKEN_BODY_RE = /^\s*[a-z][a-z0-9_]*\s*$/;
-
+// Anything the resolver would NOT recognise, stated as the complement of what it does: remove every
+// VALID token and see whether a brace pair survives. {{Company_name}} (capital), {{company-name}}
+// (hyphen), {{}}, {{cliente (unclosed) and {{foo {{cliente}} (nested) all do, and all of them slip
+// past `tokensIn`, which only reports what matches. Authoring accepted them and then `resolveTokens`
+// did not match them either, so the braces printed verbatim in a document the customer keeps.
+//
+// Written as a complement rather than as a second pattern on purpose: a pattern for "looks like a
+// token but is not one" has to enumerate the ways of being wrong, and the first version of it
+// enumerated three and missed two. There is only one way to be RIGHT, and it is already written
+// down one line above.
 export function malformedTokenIn(text: string): string | null {
-  for (const m of text.matchAll(TOKEN_SHAPED_RE)) {
-    const body = m[1] ?? "";
-    if (!VALID_TOKEN_BODY_RE.test(body)) return m[0];
-  }
-  return null;
+  const leftover = text.replace(DOCUMENT_TOKEN_RE, "\u0000");
+  const at = Math.max(leftover.indexOf("{{"), leftover.indexOf("}}"));
+  const first = [leftover.indexOf("{{"), leftover.indexOf("}}")]
+    .filter((i) => i >= 0)
+    .sort((a, b) => a - b)[0];
+  if (first === undefined || at < 0) return null;
+  // A short slice around the offending braces: the author needs to see WHICH one, and the whole
+  // block's text would bury it.
+  return leftover.slice(first, first + 40).split("\u0000")[0] ?? "{{";
 }
 
 export function tokensIn(text: string): string[] {

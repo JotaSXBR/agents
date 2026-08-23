@@ -35,6 +35,7 @@
     "invalidColorMode": "Invalid color mode",
     "invalidColorToken": "Invalid color value",
     "invalidCredentials": "Invalid email or password",
+    "invalidDocumentNumberPrefix": "The document number prefix is too long",
     "invalidDocumentSlug": "This identifier is not valid",
     "invalidDocumentTemplate": "This document template is not valid",
     "invalidDocumentTemplateDescription": "The document template description is too long",

@@ -101,7 +101,12 @@ function slugConflict(slug: string): (e: unknown) => never {
 // is the check that can run without writing anything.
 export async function documentTemplateWriteProblem(
   ctx: TenantContext,
-  input: { name?: unknown; slug?: string; description?: unknown },
+  input: {
+    name?: unknown;
+    slug?: string;
+    description?: unknown;
+    numberPrefix?: unknown;
+  },
   base: PrismaClient = basePrisma,
   opts: { deriveSlugFromName: boolean; excludeId?: bigint } = {
     deriveSlugFromName: true,
@@ -214,6 +219,10 @@ export const templateNameSchema = z.string().trim().min(1).max(120);
 // template. Unbounded, one accidental paste makes every one of those turns carry it — the same
 // ceiling HTTP tool descriptions are already held to, and for the same reason.
 export const templateDescriptionSchema = z.string().max(2_000).nullable();
+// Rendered into every document AND returned in the tool's own result, which the flow log stores and
+// the model reads back on the next turn. Short by nature ("ORC-"), so the bound is generous and the
+// point is only that there IS one: an accidental paste here breaks the page and the context alike.
+export const templateNumberPrefixSchema = z.string().max(20).nullable();
 
 // Both writes name a template, and a raw `.parse` here is not a validation response: nothing maps a
 // ZodError, so it reaches the fallback handler as an INTERNAL_SERVER_ERROR and an operator who left
@@ -226,6 +235,7 @@ export const templateDescriptionSchema = z.string().max(2_000).nullable();
 export function templateMetadataProblem(input: {
   name?: unknown;
   description?: unknown;
+  numberPrefix?: unknown;
 }): string | null {
   if (
     input.name !== undefined &&
@@ -239,7 +249,21 @@ export function templateMetadataProblem(input: {
   ) {
     return "description: must be at most 2000 characters.";
   }
+  if (
+    input.numberPrefix !== undefined &&
+    !templateNumberPrefixSchema.safeParse(input.numberPrefix ?? null).success
+  ) {
+    return "numberPrefix: must be at most 20 characters.";
+  }
   return null;
+}
+
+function parseNumberPrefix(value: unknown): string | null {
+  const problem = templateMetadataProblem({ numberPrefix: value });
+  if (problem) {
+    throw new AppError(problem, 400, "errors.invalidDocumentNumberPrefix");
+  }
+  return templateNumberPrefixSchema.parse(value ?? null);
 }
 
 function parseTemplateDescription(value: unknown): string | null {
@@ -356,7 +380,7 @@ export async function createDocumentTemplate(
           blocks: content.blocks as unknown as Prisma.InputJsonValue,
           fields: content.fields as unknown as Prisma.InputJsonValue,
           style: style as unknown as Prisma.InputJsonValue,
-          numberPrefix: input.numberPrefix ?? null,
+          numberPrefix: parseNumberPrefix(input.numberPrefix ?? null),
           enabled: input.enabled ?? true,
         },
         select: SELECT,
@@ -462,7 +486,9 @@ async function patched(
   if (patch.description !== undefined) {
     data.description = parseTemplateDescription(patch.description);
   }
-  if (patch.numberPrefix !== undefined) data.numberPrefix = patch.numberPrefix;
+  if (patch.numberPrefix !== undefined) {
+    data.numberPrefix = parseNumberPrefix(patch.numberPrefix);
+  }
   if (patch.enabled !== undefined) data.enabled = patch.enabled;
   // NOTE: blocks, fields and style are validated TOGETHER even when only one was sent, because the
   // rules are about the relationship between them — a block pointing at a field, a token in a block

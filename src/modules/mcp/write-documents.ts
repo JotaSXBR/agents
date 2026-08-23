@@ -130,7 +130,12 @@ export async function documentTemplateCreate(
       // dry run: the caller acts on it.
       const problem = await documentTemplateWriteProblem(
         ctx,
-        { name: input.name, slug: input.slug, description: input.description },
+        {
+          name: input.name,
+          slug: input.slug,
+          description: input.description,
+          numberPrefix: input.numberPrefix,
+        },
         base,
       );
       if (problem) return err(problem);

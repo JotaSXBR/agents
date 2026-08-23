@@ -394,6 +394,54 @@ describe.skipIf(!dbUp)("buildDocumentTools", () => {
     expect(turnState.pendingAttachments).toHaveLength(0);
   });
 
+  // The operator can disable or delete a template between this turn loading its tools and the model
+  // calling one. Both are decisions, not faults in the call: "correct the data and try again" is
+  // futile for the first, and the second used to escape the catch entirely and fail the turn as an
+  // integration error — an alert about somebody deleting their own template.
+  test("declines terminally when the template is disabled or deleted mid-turn", async () => {
+    await suDb.documentTemplate.update({
+      where: { id: templateId },
+      data: { enabled: false },
+    });
+    try {
+      // Values unique to this test: the idempotency key is derived from them, so reusing another
+      // test's arguments would return that document before the template is ever loaded — and the
+      // check under test would never run.
+      const disabled = String(
+        await tool(newTurnState()).invoke({ ...ARGS, cliente: "Desativado" }),
+      );
+      expect(disabled).toMatch(/Não é possível enviar/);
+    } finally {
+      // In a finally so a failure here cannot leave the template disabled for every test after it.
+      await suDb.documentTemplate.update({
+        where: { id: templateId },
+        data: { enabled: true },
+      });
+    }
+
+    // Deleted: the tool was built for a template that no longer exists.
+    const [gone] = buildDocumentTools(
+      [
+        {
+          templateId: 999_999_999n,
+          name: "Sumiu",
+          slug: "sumiu",
+          description: null,
+          fields: FIELDS,
+        },
+      ],
+      {
+        tenantId,
+        turnState: newTurnState(),
+        threadId: `${tenantId}:1:42`,
+        base: appDb,
+        storageDir: DIR,
+      },
+    );
+    const missing = String(await gone?.invoke(ARGS));
+    expect(missing).toMatch(/Não é possível enviar/);
+  });
+
   test("returns a fixable message when the service refuses a value", async () => {
     const turnState = newTurnState();
     const out = String(

@@ -190,6 +190,11 @@ describe("parseTemplateContent", () => {
       "Olá {{company-name}}",
       "Olá {{ 1cliente }}",
       "Olá {{}}",
+      // Unclosed and nested: neither is brace-BALANCED, so a pattern that matches pairs cannot see
+      // them — and both print their braces just the same.
+      "Olá {{cliente",
+      "Olá {{foo {{cliente}}",
+      "Olá cliente}}",
     ]) {
       const r = parseTemplateContent(
         blocks({ id: "t", type: "text", text }),
@@ -200,6 +205,14 @@ describe("parseTemplateContent", () => {
       expect(r.ok === false && r.reason).toContain("not a readable token");
     }
     // The same rule on the footer, which prints on every page.
+    // A valid token beside an unclosed one: the valid half must not hide the broken one.
+    expect(
+      parseTemplateContent(
+        blocks({ id: "t", type: "text", text: "{{cliente}} e {{valid" }),
+        FIELDS,
+        {},
+      ).ok,
+    ).toBe(false);
     const footer = parseTemplateContent(blocks(), FIELDS, {
       footerText: "{{Company_name}}",
     });
@@ -492,6 +505,15 @@ describe("parseDocumentValues", () => {
     });
     expect(over.ok).toBe(false);
     expect(over.ok === false && over.reason).toContain("at most");
+
+    // A factor is PRINTED on the line, so one enormous factor against a zero one keeps the product
+    // inside the cap and still puts an unreadable number in front of the customer.
+    const factor = parseDocumentValues(FIELDS as never, {
+      cliente: "Ana",
+      itens: [{ description: "Zerado", quantity: 0, unitPrice: 1e308 }],
+    });
+    expect(factor.ok).toBe(false);
+    expect(factor.ok === false && factor.reason).toContain("Zerado");
 
     // A quantity and a unit price can each be inside the cap while their product is outside it.
     const line = parseDocumentValues(FIELDS as never, {

@@ -430,9 +430,17 @@ function valueProblem(field: DocumentField, value: unknown): string | null {
       if (!parsed.success) {
         return `line items: ${issues(parsed.error)} — each is {"description":"…","quantity":n,"unitPrice":n}`;
       }
-      // The LINE's own total, not just its two factors: a quantity and a unit price can each be
-      // inside the cap and their product outside it, which is the same overflow one step later.
+      // The factors AND their product. Each factor is PRINTED on the line, so a quantity of 1e308
+      // against a unit price of zero keeps the product inside the cap and still puts an unreadable
+      // number in front of the customer — the first version of this check looked only at the
+      // product and let exactly that through.
       for (const item of parsed.data) {
+        if (
+          item.quantity > MAX_DOCUMENT_AMOUNT ||
+          item.unitPrice > MAX_DOCUMENT_AMOUNT
+        ) {
+          return `line items: "${item.description}" has a quantity or unit price above ${MAX_DOCUMENT_AMOUNT}`;
+        }
         if (item.quantity * item.unitPrice > MAX_DOCUMENT_AMOUNT) {
           return `line items: "${item.description}" totals more than ${MAX_DOCUMENT_AMOUNT}`;
         }

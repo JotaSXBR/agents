@@ -1340,6 +1340,7 @@ async function createMissingComponents(
       templateMetadataProblem({
         name: tpl.name,
         description: tpl.description ?? null,
+        numberPrefix: tpl.numberPrefix ?? null,
       }) ?? (slugProblem(tpl.slug) ? `slug: ${slugProblem(tpl.slug)}.` : null);
     const content = metaFault
       ? ({ ok: false, reason: metaFault } as const)
