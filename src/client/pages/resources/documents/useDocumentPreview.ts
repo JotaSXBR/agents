@@ -90,6 +90,12 @@ export function useDocumentPreview(
             message?: string;
             error?: string;
           } | null;
+          // Re-checked AFTER the body is parsed, exactly like the success path re-checks after
+          // `res.blob()`. Reading the body is another await, and a draft change during it makes this
+          // answer stale: without the second check a refusal about the PREVIOUS draft replaces the
+          // new one's loading state, and sits there naming a block the operator has already fixed
+          // until the newer request lands (docs/modals.md).
+          if (cancelled) return;
           setState({
             url: null,
             loading: false,

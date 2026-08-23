@@ -174,33 +174,54 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     ).rejects.toThrow(/built-in tool/);
   });
 
-  // The wall this removes: the second "Orçamento" was refused, so an account could hold exactly one
-  // template per name — forever, and over an identifier the operator never typed. The table in
-  // document-slug.test.ts proves the search; this proves the CREATE uses it and that the two rows
-  // really do end up with different tool names.
-  test("a second template with the same name gets a tool name of its own", async () => {
-    const first = await createDocumentTemplate(
+  // Names are unique per account, and the refusal is the POINT rather than a limitation to work
+  // around: the name is what the model reads to choose between document tools, so two templates
+  // called "Orçamento" would produce two tools with the same description and nothing to pick
+  // between — the agent sends whichever it happens to choose. Numbering the second one would hide
+  // that until a customer got the wrong document.
+  test("refuses a second template with the same name, saying so about the NAME", async () => {
+    await createDocumentTemplate(
       ctx(tenantA),
       { name: "Recibo mensal", blocks: MINIMAL_BLOCKS, fields: [] },
       appDb,
     );
-    const second = await createDocumentTemplate(
-      ctx(tenantA),
-      { name: "Recibo mensal", blocks: MINIMAL_BLOCKS, fields: [] },
-      appDb,
-    );
-    expect(first.slug).toBe("recibo_mensal");
-    expect(second.slug).toBe("recibo_mensal_2");
-    expect(second.toolName).toBe("send_recibo_mensal_2");
-    // Both are real rows, both readable: the point is two templates, not a rename of one.
-    expect(second.id).not.toBe(first.id);
-    expect(
-      (await getDocumentTemplate(ctx(tenantA), BigInt(first.id), appDb)).name,
-    ).toBe("Recibo mensal");
+    await expect(
+      createDocumentTemplate(
+        ctx(tenantA),
+        { name: "Recibo mensal", blocks: MINIMAL_BLOCKS, fields: [] },
+        appDb,
+      ),
+    ).rejects.toThrow(/Recibo mensal/);
+    // The slug is an identifier the operator never typed, so it must not be what the message is
+    // about — that was the old wording, and it sent people looking for a field that does not exist.
+    await expect(
+      createDocumentTemplate(
+        ctx(tenantA),
+        { name: "Recibo mensal", blocks: MINIMAL_BLOCKS, fields: [] },
+        appDb,
+      ),
+    ).rejects.toThrow(/already have a document template/);
   });
 
-  // A name whose derived slug could never be valid. Both of these were 400s, and neither is an
-  // unusual thing to call a template.
+  // The near-miss: two names that LOOK different and normalise the same. Refusing "Orcamento"
+  // because "Orçamento" exists reads as a bug unless the message names both.
+  test("names both templates when it is the normalisation that collides", async () => {
+    await createDocumentTemplate(
+      ctx(tenantA),
+      { name: "Contrato Padrão", blocks: MINIMAL_BLOCKS, fields: [] },
+      appDb,
+    );
+    await expect(
+      createDocumentTemplate(
+        ctx(tenantA),
+        { name: "contrato padrao", blocks: MINIMAL_BLOCKS, fields: [] },
+        appDb,
+      ),
+    ).rejects.toThrow(/Contrato Padrão/);
+  });
+
+  // A name whose derived slug could never be valid. Both of these were 400s about the slug, and
+  // neither is an unusual thing to call a template.
   test("takes a name whose derived slug used to be refused outright", async () => {
     const dated = await createDocumentTemplate(
       ctx(tenantA),
@@ -208,20 +229,22 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       appDb,
     );
     expect(dated.slug).toBe("doc_2026_orcamento_anual");
-    // "Image" derives `image`, whose tool name is the built-in send_image.
-    const image = await createDocumentTemplate(
-      ctx(tenantA),
-      { name: "Image", blocks: MINIMAL_BLOCKS, fields: [] },
-      appDb,
-    );
-    expect(image.toolName).not.toBe("send_image");
-    expect(image.slug).toBe("image_2");
   });
 
-  // The dry run and the apply have to agree, and this is the pair that can disagree now: the apply
-  // no longer refuses a derived slug that is taken, so a dry run that still reports the collision
-  // would be the only place saying no.
-  test("the dry run does not refuse a name whose derived slug is taken", async () => {
+  // …and the one that still cannot work, refused in terms of the name rather than the slug: "Image"
+  // is a fine template name whose only fault is where it normalises to.
+  test("refuses a name that normalises onto a built-in tool, by name", async () => {
+    await expect(
+      createDocumentTemplate(
+        ctx(tenantA),
+        { name: "Image", blocks: MINIMAL_BLOCKS, fields: [] },
+        appDb,
+      ),
+    ).rejects.toThrow(/"Image" would produce the tool send_image/);
+  });
+
+  // The dry run and the apply have to agree: both refuse, and both say it about the name.
+  test("the dry run refuses the same duplicate the apply refuses", async () => {
     await createDocumentTemplate(
       ctx(tenantA),
       { name: "Proposta dupla", blocks: MINIMAL_BLOCKS, fields: [] },
@@ -233,97 +256,18 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
         { name: "Proposta dupla" },
         appDb,
       ),
-    ).toBeNull();
-    // …while an EXPLICIT slug that is taken is still refused by both, because the caller wrote it.
-    expect(
-      await documentTemplateWriteProblem(
-        ctx(tenantA),
-        { name: "Outra", slug: "proposta_dupla" },
-        appDb,
-      ),
-    ).toMatch(/already exists/);
+    ).toMatch(/Proposta dupla/);
     await expect(
       createDocumentTemplate(
         ctx(tenantA),
-        {
-          name: "Outra",
-          slug: "proposta_dupla",
-          blocks: MINIMAL_BLOCKS,
-          fields: [],
-        },
+        { name: "Proposta dupla", blocks: MINIMAL_BLOCKS, fields: [] },
         appDb,
       ),
-    ).rejects.toThrow(/already exists/);
+    ).rejects.toThrow(/Proposta dupla/);
   });
 
-  // The race the search cannot see: it reads the slugs, picks a free one, and the unique index is
-  // what actually decides — so a create of the same name landing in between takes the candidate and
-  // this one loses. Driven deterministically by failing the FIRST insert the way the index does,
-  // because a real two-writer race is not reachable often enough to assert on.
-  test("a derived slug that loses the index to a concurrent create tries again", async () => {
-    let failures = 1;
-    const racy = appDb.$extends({
-      query: {
-        documentTemplate: {
-          create({ args, query }) {
-            if (failures > 0) {
-              failures--;
-              const e = new Error("Unique constraint failed") as Error & {
-                code?: string;
-              };
-              e.code = "P2002";
-              throw e;
-            }
-            return query(args);
-          },
-        },
-      },
-    }) as unknown as PrismaClient;
-    const tpl = await createDocumentTemplate(
-      ctx(tenantA),
-      { name: "Ordem de serviço", blocks: MINIMAL_BLOCKS, fields: [] },
-      racy,
-    );
-    expect(tpl.slug).toBe("ordem_de_servico");
-    expect(failures).toBe(0);
-  });
-
-  // …but only for a derived slug. Retrying an EXPLICIT one picks the same name and loses again, so
-  // the caller is owed the conflict instead of three more round trips.
-  test("an explicit slug that loses the index is not retried", async () => {
-    let attempts = 0;
-    const racy = appDb.$extends({
-      query: {
-        documentTemplate: {
-          create() {
-            attempts++;
-            const e = new Error("Unique constraint failed") as Error & {
-              code?: string;
-            };
-            e.code = "P2002";
-            throw e;
-          },
-        },
-      },
-    }) as unknown as PrismaClient;
-    await expect(
-      createDocumentTemplate(
-        ctx(tenantA),
-        {
-          name: "Explícito",
-          slug: "explicito_fixo",
-          blocks: MINIMAL_BLOCKS,
-          fields: [],
-        },
-        racy,
-      ),
-    ).rejects.toThrow(/already exists/);
-    expect(attempts).toBe(1);
-  });
-
-  // The fence, on the path that now READS the tenant's slugs to pick one. A neighbour's slug must
-  // neither be visible to the search nor block it.
-  test("another tenant's slug does not push this tenant's numbering", async () => {
+  // The fence: uniqueness is per tenant, so a neighbour holding the name must not refuse mine.
+  test("another tenant's name does not block this one", async () => {
     await createDocumentTemplate(
       ctx(tenantB),
       { name: "Contrato", blocks: MINIMAL_BLOCKS, fields: [] },
@@ -335,6 +279,40 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       appDb,
     );
     expect(mine.slug).toBe("contrato");
+  });
+
+  // The preview is the one surface a caller ACTS on: it renders the document and reports whether the
+  // write would be accepted. A draft whose only visible block is an optional token draws nothing,
+  // and issuance refuses it — so a preview that hands back a blank page and no error approves what
+  // the next call rejects.
+  test("refuses a preview of a draft that issuance would call blank", async () => {
+    const draft = {
+      name: "Só observações",
+      blocks: [{ id: "obs", type: "text", text: "{{notas}}" }],
+      fields: [{ name: "notas", label: "Notas", type: "text" }],
+      // Explicit and empty: the sample values a preview generates would fill the token, and this is
+      // the caller saying there is nothing to fill it with.
+      values: {},
+    };
+    await expect(
+      previewDocumentTemplate(ctx(tenantA), draft, appDb),
+    ).rejects.toThrow(/blank/);
+    // …and the ISSUE path answers the same way for the same draft, which is the agreement being
+    // asserted rather than either half on its own.
+    const tpl = await createDocumentTemplate(
+      ctx(tenantA),
+      { name: draft.name, blocks: draft.blocks, fields: draft.fields },
+      appDb,
+    );
+    await expect(
+      issueDocument({
+        tenantId: tenantA,
+        templateId: BigInt(tpl.id),
+        idempotencyKey: `blank-${process.pid}`,
+        values: {},
+        base: appDb,
+      }),
+    ).rejects.toThrow(/blank/);
   });
 
   test("previews an unsaved draft without issuing anything", async () => {

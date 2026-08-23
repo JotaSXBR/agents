@@ -222,16 +222,22 @@ HTTP/MCP/integration/RAG and unlike NATIVE: an agent with no grant has no docume
 existing agent gains one on upgrade.
 
 The tool's name is `send_<slug>`, and the slug is **derived from the template's name, never typed**.
-That makes every derivation that cannot produce a usable identifier a wall in front of an ordinary
-name, about something the operator did not choose and cannot see — three of which were reachable by
-typing a normal one: a second "Orçamento" (the slug was taken), "2026 Orçamento" (a tool name may not
-start with a digit) and "Image" (`send_image` is a built-in). So a derived slug is the system's
-problem: `availableSlug` walks `orcamento`, `orcamento_2`, … until it finds one that is both free in
-this tenant and valid, and the create retries the search if it loses the unique index to a concurrent
-write. An **explicit** slug is still refused on a collision, because there the caller asked for that
-tool name and quietly handing them another one is worse than saying no.
+Two consequences, and they pull in opposite directions.
 
-A slug whose name would collide with a built-in is refused when it is written. That check cannot be complete on its own: an MCP server names its own tools when it is
+**Names are unique per account**, and that is not bookkeeping: the name is what the model reads to
+choose between document tools. Two templates called "Orçamento" would publish two tools with the
+same description and nothing to pick between them, so the agent sends whichever it happens to choose
+and the customer gets the wrong document. Numbering the second one (`send_orcamento_2`) hides exactly
+that until it reaches a customer, so the write refuses instead — in terms of the **name**, which is
+what the operator typed, naming the template that already holds it. The console asks for the name at
+creation for the same reason, prefilled from the starter.
+
+**But a derivation that cannot produce a usable identifier is a different thing**: a wall in front of
+an ordinary name, about something the operator did not choose and cannot see. "2026 Orçamento"
+derived `2026_orcamento`, which a tool name may not start with, so `slugifyTemplateName` prefixes
+`doc_` rather than stripping the digits (dropping them makes "2026" and "2027" the same slug). What
+remains is a name that normalises onto a **built-in** tool — "Image" produces `send_image` — and that
+one is refused, again by name, because there is no identifier to repair. That check cannot be complete on its own: an MCP server names its own tools when it is
 contacted, so "is this name still free?" is a question no write can finish answering. The assembly is
 the one place that sees every name at once, so `dropDuplicateToolNames` decides it there — earlier
 wins, which puts the built-ins first, the loser is dropped rather than fatal (one bad name must not
@@ -241,7 +247,10 @@ take a whole agent down), and the names that lost are logged for the operator wh
 
 - **Console** — Components → Document templates. Create from a ready-made starter (quote, proposal,
   receipt), edit the letterhead, edit the **wording** of `text` blocks, and watch a live PDF preview.
-  Adding, removing and reordering blocks is API/MCP only, and the panel says so. The same modal opens
+  Adding, removing and reordering blocks is API/MCP only. The panel is split in two: **Templates**
+  (the letterhead as a one-line summary that opens an editor, then the templates) and **Issued** (the
+  documents that went out, with the template each came from — and the only place a document can be
+  revoked). The same modal opens
   from the **agent's Tools tab**, on the document card being granted: it is the one grant whose target
   has a picture, and "what does this print?" is the question being answered at that moment.
 - **REST** — `/v1/document-templates` (CRUD, `POST /preview`, `/starters`), `/v1/documents` (issue,

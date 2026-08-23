@@ -110,10 +110,17 @@ function mount() {
   );
 }
 
+// The issued documents live on their own tab now: a template is configuration, an issued document is
+// a record, and only the second one can be revoked.
+async function openIssuedTab() {
+  fireEvent.click(await screen.findByRole("tab", { name: /issued|emitidos/i }));
+}
+
 describe("revoking a document asks first", () => {
   test("the click opens a confirm instead of revoking", async () => {
     posted = [];
     mount();
+    await openIssuedTab();
     const button = await screen.findByText("Revoke");
     fireEvent.click(button);
     // Nothing has been revoked yet — that is the whole finding.
@@ -126,6 +133,7 @@ describe("revoking a document asks first", () => {
   test("confirming is what revokes it", async () => {
     posted = [];
     mount();
+    await openIssuedTab();
     fireEvent.click(await screen.findByText("Revoke"));
     // The dialog's own confirm button, which carries the same label as the row's.
     const buttons = screen.getAllByRole("button");

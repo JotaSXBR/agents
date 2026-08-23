@@ -1,4 +1,11 @@
-import { FileText, Link2, Plus, Trash2 } from "lucide-react";
+import {
+  Building2,
+  FileCheck,
+  FileText,
+  Link2,
+  Plus,
+  Trash2,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -11,8 +18,12 @@ import {
   type ConfirmPayload,
   DataBoundary,
   EmptyState,
+  FormField,
+  Input,
   Modal,
+  Tabs,
   useModalController,
+  useOnModalOpen,
   useToast,
 } from "@/client/components";
 import { api } from "@/client/lib/api";
@@ -33,6 +44,31 @@ type IssuedData = Awaited<
 >["data"];
 type IssuedDocument = NonNullable<IssuedData>["documents"][number];
 
+// The line under the company name in the summary row: what is filled in, in the order it prints on
+// the page. Empty when nothing is, which is what makes the row read as an invitation rather than as
+// a broken value.
+function companySummary(
+  company: CompanyProfile | null,
+  t: (key: string, fallback: string) => string,
+): string {
+  if (!company) return "";
+  const parts = [company.document, company.address, company.phone].filter(
+    (v): v is string => !!v?.trim(),
+  );
+  if (company.logoKey) parts.push(t("documents.company.hasLogo", "with logo"));
+  return parts.join(" · ");
+}
+
+// The message the API actually sent, when there is one. Eden hands an HTTP failure back as
+// `{ error }` whose `value` is the parsed body, and a refusal here is written for the operator (which
+// template has the name, which rule the name breaks) — throwing it away for a generic string is how
+// a fixable mistake becomes a dead end.
+function serverMessage(err: unknown): string | undefined {
+  const value = (err as { value?: unknown } | null)?.value;
+  const message = (value as { error?: unknown } | null)?.error;
+  return typeof message === "string" && message.trim() ? message : undefined;
+}
+
 export function DocumentsPanel() {
   const { t, i18n } = useTranslation();
   // The route defaults an absent locale to pt-BR, so an English console would create Portuguese
@@ -52,6 +88,11 @@ export function DocumentsPanel() {
   const [startersError, setStartersError] = useState(false);
   const [issuedError, setIssuedError] = useState(false);
   const [creating, setCreating] = useState<string | null>(null);
+  // Which starter is being named, and what the server said about the last attempt. Both belong to
+  // the dialog, and both are cleared when it reopens.
+  const [naming, setNaming] = useState<Starter | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   // null = still loading, "error" = the lookup failed. Two states, because collapsing them leaves a
   // dialog claiming to be checking something it has already given up on.
@@ -60,7 +101,15 @@ export function DocumentsPanel() {
     null,
   );
 
+  // Which half of the screen is showing. Local, not routed: the two are one resource seen two ways,
+  // and a URL for "the issued list" is a promise to keep it addressable that nothing else here makes.
+  const [tab, setTab] = useState<"templates" | "issued">("templates");
+  // Reported by the letterhead form so its modal can guard its own close with the same answer the
+  // nav guard uses.
+  const [companyDirty, setCompanyDirty] = useState(false);
+
   const editModal = useModalController<{ template: DocumentTemplate }>();
+  const companyModal = useModalController();
   const starterModal = useModalController();
   const refsModal = useModalController<{ name: string }>();
   const deleteModal = useModalController<{ id: string; name: string }>();
@@ -157,11 +206,26 @@ export function DocumentsPanel() {
     void load();
   }, [load]);
 
-  async function createFromStarter(starter: Starter) {
+  // The dialog has two steps, so reopening it has to land on the first one. `useOnModalOpen` fires
+  // on every false→true transition, which is the event this belongs to: the controller keeps its
+  // payload after close (Radix needs it for the exit animation), so an operator who cancels on the
+  // naming step and reopens would otherwise be handed that step again, prefilled with the name they
+  // just abandoned (docs/modals.md).
+  useOnModalOpen(starterModal, () => {
+    setNaming(null);
+    setDraftName("");
+    setCreateError(null);
+  });
+
+  // Names are unique per account and the name is what the agent's tool is called, so it is asked for
+  // HERE rather than defaulted and repaired later. The starter's own name is the suggestion; a second
+  // quote is "Orçamento de instalação", not a numbered copy of the first.
+  async function createFromStarter(starter: Starter, name: string) {
     setCreating(starter.key);
+    setCreateError(null);
     try {
       const { error: err } = await api.api.v1["document-templates"].post({
-        name: starter.name,
+        name,
         description: starter.description,
         blocks: starter.blocks as Record<string, unknown>[],
         fields: starter.fields as Record<string, unknown>[],
@@ -169,10 +233,10 @@ export function DocumentsPanel() {
         numberPrefix: starter.numberPrefix,
       });
       if (err) {
-        showToast(
-          t("documents.createError", "Could not create this template."),
-          "error",
-        );
+        // The server's own words, shown next to the field that caused them. It says which template
+        // already has the name, which a generic "could not create" cannot — and the operator is
+        // three characters away from fixing it.
+        setCreateError(serverMessage(err) ?? null);
         return;
       }
       starterModal.close();
@@ -181,9 +245,8 @@ export function DocumentsPanel() {
     } catch {
       // Eden REJECTS on a transport failure instead of answering `{ error }`, and only the second
       // was handled: offline, the button spun and then said nothing at all.
-      showToast(
+      setCreateError(
         t("documents.createError", "Could not create this template."),
-        "error",
       );
     } finally {
       setCreating(null);
@@ -329,6 +392,12 @@ export function DocumentsPanel() {
     void load();
   }
 
+  // Which template each issued document came from. The issued list carries `templateId`, not the
+  // name, and the panel already has the templates — so the join is here rather than a column on the
+  // row. A document OUTLIVES its template (the FK nulls the id on delete), so the miss is a real
+  // state, not a loading one, and it says so instead of showing a blank.
+  const templateNames = new Map(templates.map((tpl) => [tpl.id, tpl.name]));
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between gap-3">
@@ -338,110 +407,166 @@ export function DocumentsPanel() {
             "Quotes, proposals and receipts your agents can issue and attach to a reply.",
           )}
         </p>
-        <Button size="sm" onClick={() => starterModal.open()}>
-          <Plus className="h-4 w-4" aria-hidden="true" />
-          {t("documents.add", "New template")}
-        </Button>
+        {tab === "templates" && (
+          <Button size="sm" onClick={() => starterModal.open()}>
+            <Plus className="h-4 w-4" aria-hidden="true" />
+            {t("documents.add", "New template")}
+          </Button>
+        )}
       </div>
 
-      {/* Inside a boundary of its own, not beside one: rendered eagerly it showed an editable BLANK
-          form while the settings request was still out, and the response then reset the draft —
-          throwing away whatever the operator had already typed. And if only that request failed, the
-          card stayed blank with no error, over a profile that may well have values stored. */}
-      <DataBoundary loading={loading} error={error} onRetry={load}>
-        <CompanyProfileCard company={company} onChanged={applyCompany} />
-      </DataBoundary>
+      {/* Two things live on this screen and only one of them is configuration. A template is authored
+          once and granted; an issued document is a RECORD, read when somebody asks about a document
+          the customer already has. Stacking the second under the first made the page read as one
+          long list, and it is the reason the letterhead — edited once and forgotten — sat above the
+          thing the page is named after. */}
+      <Tabs
+        items={[
+          {
+            key: "templates",
+            label: t("documents.tabs.templates", "Templates"),
+            icon: FileText,
+          },
+          {
+            key: "issued",
+            label: t("documents.tabs.issued", "Issued"),
+            icon: FileCheck,
+          },
+        ]}
+        value={tab}
+        onChange={(k) => setTab(k as typeof tab)}
+        aria-label={t("resources.tabs.documents", "Document templates")}
+      />
 
-      <DataBoundary
-        loading={loading}
-        error={error}
-        isEmpty={templates.length === 0}
-        onRetry={load}
-        empty={
-          <EmptyState
-            icon={FileText}
-            title={t("documents.emptyTitle", "No document templates yet")}
-            description={t(
-              "documents.emptyDesc",
-              "Start from a ready-made quote, proposal or receipt, then edit the wording.",
-            )}
-            action={
-              <Button size="sm" onClick={() => starterModal.open()}>
-                <Plus className="h-4 w-4" aria-hidden="true" />
-                {t("documents.add", "New template")}
-              </Button>
-            }
-          />
-        }
-      >
-        <div className="flex flex-col gap-3">
-          {templates.map((tpl) => (
-            <Card
-              key={tpl.id}
-              className="flex items-center justify-between gap-4"
-            >
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="truncate font-medium text-text-primary">
-                    {tpl.name}
-                  </span>
-                  <Badge variant="secondary">{tpl.toolName}</Badge>
-                  {!tpl.enabled && (
-                    <Badge variant="secondary">
-                      {t("common.disabled", "Disabled")}
-                    </Badge>
-                  )}
+      {tab === "templates" ? (
+        <>
+          {/* A summary, not the form. The letterhead is filled once and then forgotten, so an open
+              editable form at the top of the page spent the first screenful on the thing that
+              changes least — and being open is also what made a background refresh able to discard
+              what somebody was typing into it. In a modal it cannot. */}
+          <DataBoundary loading={loading} error={error} onRetry={load}>
+            <Card className="flex items-center justify-between gap-4 py-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <Building2
+                  className="h-4 w-4 shrink-0 text-accent"
+                  aria-hidden="true"
+                />
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-sm text-text-primary">
+                    {company?.name?.trim() ||
+                      t("documents.company.unset", "No letterhead yet")}
+                  </p>
+                  <p className="truncate text-text-muted text-xs">
+                    {companySummary(company, t)}
+                  </p>
                 </div>
-                <p className="mt-0.5 truncate text-text-muted text-xs">
-                  {tpl.description ??
-                    t("documents.blockCount", "{{count}} blocks", {
-                      count: tpl.blocks.length,
-                    })}
-                </p>
               </div>
-              <div className="flex shrink-0 gap-1">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => openRefs(tpl)}
-                >
-                  <Link2 className="h-4 w-4" aria-hidden="true" />
-                  {t("resources.usage", "Usage")}
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => editModal.open({ template: tpl })}
-                >
-                  {t("common.edit", "Edit")}
-                </Button>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  onClick={() => askDelete(tpl)}
-                  aria-label={t("common.delete", "Delete")}
-                >
-                  <Trash2 className="h-4 w-4" aria-hidden="true" />
-                </Button>
-              </div>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => companyModal.open()}
+              >
+                {company?.name?.trim()
+                  ? t("common.edit", "Edit")
+                  : t("documents.company.fill", "Fill in")}
+              </Button>
             </Card>
-          ))}
-        </div>
-      </DataBoundary>
+          </DataBoundary>
 
-      {issuedError && (
-        <p className="text-sm text-warning">
-          {t(
-            "documents.issuedError",
-            "Could not load the recently issued documents.",
-          )}
-        </p>
-      )}
-      {issued.length > 0 && (
-        <div className="flex flex-col gap-2">
-          <h2 className="font-medium text-sm text-text-primary">
-            {t("documents.issuedTitle", "Recently issued")}
-          </h2>
+          <DataBoundary
+            loading={loading}
+            error={error}
+            isEmpty={templates.length === 0}
+            onRetry={load}
+            empty={
+              <EmptyState
+                icon={FileText}
+                title={t("documents.emptyTitle", "No document templates yet")}
+                description={t(
+                  "documents.emptyDesc",
+                  "Start from a ready-made quote, proposal or receipt, then edit the wording.",
+                )}
+                action={
+                  <Button size="sm" onClick={() => starterModal.open()}>
+                    <Plus className="h-4 w-4" aria-hidden="true" />
+                    {t("documents.add", "New template")}
+                  </Button>
+                }
+              />
+            }
+          >
+            <div className="flex flex-col gap-3">
+              {templates.map((tpl) => (
+                <Card
+                  key={tpl.id}
+                  className="flex items-center justify-between gap-4"
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate font-medium text-text-primary">
+                        {tpl.name}
+                      </span>
+                      <Badge variant="secondary">{tpl.toolName}</Badge>
+                      {!tpl.enabled && (
+                        <Badge variant="secondary">
+                          {t("common.disabled", "Disabled")}
+                        </Badge>
+                      )}
+                    </div>
+                    <p className="mt-0.5 truncate text-text-muted text-xs">
+                      {tpl.description ??
+                        t("documents.blockCount", "{{count}} blocks", {
+                          count: tpl.blocks.length,
+                        })}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 gap-1">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => openRefs(tpl)}
+                    >
+                      <Link2 className="h-4 w-4" aria-hidden="true" />
+                      {t("resources.usage", "Usage")}
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => editModal.open({ template: tpl })}
+                    >
+                      {t("common.edit", "Edit")}
+                    </Button>
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      onClick={() => askDelete(tpl)}
+                      aria-label={t("common.delete", "Delete")}
+                    >
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                    </Button>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          </DataBoundary>
+        </>
+      ) : (
+        <DataBoundary
+          loading={loading}
+          error={issuedError || error}
+          isEmpty={issued.length === 0}
+          onRetry={load}
+          empty={
+            <EmptyState
+              icon={FileCheck}
+              title={t("documents.issuedEmptyTitle", "No documents issued yet")}
+              description={t(
+                "documents.issuedEmptyDesc",
+                "Documents your agents issue from a template show up here, with the PDF the customer received.",
+              )}
+            />
+          }
+        >
           <div className="flex flex-col gap-2">
             {issued.map((doc) => (
               <Card
@@ -449,20 +574,29 @@ export function DocumentsPanel() {
                 className="flex items-center justify-between gap-4 py-2"
               >
                 <div className="min-w-0">
-                  <span className="truncate font-medium text-sm text-text-primary">
-                    {doc.number ? `${doc.title} ${doc.number}` : doc.title}
-                  </span>
-                  {doc.revoked && (
-                    <Badge variant="secondary">
-                      {t("documents.revokedBadge", "Revoked")}
-                    </Badge>
-                  )}
-                  {!doc.revoked && doc.status !== "READY" && (
-                    <Badge variant="secondary">
-                      {t("documents.pendingBadge", "Not rendered")}
-                    </Badge>
-                  )}
-                  <p className="text-text-muted text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate font-medium text-sm text-text-primary">
+                      {doc.number ? `${doc.title} ${doc.number}` : doc.title}
+                    </span>
+                    {doc.revoked && (
+                      <Badge variant="secondary">
+                        {t("documents.revokedBadge", "Revoked")}
+                      </Badge>
+                    )}
+                    {!doc.revoked && doc.status !== "READY" && (
+                      <Badge variant="secondary">
+                        {t("documents.pendingBadge", "Not rendered")}
+                      </Badge>
+                    )}
+                  </div>
+                  {/* Which template it came from, and when. Without the first, two documents from
+                      different templates that happen to share a title are the same row twice. */}
+                  <p className="mt-0.5 truncate text-text-muted text-xs">
+                    {doc.templateId
+                      ? (templateNames.get(doc.templateId) ??
+                        t("documents.templateGone", "Template deleted"))
+                      : t("documents.templateGone", "Template deleted")}
+                    {" · "}
                     {new Date(doc.createdAt).toLocaleString()}
                   </p>
                 </div>
@@ -491,7 +625,7 @@ export function DocumentsPanel() {
               </Card>
             ))}
           </div>
-        </div>
+        </DataBoundary>
       )}
 
       <ConfirmDialog modal={confirm} />
@@ -499,8 +633,54 @@ export function DocumentsPanel() {
       <DocumentTemplateModal modal={editModal} onSaved={() => load()} />
 
       <Modal
+        modal={companyModal}
+        title={t("documents.company.title", "Company profile")}
+        // Guarded like any other form modal: the letterhead is typed into, and dismissing on a
+        // backdrop click used to be free because the form lived on the page, where the nav guard
+        // caught it. In a modal the nav guard never fires.
+        onCloseRequest={
+          companyDirty
+            ? () => {
+                confirm.open({
+                  title: t(
+                    "documents.company.discardTitle",
+                    "Discard changes?",
+                  ),
+                  message: t(
+                    "documents.company.discardMessage",
+                    "The letterhead has unsaved changes. Close anyway?",
+                  ),
+                  danger: true,
+                  confirmLabel: t("common.discard", "Discard"),
+                  onConfirm: () => {
+                    setCompanyDirty(false);
+                    companyModal.close();
+                  },
+                });
+              }
+            : undefined
+        }
+      >
+        <CompanyProfileCard
+          company={company}
+          onChanged={applyCompany}
+          // Closed by a PROFILE save only. A logo upload also answers with the whole block, and
+          // closing the editor because a picture finished uploading takes the form away mid-edit.
+          onSaved={() => {
+            setCompanyDirty(false);
+            companyModal.close();
+          }}
+          onDirtyChange={setCompanyDirty}
+        />
+      </Modal>
+
+      <Modal
         modal={starterModal}
-        title={t("documents.starterTitle", "Start from a template")}
+        title={
+          naming
+            ? t("documents.nameTitle", "Name this template")
+            : t("documents.starterTitle", "Start from a template")
+        }
         // Dismissing mid-create would leave a request in flight whose result the operator can no
         // longer see, and the template it creates would then appear in the list with no
         // explanation. It is also what keeps this dialog from being REOPENED while a request from
@@ -508,45 +688,97 @@ export function DocumentsPanel() {
         // and does not, because it cannot happen.
         onCloseRequest={creating ? () => undefined : undefined}
       >
-        <div className="flex flex-col gap-3">
-          <p className="text-sm text-text-muted">
-            {t(
-              "documents.starterHint",
-              "Pick one to copy into your account, then edit its wording. Building a template block by block is done through the API or MCP.",
-            )}
-          </p>
-          {startersError && (
-            <p className="text-sm text-warning">
+        {naming ? (
+          <div className="flex flex-col gap-3">
+            {/* The name is asked for, not defaulted: it is what the agent's tool is called and what
+                the model reads to choose between documents, so two templates cannot share one. The
+                starter's name is the suggestion, and it is selected on focus so replacing it is one
+                keystroke. */}
+            <p className="text-sm text-text-muted">
               {t(
-                "documents.startersError",
-                "Could not load the ready-made templates.",
+                "documents.nameHint",
+                "This is what the agent's tool is called, so each template needs its own name.",
               )}
             </p>
-          )}
-          {starters.map((s) => (
-            <Card
-              key={s.key}
-              className="flex items-center justify-between gap-4"
-            >
-              <div className="min-w-0">
-                <p className="font-medium text-sm text-text-primary">
-                  {s.name}
-                </p>
-                <p className="text-text-muted text-xs">{s.description}</p>
-              </div>
+            <FormField label={t("documents.name", "Name")}>
+              <Input
+                autoFocus
+                value={draftName}
+                onChange={(e) => {
+                  setDraftName(e.target.value);
+                  setCreateError(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && draftName.trim() && !creating) {
+                    void createFromStarter(naming, draftName.trim());
+                  }
+                }}
+              />
+            </FormField>
+            {createError && (
+              <p className="text-sm text-warning">{createError}</p>
+            )}
+            <div className="flex justify-end gap-2">
               <Button
-                size="sm"
-                loading={creating === s.key}
-                // Every row, not just this one: two starters picked in quick succession are two
-                // templates, and the second request also clears the first one's spinner.
+                variant="secondary"
                 disabled={creating !== null}
-                onClick={() => createFromStarter(s)}
+                onClick={() => {
+                  setNaming(null);
+                  setCreateError(null);
+                }}
               >
-                {t("documents.use", "Use")}
+                {t("common.back", "Back")}
               </Button>
-            </Card>
-          ))}
-        </div>
+              <Button
+                loading={creating !== null}
+                disabled={!draftName.trim() || creating !== null}
+                onClick={() => void createFromStarter(naming, draftName.trim())}
+              >
+                {t("documents.create", "Create")}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            <p className="text-sm text-text-muted">
+              {t(
+                "documents.starterHint",
+                "Pick one to copy into your account, then edit its wording.",
+              )}
+            </p>
+            {startersError && (
+              <p className="text-sm text-warning">
+                {t(
+                  "documents.startersError",
+                  "Could not load the ready-made templates.",
+                )}
+              </p>
+            )}
+            {starters.map((s) => (
+              <Card
+                key={s.key}
+                className="flex items-center justify-between gap-4"
+              >
+                <div className="min-w-0">
+                  <p className="font-medium text-sm text-text-primary">
+                    {s.name}
+                  </p>
+                  <p className="text-text-muted text-xs">{s.description}</p>
+                </div>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setNaming(s);
+                    setDraftName(s.name);
+                    setCreateError(null);
+                  }}
+                >
+                  {t("documents.use", "Use")}
+                </Button>
+              </Card>
+            ))}
+          </div>
+        )}
       </Modal>
 
       <Modal

@@ -182,27 +182,40 @@ describe("creating from a starter is one request", () => {
     return view;
   }
 
-  test("a second pick while one is in flight does nothing", async () => {
+  // "Use" no longer creates: it moves to the naming step, because names are unique per account and
+  // the name is what the agent's tool is called. The request comes from Create, so that is where the
+  // in-flight rules live now.
+  async function pickFirstStarter() {
+    const buttons = await screen.findAllByText("Use");
+    expect(buttons.length).toBeGreaterThan(1);
+    fireEvent.click(buttons[0] as HTMLElement);
+    return screen.findByRole("button", { name: /^create$/i });
+  }
+
+  test("picking a starter asks for a name instead of creating", async () => {
+    await i18n.changeLanguage("en");
+    posts.length = 0;
+    await openStarters();
+    await pickFirstStarter();
+    // Nothing written yet, and the starter's own name is the suggestion.
+    expect(posts.length).toBe(0);
+    const input = screen.getByRole("textbox") as HTMLInputElement;
+    expect(input.value.length).toBeGreaterThan(0);
+  });
+
+  test("a second Create while one is in flight does nothing", async () => {
     // English, because these assertions read the button labels and the real catalog is loaded.
     await i18n.changeLanguage("en");
     posts.length = 0;
     holdPost = true;
     await openStarters();
-    const buttons = await screen.findAllByText("Use");
-    expect(buttons.length).toBeGreaterThan(1);
-    fireEvent.click(buttons[0] as HTMLElement);
+    const create = await pickFirstStarter();
+    fireEvent.click(create);
     await waitFor(() => {
       expect(posts.length).toBe(1);
     });
-    // EVERY row, not just the one that was picked: a second starter chosen while the first request
-    // is out is a second template, and its response also clears the first one's spinner.
-    const rows = await screen.findAllByText("Use");
-    const disabled = rows.map(
-      (b) =>
-        (b.closest("button") as HTMLButtonElement | null)?.disabled === true,
-    );
-    expect(disabled.every(Boolean)).toBe(true);
-    for (const row of rows) fireEvent.click(row);
+    fireEvent.click(await screen.findByRole("button", { name: /^create$/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^create$/i }));
     await new Promise((r) => setTimeout(r, 30));
     expect(posts.length).toBe(1);
     releasePost();
@@ -213,15 +226,16 @@ describe("creating from a starter is one request", () => {
     posts.length = 0;
     holdPost = true;
     await openStarters();
-    const buttons = await screen.findAllByText("Use");
-    fireEvent.click(buttons[0] as HTMLElement);
+    fireEvent.click(await pickFirstStarter());
     await waitFor(() => {
       expect(posts.length).toBe(1);
     });
     fireEvent.keyDown(document.body, { key: "Escape", code: "Escape" });
     await new Promise((r) => setTimeout(r, 30));
-    // Still there: the starter list is what the operator has to keep seeing until this answers.
-    expect(screen.queryAllByText("Use").length).toBeGreaterThan(0);
+    // Still there: the dialog is what the operator has to keep seeing until this answers.
+    expect(
+      screen.queryAllByRole("button", { name: /^create$/i }).length,
+    ).toBeGreaterThan(0);
     releasePost();
   });
 });
@@ -240,8 +254,12 @@ describe("a refresh does not undo a company save it overlapped", () => {
         </ToastProvider>
       </MemoryRouter>,
     );
-    // First load through, so the company form is on screen and interactive.
+    // First load through, then the letterhead editor opened: it is a modal now, so the form is not on
+    // screen until somebody asks for it.
     gate("en-US").release();
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^(edit|fill in)$/i }),
+    );
     const nameInput = (await screen.findAllByRole("textbox"))[0];
     if (!nameInput) throw new Error("no company field");
 
@@ -268,10 +286,9 @@ describe("a refresh does not undo a company save it overlapped", () => {
     gate("documents").release();
     await new Promise((r) => setTimeout(r, 80));
 
-    const value = (
-      (await screen.findAllByRole("textbox"))[0] as HTMLInputElement
-    ).value;
-    expect(value).toBe("ACME Nova");
+    // Read off the summary row rather than the field: a successful save closes the editor, so the
+    // name the panel is holding is what the row prints. Same question, the place it is now visible.
+    expect((document.body.textContent ?? "").includes("ACME Nova")).toBe(true);
   });
 });
 

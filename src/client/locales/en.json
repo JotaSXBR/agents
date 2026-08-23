@@ -295,6 +295,7 @@
     "tokenSaveError": "Could not update the token (check it)."
   },
   "common": {
+    "back": "Back",
     "cancel": "Cancel",
     "charOverLimit": "{{over}} characters over the limit. The agent only receives the first {{max}}; shorten it to save a change to this field.",
     "clearSearch": "Clear search",
@@ -312,6 +313,7 @@
     "create": "Create",
     "delete": "Delete",
     "disabled": "Disabled",
+    "discard": "Discard",
     "discardChanges": "Discard changes?",
     "discardChangesBody": "You have unsaved changes. If you leave now, they will be lost.",
     "discardChangesConfirm": "Discard",
@@ -554,8 +556,12 @@
     "blockCount_other": "{{count}} blocks",
     "company": {
       "address": "Address",
+      "discardMessage": "The letterhead has unsaved changes. Close anyway?",
+      "discardTitle": "Discard changes?",
       "document": "Tax id",
       "email": "Email",
+      "fill": "Fill in",
+      "hasLogo": "with logo",
       "logo": "Logo",
       "logoError": "Could not upload. The logo must be a PNG or JPEG under 512 KB.",
       "logoRemoveError": "Could not remove the logo.",
@@ -565,9 +571,11 @@
       "saveError": "Could not save.",
       "subtitle": "Printed on every document you issue.",
       "title": "Company profile",
+      "unset": "No letterhead yet",
       "uploadLogo": "Upload",
       "website": "Website"
     },
+    "create": "Create",
     "created": "Template created.",
     "createError": "Could not create this template.",
     "deleteChecking": "Checking which agents use it…",
@@ -582,9 +590,11 @@
     "emptyTitle": "No document templates yet",
     "enabled": "Agents may issue this document",
     "fields": "Fields the agent fills",
-    "issuedError": "Could not load the recently issued documents.",
-    "issuedTitle": "Recently issued",
+    "issuedEmptyDesc": "Documents your agents issue from a template show up here, with the PDF the customer received.",
+    "issuedEmptyTitle": "No documents issued yet",
     "name": "Name",
+    "nameHint": "This is what the agent's tool is called, so each template needs its own name.",
+    "nameTitle": "Name this template",
     "noTextBlocks": "This template has no text block.",
     "numberPrefix": "Number prefix",
     "numberPrefixHint": "e.g. \"ORC-\" → ORC-0001",
@@ -616,6 +626,11 @@
       "size": "Base font size"
     },
     "subtitle": "Quotes, proposals and receipts your agents can issue and attach to a reply.",
+    "tabs": {
+      "issued": "Issued",
+      "templates": "Templates"
+    },
+    "templateGone": "Template deleted",
     "textBlocks": "Text",
     "textBlocksHint": "Only the wording is editable here. Adding, removing or reordering blocks is done through the API or MCP.",
     "toolName": "Agent tool",

@@ -25,9 +25,18 @@ export type CompanyProfile = NonNullable<SettingsData>["company"];
 export function CompanyProfileCard({
   company,
   onChanged,
+  onSaved,
+  onDirtyChange,
 }: {
   company: CompanyProfile | null;
   onChanged: (next: CompanyProfile) => void;
+  // Fired only by a PROFILE save, which is what the modal closes on. Deliberately not `onChanged`:
+  // that one also fires for a logo upload, and closing the letterhead editor because a picture
+  // finished uploading takes the form away mid-edit.
+  onSaved?: () => void;
+  // Reported out so the modal can guard its own close with the same answer the nav guard uses. One
+  // definition of "unsaved", or the dialog warns about edits the save would not send.
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const { t } = useTranslation();
   const { showToast } = useToast();
@@ -38,7 +47,11 @@ export function CompanyProfileCard({
   // The letterhead is the one form on this tab that is not a modal, so nothing else stands between
   // an unsaved edit and a click on another tab — or a tenant switch, which is a full reload. The
   // same `companyChanges` the save sends is what "unsaved" means here, so the two cannot disagree.
-  useNavGuard(Object.keys(companyChanges(form)).length > 0);
+  const dirty = Object.keys(companyChanges(form)).length > 0;
+  useNavGuard(dirty);
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   // ONE write to the company block at a time — across all THREE of them, not one flag per control.
   //
@@ -101,6 +114,7 @@ export function CompanyProfileCard({
       setForm((current) => afterCompanySave(current, sent));
       onChanged(data.company);
       showToast(t("common.saved", "Saved."), "success");
+      onSaved?.();
     } catch {
       // Eden RESOLVES an HTTP error as `{ error }` and REJECTS on a transport failure — offline, a
       // reset connection. Only the first half was handled, so the second left the operator with a

@@ -296,6 +296,7 @@
     "tokenSaveError": "Não foi possível atualizar o token (verifique-o)."
   },
   "common": {
+    "back": "Voltar",
     "cancel": "Cancelar",
     "charOverLimit": "{{over}} caracteres acima do limite. O agente só recebe os primeiros {{max}}; encurte o texto para salvar uma alteração neste campo.",
     "clearSearch": "Limpar busca",
@@ -313,6 +314,7 @@
     "create": "Criar",
     "delete": "Excluir",
     "disabled": "Desativado",
+    "discard": "Descartar",
     "discardChanges": "Descartar alterações?",
     "discardChangesBody": "Você tem alterações não salvas. Se sair agora, elas serão perdidas.",
     "discardChangesConfirm": "Descartar",
@@ -557,8 +559,12 @@
     "blockCount_other": "{{count}} blocos",
     "company": {
       "address": "Endereço",
+      "discardMessage": "O timbre tem alterações não salvas. Fechar mesmo assim?",
+      "discardTitle": "Descartar alterações?",
       "document": "CNPJ/CPF",
       "email": "E-mail",
+      "fill": "Preencher",
+      "hasLogo": "com logo",
       "logo": "Logo",
       "logoError": "Não foi possível enviar. O logo precisa ser PNG ou JPEG com até 512 KB.",
       "logoRemoveError": "Não foi possível remover o logo.",
@@ -568,9 +574,11 @@
       "saveError": "Não foi possível salvar.",
       "subtitle": "Impresso em todo documento que você emite.",
       "title": "Perfil da empresa",
+      "unset": "Sem timbre ainda",
       "uploadLogo": "Enviar",
       "website": "Site"
     },
+    "create": "Criar",
     "created": "Modelo criado.",
     "createError": "Não foi possível criar este modelo.",
     "deleteChecking": "Verificando quais agentes usam este modelo…",
@@ -585,9 +593,11 @@
     "emptyTitle": "Nenhum modelo de documento ainda",
     "enabled": "Agentes podem emitir este documento",
     "fields": "Campos que o agente preenche",
-    "issuedError": "Não foi possível carregar os documentos emitidos recentemente.",
-    "issuedTitle": "Emitidos recentemente",
+    "issuedEmptyDesc": "Os documentos que seus agentes emitem a partir de um modelo aparecem aqui, com o PDF que o cliente recebeu.",
+    "issuedEmptyTitle": "Nenhum documento emitido ainda",
     "name": "Nome",
+    "nameHint": "É assim que a ferramenta do agente se chama, então cada modelo precisa do seu próprio nome.",
+    "nameTitle": "Dê um nome a este modelo",
     "noTextBlocks": "Este modelo não tem bloco de texto.",
     "numberPrefix": "Prefixo da numeração",
     "numberPrefixHint": "ex.: \"ORC-\" → ORC-0001",
@@ -607,7 +617,7 @@
     "revokeMessage": "Revogar \"{{name}}\"? O PDF dele deixa de ser servido, e isso não tem volta.",
     "revokeTitle": "Revogar documento",
     "saveError": "Não foi possível salvar este modelo.",
-    "starterHint": "Escolha um para copiar para a sua conta e depois edite o texto. Montar um modelo bloco a bloco é feito pela API ou pelo MCP.",
+    "starterHint": "Escolha um para copiar para a sua conta e depois edite o texto.",
     "startersError": "Não foi possível carregar os modelos prontos.",
     "starterTitle": "Começar por um modelo pronto",
     "style": {
@@ -619,6 +629,11 @@
       "size": "Tamanho base da fonte"
     },
     "subtitle": "Orçamentos, propostas e recibos que seus agentes emitem e anexam à resposta.",
+    "tabs": {
+      "issued": "Emitidos",
+      "templates": "Modelos"
+    },
+    "templateGone": "Modelo excluído",
     "textBlocks": "Texto",
     "textBlocksHint": "Só o texto é editável aqui. Adicionar, remover ou reordenar blocos é feito pela API ou pelo MCP.",
     "toolName": "Ferramenta do agente",

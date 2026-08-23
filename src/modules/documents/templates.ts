@@ -16,6 +16,7 @@ import {
   parseDocumentStyle,
 } from "./blocks";
 import { type CompanyLogo, readCompanyLogo } from "./company";
+import { documentDraws } from "./draws";
 import { formatDate, formatDocumentNumber } from "./format";
 import { calendarDay } from "./issue";
 import { unprintableProblem } from "./printable";
@@ -86,77 +87,93 @@ export function slugProblem(slug: string): string | null {
   return null;
 }
 
-// How far the search below goes before giving up. A tenant whose names all derive to the same slug
-// this many times over is not being helped by another number on the end, and a conflict they can
-// read beats a tool name nobody chose.
-const SLUG_SEARCH_LIMIT = 50;
-
-// How many times a DERIVED slug re-reads and retries after losing the unique index to a concurrent
-// create. Small on purpose: each attempt only loses if another create of the same name landed in
-// between, so more than a couple means something other than a race.
-const SLUG_RETRY_LIMIT = 3;
-
-function slugWithCounter(base: string, n: number): string {
-  const suffix = `_${n}`;
-  // Truncated so the SUFFIX fits, not the base: the bound exists because the slug becomes a tool
-  // name, and a provider rejects the whole request over a name past its cap.
-  return `${base.slice(0, SLUG_MAX - suffix.length).replace(/_+$/, "")}${suffix}`;
+// Names are UNIQUE per tenant, enforced through the slug they derive to, and the uniqueness is not
+// bookkeeping: the name is what the model reads to pick between document tools. Two templates called
+// "Orçamento" produce two tools with the same description and nothing to choose between them, so the
+// agent picks one at random and sends the customer the wrong document. Numbering the second one
+// (`send_orcamento_2`) would hide exactly that, which is why the write refuses instead.
+//
+// The refusal is written in terms of the NAME, because that is what the operator typed. Naming the
+// slug tells them about an identifier they never chose and cannot edit.
+// Both halves of the answer: the English text (the log line, the MCP client's answer, and the
+// fallback) and the key the HTTP layer localises. They are built together because they have to say
+// the same thing — a key without its pre-interpolated message is what turns a careful refusal into
+// "A document template with this identifier already exists" on the way out.
+interface Refusal {
+  message: string;
+  key: string;
+  params: Record<string, string>;
 }
 
-// The first slug near `base` that this tenant can actually use, or null if there is none.
-//
-// Only ever applied to a DERIVED slug. When the caller wrote the slug themselves it stays a
-// conflict, because they asked for that tool name and quietly giving them a different one is worse
-// than being told they cannot have it.
-//
-// `slugProblem` is consulted as well as `taken`, and it has to be: the built-in tool names are not
-// rows in this table, so a candidate colliding with `send_image` is absent from `taken` and would be
-// handed back only for the create to refuse it — which is the wall this function exists to remove.
-export function availableSlug(
-  base: string,
-  taken: ReadonlySet<string>,
-): string | null {
-  for (let n = 1; n <= SLUG_SEARCH_LIMIT; n++) {
-    const candidate = n === 1 ? base : slugWithCounter(base, n);
-    if (taken.has(candidate)) continue;
-    if (slugProblem(candidate)) continue;
-    return candidate;
+function nameTaken(
+  existingName: string,
+  name: string | undefined,
+  slug: string,
+): Refusal {
+  const tool = documentToolName(slug);
+  if (name === undefined) {
+    return {
+      message: `the slug "${slug}" is already taken by the template "${existingName}"`,
+      key: "errors.documentTemplateSlugTaken",
+      params: {},
+    };
   }
-  return null;
+  // Same name, or merely the same normalisation ("Orçamento" vs "Orcamento"). The second is the one
+  // that would otherwise read as a false refusal, so its message names both templates.
+  return existingName === name
+    ? {
+        message: `you already have a document template called "${name}"`,
+        key: "errors.documentTemplateNameTaken",
+        params: { name },
+      }
+    : {
+        message: `"${name}" collides with the template "${existingName}": both produce the tool name ${tool}`,
+        key: "errors.documentTemplateNameCollides",
+        params: { name, existing: existingName, tool },
+      };
 }
 
-// Every slug this tenant has, for the search above. All of them rather than the ones sharing a
-// prefix: `slugWithCounter` truncates the base to make room for the counter, so a prefix query built
-// from the base can MISS the very candidates it is meant to find, and the two would have to be kept
-// in step forever. Templates are authored one at a time by a person, so the row count is tens.
-//
-// No `excludeId`. It looks like it belongs — the update dry run has one — but only a CREATE derives
-// a slug, so the one caller that carries an id also passes `deriveSlugFromName: false` and returns
-// before reaching here. Written as a parameter first, and removed when a mutation that ignored it
-// broke no test: a row this can exclude does not exist.
-async function takenSlugs(
-  ctx: TenantContext,
-  base: PrismaClient,
-): Promise<Set<string>> {
-  const rows = await runScopedOn(base, ctx, (db) =>
-    db.documentTemplate.findMany({ select: { slug: true } }),
-  );
-  return new Set(rows.map((r) => r.slug));
-}
-
-// A slug is unique per tenant in the database, and both writes can hit that index — the create with
-// a name already in use, the update with a rename onto one. Answering the same constraint two
-// different ways is how a rename ends up as a 500 for something the operator can fix by typing
-// another name, so the mapping lives here and both callers use it.
-function slugConflict(slug: string): (e: unknown) => never {
+// The same constraint arriving from the database instead of the pre-check, which is the concurrent
+// case and the MCP/import case. Answering it two different ways is how a rename ends up as a 500 for
+// something the operator can fix by typing another name, so the mapping lives here.
+function slugConflict(slug: string, name?: string): (e: unknown) => never {
   return (e: unknown) => {
     if (e instanceof Error && (e as { code?: string }).code === "P2002") {
       throw new ConflictError(
-        `a document template with the slug "${slug}" already exists`,
+        name === undefined
+          ? `a document template with the slug "${slug}" already exists`
+          : `you already have a document template whose name produces the tool ${documentToolName(slug)}; pick another name`,
         "errors.documentTemplateSlugTaken",
       );
     }
     throw e;
+  };
+}
+
+// `slugProblem` speaks about the slug, which is right when the caller wrote one and wrong when they
+// wrote a NAME: "the slug must start with a letter" is a rule about something they never saw. The
+// derived case is re-pointed at the name, and the built-in collision is the one that has to be,
+// because "Image" is a perfectly good template name whose only fault is where it normalises to.
+function slugRefusal(
+  problem: string,
+  name: string | undefined,
+  explicit: boolean,
+  slug: string,
+): Refusal {
+  if (explicit || name === undefined) {
+    return {
+      message: `slug: ${problem}.`,
+      key: "errors.invalidDocumentSlug",
+      params: {},
+    };
+  }
+  // The only rule a DERIVED slug can still break: the derivation guarantees the shape and the
+  // length, so what is left is a name that normalises onto a built-in tool. "Image" is a perfectly
+  // good template name, and the refusal has to say that in those terms.
+  return {
+    message: `"${name}" would produce the tool ${documentToolName(slug)}, which is already a built-in. Pick another name.`,
+    key: "errors.documentNameIsBuiltinTool",
+    params: { name, tool: documentToolName(slug) },
   };
 }
 
@@ -189,30 +206,23 @@ export async function documentTemplateWriteProblem(
   // slug is a tool name an agent may already be granted. Deriving here on an update would refuse a
   // perfectly good rename over a slug the write was never going to use — and only on the dry run,
   // which is the worst place to disagree with the apply.
-  // A DERIVED slug is not reported as taken, because the apply does not refuse it: it looks for the
-  // next free one. Reporting the collision here would make the dry run the only place that says no,
-  // which is the disagreement this whole function exists to prevent — and it would say no about an
-  // identifier the caller never wrote.
-  if (input.slug === undefined) {
-    if (!deriveSlugFromName || name === undefined) return null;
-    const base_ = slugifyTemplateName(name);
-    const free = availableSlug(base_, await takenSlugs(ctx, base));
-    return free === null
-      ? `every slug derived from "${name}" is already taken in this account; name the template differently`
-      : null;
-  }
-  const slug = input.slug;
+  const slug =
+    input.slug ??
+    (deriveSlugFromName && name !== undefined
+      ? slugifyTemplateName(name)
+      : undefined);
+  if (slug === undefined) return null;
   const problem = slugProblem(slug);
-  if (problem) return `slug: ${problem}.`;
+  if (problem) {
+    return slugRefusal(problem, name, input.slug !== undefined, slug).message;
+  }
   const taken = await runScopedOn(base, ctx, (db) =>
     db.documentTemplate.findFirst({
       where: { slug, ...(excludeId ? { id: { not: excludeId } } : {}) },
-      select: { id: true },
+      select: { name: true },
     }),
   );
-  return taken
-    ? `a document template with the slug "${slug}" already exists`
-    : null;
+  return taken ? nameTaken(taken.name, name, slug).message : null;
 }
 
 export interface DocumentTemplateDto {
@@ -466,16 +476,6 @@ export async function createDocumentTemplate(
   // while the dry run, which uses `?? `, refused exactly that input. A preview that says no to what
   // the apply says yes to is the same contract break as the reverse.
   const derived = input.slug === undefined;
-  if (!derived) {
-    const problem = slugProblem(input.slug as string);
-    if (problem) {
-      throw new AppError(
-        `slug: ${problem}.`,
-        400,
-        "errors.invalidDocumentSlug",
-      );
-    }
-  }
   if (input.blockText !== undefined) {
     // Accepted by the shared body schema because the PATCH needs it, and meaningless here: there is
     // no stored layout to merge into, and the caller is already sending the blocks. Refused rather
@@ -503,38 +503,29 @@ export async function createDocumentTemplate(
     numberPrefix: parseNumberPrefix(input.numberPrefix ?? null),
     enabled: input.enabled ?? true,
   };
-  // Retried, and only for a derived slug: the search reads the slugs this tenant has and the unique
-  // index is what actually decides, so two creates of the same name racing both pick the same
-  // candidate and one of them loses. Without the retry that operator sees a conflict over an
-  // identifier they never chose — the exact wall the derivation is here to remove — for no reason
-  // other than timing. An EXPLICIT slug is not retried: a second attempt would pick the same name
-  // and lose again, and the caller is owed the conflict.
-  for (let attempt = 0; ; attempt++) {
-    const slug = derived
-      ? availableSlug(slugifyTemplateName(name), await takenSlugs(ctx, base))
-      : (input.slug as string);
-    if (slug === null) {
-      throw new ConflictError(
-        `every slug derived from "${name}" is already taken in this account; name the template differently`,
-        "errors.documentTemplateSlugTaken",
-      );
-    }
-    try {
-      const row = await runScopedOn(base, ctx, (db) =>
-        db.documentTemplate.create({
-          data: { ...data, slug },
-          select: SELECT,
-        }),
-      );
-      return toDto(row);
-    } catch (e) {
-      const conflict =
-        e instanceof Error && (e as { code?: string }).code === "P2002";
-      if (!conflict || !derived || attempt >= SLUG_RETRY_LIMIT) {
-        slugConflict(slug)(e);
-      }
-    }
+  const slug = derived ? slugifyTemplateName(name) : (input.slug as string);
+  const problem = slugProblem(slug);
+  if (problem) {
+    const refusal = slugRefusal(problem, name, !derived, slug);
+    throw new AppError(refusal.message, 400, refusal.key, refusal.params);
   }
+  // Asked BEFORE the insert, so the refusal can name the template that is in the way. The unique
+  // index is still the authority — it is what catches two creates racing — but all it can say is
+  // that the slug is taken, and the operator needs to know WHICH of their templates already has this
+  // name. One extra read on a path that already does several.
+  const clash = await runScopedOn(base, ctx, (db) =>
+    db.documentTemplate.findFirst({ where: { slug }, select: { name: true } }),
+  );
+  if (clash) {
+    const refusal = nameTaken(clash.name, derived ? name : undefined, slug);
+    throw new AppError(refusal.message, 409, refusal.key, refusal.params);
+  }
+  const row = await runScopedOn(base, ctx, (db) =>
+    db.documentTemplate
+      .create({ data: { ...data, slug }, select: SELECT })
+      .catch(slugConflict(slug, derived ? name : undefined)),
+  );
+  return toDto(row);
 }
 
 export async function updateDocumentTemplate(
@@ -963,6 +954,44 @@ export async function previewDocumentTemplate(
   const { company, logo } = await readRenderContext(ctx, base);
   const prefix =
     input.numberPrefix !== undefined ? input.numberPrefix : saved?.numberPrefix;
+  const meta = {
+    // A believable number, not a real one: the preview must not consume the template's counter.
+    number: formatDocumentNumber(42, prefix ?? null),
+    // The same day calculation an issuance freezes, so the preview and the document it previews
+    // cannot disagree on a date the customer reads. A template has no agent of its own — it can be
+    // granted to several — so this is the fleet default zone, which is also what the REST issue path
+    // falls back to.
+    //
+    // NOT COVERED BY A TEST, deliberately and measured: a rendered PDF exposes neither greppable
+    // text (react-pdf subsets its fonts, so the content stream carries glyph ids) nor a
+    // deterministic byte stream (two renders of identical input differ), so nothing here can observe
+    // the date that came out. The equivalent decision on the ISSUE path is covered, and this line
+    // calls the same helper — that is the whole of the assurance, and it is written down rather
+    // than implied.
+    date: formatDate(previewDay, style.locale),
+    title: input.name ?? saved?.name ?? "",
+  };
+  // The same question the ISSUE path asks, with the same values in hand. Without it the preview is
+  // the one surface that approves a document issuance then refuses: a template whose only visible
+  // block is an optional token renders as a blank page here and answers `documentWouldBeBlank`
+  // there — and the whole reason this route exists is that the caller acts on what it says.
+  if (
+    !documentDraws({
+      blocks: content.blocks,
+      fields: content.fields,
+      style,
+      values,
+      company,
+      hasLogo: logo !== null,
+      meta,
+    })
+  ) {
+    throw new AppError(
+      "this document would be blank: with the values given, no block prints anything.",
+      400,
+      "errors.documentWouldBeBlank",
+    );
+  }
   return renderDocumentPdf({
     blocks: content.blocks,
     fields: content.fields,
@@ -970,22 +999,6 @@ export async function previewDocumentTemplate(
     values,
     company,
     logo,
-    meta: {
-      // A believable number, not a real one: the preview must not consume the template's counter.
-      number: formatDocumentNumber(42, prefix ?? null),
-      // The same day calculation an issuance freezes, so the preview and the document it previews
-      // cannot disagree on a date the customer reads. A template has no agent of its own — it can be
-      // granted to several — so this is the fleet default zone, which is also what the REST issue
-      // path falls back to.
-      //
-      // NOT COVERED BY A TEST, deliberately and measured: a rendered PDF exposes neither greppable
-      // text (react-pdf subsets its fonts, so the content stream carries glyph ids) nor a
-      // deterministic byte stream (two renders of identical input differ), so nothing here can
-      // observe the date that came out. The equivalent decision on the ISSUE path is covered, and
-      // this line calls the same helper — that is the whole of the assurance, and it is written down
-      // rather than implied.
-      date: formatDate(previewDay, style.locale),
-      title: input.name ?? saved?.name ?? "",
-    },
+    meta,
   });
 }

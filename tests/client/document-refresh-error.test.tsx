@@ -102,6 +102,12 @@ test("a failed refresh keeps the company form and what was typed into it", async
       </ToastProvider>
     </MemoryRouter>,
   );
+  // The letterhead is a modal now, so it has to be opened to be typed into — and being open is
+  // exactly the state this rule is about: a background refresh must not take the form away from
+  // under whoever is using it.
+  fireEvent.click(
+    await screen.findByRole("button", { name: /^(edit|fill in)$/i }),
+  );
   const nameInput = (await screen.findAllByRole("textbox"))[0];
   if (!nameInput) throw new Error("no company field");
   fireEvent.change(nameInput, { target: { value: "ACME Nova" } });

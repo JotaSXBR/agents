@@ -354,14 +354,19 @@ describe.skipIf(!dbUp)("MCP document writes", () => {
     expect(builtin.ok).toBe(false);
     if (!builtin.ok) expect(builtin.error).toContain("send_image");
 
-    // The tenant already has "orcamento" from the apply above.
+    // The tenant already has "orcamento" from the apply above. The refusal names the template that
+    // holds it and the tool name both would produce, because an authoring client is choosing a NAME
+    // and "the slug already exists" points at a field it did not send.
     const taken = await documentTemplateCreate(
       principal({ tenantId }),
       { starter: "quote", name: "Outro orçamento", slug: "orcamento" },
       { base: appDb },
     );
     expect(taken.ok).toBe(false);
-    if (!taken.ok) expect(taken.error).toContain("already exists");
+    if (!taken.ok) {
+      expect(taken.error).toContain("Orçamento");
+      expect(taken.error).toContain("send_orcamento");
+    }
 
     // The PREVIEW asks it too: rendering a prefix the create would refuse is the same disagreement,
     // and it feeds an unbounded string into a PDF built on the request thread.
