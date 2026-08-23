@@ -854,23 +854,29 @@ export async function deliverRedirectClosing(
   // anchor still holding the exact instant written above means nobody took it. Cleared, or won by
   // someone else, means this run is not the one delivering. No release here — the anchor is already
   // not ours to give back.
-  const stillHoldsClaim = await runScopedOn(base, sysCtx(p.tenantId), (db) =>
-    db.conversation.count({
-      where: {
-        tenantId: p.tenantId,
-        chatwootInstanceId: p.instanceId,
-        chatwootConversationId: p.widgetConversationId,
-        redirectClosedAt: now,
-      },
-    }),
-  ).catch(() => 1);
-  if (stillHoldsClaim !== 1) {
+  //
+  // A closure and not a single check, because this function delivers TWICE and the two are separated
+  // by a lookup: asked once at the top it would answer about a moment before the sibling read, which
+  // is the same mistake the anchors made. One ask per stretch of I/O that precedes a send.
+  const stillDelivering = async (): Promise<boolean> => {
+    const held = await runScopedOn(base, sysCtx(p.tenantId), (db) =>
+      db.conversation.count({
+        where: {
+          tenantId: p.tenantId,
+          chatwootInstanceId: p.instanceId,
+          chatwootConversationId: p.widgetConversationId,
+          redirectClosedAt: now,
+        },
+      }),
+    ).catch(() => 1);
+    if (held === 1) return true;
     logger.info(
       "channel-redirect: the closing claim was taken while this run read (widget conv=%d)",
       p.widgetConversationId,
     );
-    return "already-closed";
-  }
+    return false;
+  };
+  if (!(await stillDelivering())) return "already-closed";
 
   // Chat (website widget): post the goodbye + resolve. Skipped on the resolve-path, where the chat is
   // already being resolved by the trigger. A web widget has no 24h window → proactiveSendMode → freeform.
@@ -898,6 +904,11 @@ export async function deliverRedirectClosing(
   }
 
   // WhatsApp channel: the sibling conversation (same contact, the entry inbox). Post the goodbye + resolve.
+  //
+  // The lookup below is a read of its own, and it is the read /reset invalidates: the command clears
+  // the identity it consults. Between it returning a sibling and the send there is nothing else, but
+  // between the ask above and it there is now the chat delivery AND the lookup — so the answer is
+  // taken again below, right before the send.
   const sibling = await resolveWhatsAppSibling(
     p.tenantId,
     p.instanceId,
@@ -905,7 +916,7 @@ export async function deliverRedirectClosing(
     p.entryInboxId,
     base,
   );
-  if (sibling) {
+  if (sibling && (await stillDelivering())) {
     const waMode = proactiveSendMode(sw, sibling.lastInboundAt, now, {
       channelType: sibling.channelType,
       provider: sibling.provider,

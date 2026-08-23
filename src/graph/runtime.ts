@@ -5,7 +5,7 @@ import type { PrismaClient } from "@/../generated/prisma/client";
 import logger from "@/api/lib/logger";
 import basePrisma from "@/api/lib/prisma";
 import { withEntityLock } from "@/lib/locks";
-import { runScopedOn, type TenantContext } from "@/lib/tenancy";
+import { runScopedOn, type ScopedDb, type TenantContext } from "@/lib/tenancy";
 import { overlayMediaAnnotations } from "@/modules/chatwoot/annotations";
 import type { ChatwootClient } from "@/modules/chatwoot/client";
 import { loadChatwootClient } from "@/modules/chatwoot/instance";
@@ -102,6 +102,12 @@ export type RunAgentTurnOutcome =
   | "no-agent"
   | "empty"
   | "taken-over"
+  // The run was CALLED OFF while it worked — today only by /reset retiring the job that queued it.
+  // Distinct from "superseded" on purpose: both leave the watermark where it is, but superseded says
+  // "a newer message will re-answer this burst" and this one says "the burst was withdrawn along
+  // with the thread". Reading one bit for both questions is how a caller ends up re-arming work the
+  // operator just cancelled.
+  | "stale"
   | "superseded"
   | "blocked";
 
@@ -155,6 +161,14 @@ export interface RunLoadedTurnParams {
   // false suppresses the reply (outcome "superseded"). Used by the debounce flush to drop a reply
   // when a newer message arrived mid-turn; the re-armed flush then answers the full burst.
   shouldPost?: () => Promise<boolean>;
+  // Whether the run that queued this turn is still wanted. Asked INSIDE the `ingest:` lock, on that
+  // transaction's own connection, and again immediately before each post — the two moments this
+  // function writes something the customer or the next turn can see.
+  //
+  // REQUIRED and nullable rather than optional, because the compiler is the only thing that will ask
+  // a future caller the question. `null` is the honest answer for a turn that arrives straight from
+  // a webhook: there is no job to call it off, and nothing else names this run.
+  stillWanted: ((db?: ScopedDb) => Promise<boolean>) | null;
 }
 
 // Applies a deferred resolve_conversation intent AFTER the reply is delivered. The tool only
@@ -316,6 +330,15 @@ export async function runLoadedTurn(
     makeClient: params.deps?.makeClient,
     botToken: loaded.agentBotToken ?? undefined,
   });
+  // The two gates that stand between this turn and a post, asked as ONE question so neither post
+  // site can carry only half of them. `stillWanted` first: a run the command called off should not
+  // spend a Chatwoot round trip finding out whether it was also superseded.
+  const postBlocked = async (): Promise<"stale" | "superseded" | null> => {
+    if (params.stillWanted && !(await params.stillWanted())) return "stale";
+    if (params.shouldPost && !(await params.shouldPost())) return "superseded";
+    return null;
+  };
+
   // Per-turn mutable state shared with the native tools (deferred resolve intent).
   const turnState: TurnState = {
     resolveRequested: false,
@@ -603,6 +626,9 @@ export async function runLoadedTurn(
   // that outlives its turn keeps every follow-up and every compaction for this contact backing off
   // until the process restarts.
   let claimedGraphThread = false;
+  // Set inside the `ingest:` lock when the ask below says this run was called off. A flag and not a
+  // throw: the lock's transaction has to commit and release before this function can return.
+  let calledOff = false;
   try {
     // ── Attendance boundary. A NEW conversation reusing this contact-inbox thread gets the
     //    "fresh attendance" divider, and the attendance it replaced becomes compactable.
@@ -645,6 +671,19 @@ export async function runLoadedTurn(
         sysCtx(tenantId),
         (db) =>
           withEntityLock(db, `ingest:${graphThreadId}`, async () => {
+            // THE ASK, and this is the boundary it belongs at: everything below writes — the divider
+            // is a real message, the claim arms compaction, and the invoke that follows persists the
+            // channel. A turn queued by a job the command retired must not recreate the thread the
+            // command just cleared, with input from before it.
+            //
+            // Inside the lock and on THIS transaction's connection, for both halves of the reason
+            // the nudge states: the lock is what makes the answer exclusive with a compaction
+            // rewrite, and `runScopedOn` has pinned this pooled connection, so a nested scope would
+            // ask the pool for a second one and time out under `DB_POOL_MAX=1`.
+            if (params.stillWanted && !(await params.stillWanted(db))) {
+              calledOff = true;
+              return null;
+            }
             // Per-THREAD marker (AgentThread keyed by contact-inbox): a different display_id ⇒ a new
             // conversation reusing the thread. Per-thread and not per-contact, so a multi-channel
             // contact never gets a spurious divider from activity on another channel.
@@ -759,6 +798,15 @@ export async function runLoadedTurn(
             return claim.closedConversationId;
           }),
       );
+      // Out here, where the lock's transaction has committed: nothing was claimed, nothing was
+      // written, and the thread stays as the command left it.
+      if (calledOff) {
+        logger.info(
+          "turn: the run was retired while it worked (conv=%s), standing down",
+          String(conversationId),
+        );
+        return "stale";
+      }
       if (closedConversationId !== null) {
         // Outside the lock: this opens its own transaction, and nesting one inside an advisory-lock
         // transaction would hold that lock across a second connection's work.
@@ -786,14 +834,26 @@ export async function runLoadedTurn(
         // NOTE: The guardrail reply is a post like any other, so it claims the trigger through the
         // same gate: without this, two concurrent deliveries that both trip the guardrail each post
         // their template, and a stale one posts over newer customer input.
-        if (params.shouldPost && !(await params.shouldPost())) {
-          return "superseded";
-        }
+        const blocked = await postBlocked();
+        if (blocked) return blocked;
         await client.sendMessage(conversationId, inReply);
         deliveredBalloons = 1;
         return "posted";
       }
       return "blocked";
+    }
+
+    // The second ask, and it is not a repeat of the one inside the lock: that one guards the divider
+    // and the claim, this one guards the INVOKE, which persists the channel. Between them sit the
+    // state read, the toolset build and the prompt resolution, and on a conversation with no
+    // contact-inbox the lock block does not run at all — so an invoke that inherited the lock's
+    // answer would be a turn fenced only where it happens to have been convenient.
+    if (params.stillWanted && !(await params.stillWanted())) {
+      logger.info(
+        "turn: the run was retired before the invoke (conv=%s), standing down",
+        String(conversationId),
+      );
+      return "stale";
     }
 
     // Invoke the thread (network: LLM + any tool calls). The checkpointer resumes prior history.
@@ -909,7 +969,8 @@ export async function runLoadedTurn(
 
     // Last-moment supersede gate (debounce): a newer message arrived mid-turn → drop this reply
     // AND any deferred resolve intent (the re-armed flush re-decides over the full burst).
-    if (params.shouldPost && !(await params.shouldPost())) return "superseded";
+    const blocked = await postBlocked();
+    if (blocked) return blocked;
 
     // OUTPUT guardrail: screen the model's reply BEFORE delivery. On a violation, replace it with the
     // template / a guardrails-generated safe reply, or suppress the send entirely ("silent"). A
@@ -1122,6 +1183,9 @@ export async function runAgentTurn(
       : undefined;
 
   const outcome = await runLoadedTurn({
+    // Nothing queued this turn: it is the delivery itself, arriving from the webhook. There is no
+    // job for /reset to retire and no other run that could call it off.
+    stillWanted: null,
     loaded,
     tenantId,
     instanceId,
@@ -1141,8 +1205,13 @@ export async function runAgentTurn(
   // fell back here) re-answers the whole recent page (issue #8). "superseded" stays put BY DESIGN:
   // the newer message's own turn advances past it. Best-effort — a watermark miss must not fail the
   // turn.
+  // "stale" joins it, for the opposite reason and the same effect: the run was called off, so the
+  // message it carried was withdrawn rather than handled. This path never produces it today (a
+  // webhook turn passes `stillWanted: null`), and it is listed so the next caller that does not
+  // inherit a silent advance.
   if (
     outcome !== "superseded" &&
+    outcome !== "stale" &&
     n.message?.id != null &&
     loaded.conversationDbId !== null
   ) {

@@ -27,6 +27,27 @@ export class EmptyThenReplyModel extends BaseChatModel {
   }
 }
 
+// Runs a side effect INSIDE the generate call, then answers. The point is the window: a fence that
+// only exists before the model and after it cannot be told apart from a correct one unless something
+// happens while the model is running, and the model call is the widest wait on the turn.
+export class SideEffectModel extends BaseChatModel {
+  constructor(
+    private readonly during: () => Promise<void>,
+    private readonly reply = "olá!",
+  ) {
+    super({});
+  }
+  _llmType() {
+    return "fake-side-effect";
+  }
+  async _generate(): Promise<ChatResult> {
+    await this.during();
+    return {
+      generations: [{ text: this.reply, message: new AIMessage(this.reply) }],
+    };
+  }
+}
+
 // Answers from a queue and REPORTS token usage on every call. Reporting is the point: UsageCapture
 // drops a call whose counts are all zero, so a model that reports nothing looks exactly like a call
 // that never happened, and a test for "this call is billed" would pass with the billing broken.

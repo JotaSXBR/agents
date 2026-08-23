@@ -534,6 +534,52 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
     }
   });
 
+  // One read later, and it is the read that decides WHO gets the goodbye. The sibling lookup sits
+  // between the claim check and the WhatsApp send, so a command landing inside it finds an answer
+  // taken before it — and the closing then messages and RESOLVES a conversation on an episode the
+  // operator was told had been erased. Landing it on `findFirst` is what puts it there: only the
+  // sibling lookup uses that query, so the claim check (a `count`) has already passed.
+  test("a closing whose anchor is cleared during the sibling lookup sends nothing", async () => {
+    await restoreAnchor();
+    const s = stubClient();
+    let cleared = false;
+    const resetOnSiblingRead = suDb.$extends({
+      query: {
+        conversation: {
+          async findFirst({ args, query }) {
+            if (!cleared) {
+              cleared = true;
+              await restoreAnchor();
+            }
+            return query(args);
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+
+    try {
+      const outcome = await deliverRedirectClosing({
+        tenantId,
+        instanceId,
+        widgetConversationId: WIDGET_CONV,
+        entryInboxId: 110,
+        closingMessage: "Vamos encerrar por aqui.",
+        closeChat: false,
+        base: resetOnSiblingRead,
+        deps: { makeClient: s.makeClient },
+      });
+
+      expect(cleared).toBe(true);
+      // The run still reports it delivered — it held the claim when it started, and the anchor is
+      // not its to give back. What matters is that nothing reached the customer.
+      expect(outcome).toBe("delivered");
+      expect(s.sent).toEqual([]);
+      expect(s.resolved).toEqual([]);
+    } finally {
+      await restoreAnchor();
+    }
+  });
+
   // The control: the same call with nobody clearing the anchor still delivers. Without it, "sent
   // nothing" would also be satisfied by a check that refuses every closing.
   test("the same closing delivers when the anchor stays put", async () => {

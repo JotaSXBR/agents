@@ -6,6 +6,7 @@ import { MemorySaver } from "@langchain/langgraph";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/../generated/prisma/client";
 import { encryptJson } from "@/api/lib/crypto";
+import { chatwootThreadId, contactInboxThreadId } from "@/graph/checkpointer";
 import {
   clearMediaAnnotations,
   stashMediaAnnotation,
@@ -29,6 +30,7 @@ import { seedChatwootInstance } from "../utils/chatwoot";
 import {
   EmptyThenReplyModel,
   ResolveThenReplyModel,
+  SideEffectModel,
 } from "../utils/scripted-models";
 
 const appUrl = process.env.TEST_APP_DATABASE_URL;
@@ -163,6 +165,7 @@ async function seedConversation(
   over: {
     assigneeType?: string | null;
     lastHandledMessageId?: number | null;
+    contactInboxId?: number | null;
   } = {},
 ) {
   await suDb.conversation.create({
@@ -176,6 +179,7 @@ async function seedConversation(
       threadId: threadOf(convId),
       lastEventAt: new Date(),
       lastHandledMessageId: over.lastHandledMessageId ?? null,
+      contactInboxId: over.contactInboxId ?? null,
     },
   });
 }
@@ -409,8 +413,15 @@ describe.skipIf(!dbUp)("debounce", () => {
   // /reset retires the burst, but a flush already CLAIMED is past every cancel — and this one is a
   // queued TURN: coalescing and invoking rewrites the thread the command just cleared, with the
   // operator having been told the conversation was started over. The reply is the smaller half.
-  test("a burst retired while claimed stands down before reading it", async () => {
-    await seedConversation(838);
+  //
+  // The assertions are the WRITES, not the reads. An early "did it fetch the messages" check proved
+  // only where the fence happened to sit, and it went green for a run that stood down before any of
+  // the three things that outlive the command: the thread claim, the invoke that persists the
+  // channel, and the watermark that would declare the burst handled.
+  test("a burst retired while claimed writes nothing", async () => {
+    // With a contact-inbox, so the divider/claim block under the `ingest:` lock runs — that is the
+    // first of the two boundaries the fence has to hold, and a conversation without one skips it.
+    await seedConversation(838, { contactInboxId: 8380 });
     const thread = threadOf(838);
     const row = await suDb.schedulerJob.create({
       data: {
@@ -432,19 +443,141 @@ describe.skipIf(!dbUp)("debounce", () => {
     );
     const sent: Array<[number, string]> = [];
     const calls = { getMessages: 0 };
+    const saver = new MemorySaver();
 
     const out = await flushDebounceJob({
       // The payload the worker captured at claim time — before the stamp landed.
       job: { ...jobFor(838), id: row.id, claimSeq: row.claimSeq },
       base: appDb,
       deps: {
-        makeModel: () => {
-          throw new Error("a retired burst must not reach the model");
-        },
+        makeModel: fakeModel,
         makeClient: makeStub({
           pages: [page([{ id: 1, content: "oi" }])],
           sent,
           calls,
+        }),
+        checkpointer: saver,
+      },
+    });
+
+    expect(out).toEqual({ outcome: "done" });
+    expect(sent).toEqual([]);
+    // The thread was not claimed, so nothing recreated what the command cleared.
+    expect(
+      await suDb.agentThread.count({
+        where: {
+          tenantId,
+          chatwootInstanceId: instanceId,
+          contactInboxId: 8380,
+        },
+      }),
+    ).toBe(0);
+    // And the burst was not declared handled: it was withdrawn with the thread, not answered.
+    const conv = await suDb.conversation.findFirstOrThrow({
+      where: { tenantId, chatwootConversationId: 838 },
+      select: { lastHandledMessageId: true },
+    });
+    expect(conv.lastHandledMessageId).toBeNull();
+    // The one that outlives the command: nothing was written to the channel the reset cleared.
+    expect(
+      await saver.getTuple({
+        configurable: {
+          thread_id: contactInboxThreadId(tenantId, instanceId, 8380),
+        },
+      }),
+    ).toBeUndefined();
+  });
+
+  // The same command, on the conversation shape that skips the block above entirely. Without a
+  // contact-inbox there is no `ingest:` lock and no thread claim, so the fence inside it never runs
+  // — and the invoke that persists the channel is still ahead. One ask per write, not one ask per
+  // conversation shape.
+  test("a burst retired while claimed writes nothing without a contact-inbox", async () => {
+    await seedConversation(839);
+    const thread = threadOf(839);
+    const row = await suDb.schedulerJob.create({
+      data: {
+        tenantId,
+        kind: "DEBOUNCE",
+        dedupeKey: debounceDedupeKey(thread),
+        status: "CLAIMED",
+        runAt: new Date(),
+        payload: { threadId: thread, agentBotId: 9, burstStartedAt: 1 },
+      },
+      select: { id: true, claimSeq: true },
+    });
+    await retireJobsByDedupeKey(
+      tenantId,
+      "DEBOUNCE",
+      debounceDedupeKey(thread),
+      suDb,
+    );
+    const sent: Array<[number, string]> = [];
+    const saver = new MemorySaver();
+
+    const out = await flushDebounceJob({
+      job: { ...jobFor(839), id: row.id, claimSeq: row.claimSeq },
+      base: appDb,
+      deps: {
+        makeModel: fakeModel,
+        makeClient: makeStub({
+          pages: [page([{ id: 1, content: "oi" }])],
+          sent,
+          calls: { getMessages: 0 },
+        }),
+        checkpointer: saver,
+      },
+    });
+
+    expect(out).toEqual({ outcome: "done" });
+    expect(sent).toEqual([]);
+    expect(
+      await saver.getTuple({
+        configurable: {
+          thread_id: chatwootThreadId(tenantId, instanceId, 839),
+        },
+      }),
+    ).toBeUndefined();
+  });
+
+  // And the widest window of the three: /reset arriving while the MODEL is running. Both asks above
+  // have already answered by then, and the reply is a send the customer reads — into a conversation
+  // the operator was told had been started over.
+  test("a burst retired during the model call is not answered", async () => {
+    await seedConversation(848);
+    const thread = threadOf(848);
+    const row = await suDb.schedulerJob.create({
+      data: {
+        tenantId,
+        kind: "DEBOUNCE",
+        dedupeKey: debounceDedupeKey(thread),
+        status: "CLAIMED",
+        runAt: new Date(),
+        payload: { threadId: thread, agentBotId: 9, burstStartedAt: 1 },
+      },
+      select: { id: true, claimSeq: true },
+    });
+    const sent: Array<[number, string]> = [];
+    // The command lands INSIDE the generate call, which is the only way to reach the post gate with
+    // the two earlier asks having answered truthfully.
+    const retiring = new SideEffectModel(async () => {
+      await retireJobsByDedupeKey(
+        tenantId,
+        "DEBOUNCE",
+        debounceDedupeKey(thread),
+        suDb,
+      );
+    });
+
+    const out = await flushDebounceJob({
+      job: { ...jobFor(848), id: row.id, claimSeq: row.claimSeq },
+      base: appDb,
+      deps: {
+        makeModel: () => retiring as unknown as BaseChatModel,
+        makeClient: makeStub({
+          pages: [page([{ id: 1, content: "oi" }])],
+          sent,
+          calls: { getMessages: 0 },
         }),
         checkpointer: new MemorySaver(),
       },
@@ -452,9 +585,11 @@ describe.skipIf(!dbUp)("debounce", () => {
 
     expect(out).toEqual({ outcome: "done" });
     expect(sent).toEqual([]);
-    // Stood down BEFORE reading the burst, which is what tells this apart from a turn that ran and
-    // chose to stay quiet.
-    expect(calls.getMessages).toBe(0);
+    const conv = await suDb.conversation.findFirstOrThrow({
+      where: { tenantId, chatwootConversationId: 848 },
+      select: { lastHandledMessageId: true },
+    });
+    expect(conv.lastHandledMessageId).toBeNull();
   });
 
   test("flush coalesces the burst into one reply and advances the watermark", async () => {

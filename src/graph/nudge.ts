@@ -585,6 +585,11 @@ export async function runAgentNudge(
     if (labels && labels.length > 0) {
       try {
         const current = await client.getConversationLabels(conversationId);
+        // The GET is a Chatwoot round trip, so the answer above is about a moment before it. Same
+        // rule as the resolve below, and the labels need it for the same reason: /reset peels the
+        // episode's labels off on purpose, and a SET carrying the merged list puts them back on a
+        // conversation the operator was told had been cleared.
+        if (!(await stillWanted())) return "stale";
         const merged = [...new Set([...current, ...labels])];
         await client.setConversationLabels(conversationId, merged);
       } catch (err) {

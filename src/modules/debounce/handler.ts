@@ -7,7 +7,7 @@ import {
   type RuntimeDeps,
   runLoadedTurn,
 } from "@/graph/runtime";
-import { runScopedOn, type TenantContext } from "@/lib/tenancy";
+import { runScopedOn, type ScopedDb, type TenantContext } from "@/lib/tenancy";
 import { overlayMediaAnnotations } from "@/modules/chatwoot/annotations";
 import { loadChatwootClient } from "@/modules/chatwoot/instance";
 import {
@@ -77,6 +77,10 @@ export interface CoalesceTurnContext {
   selectPending: (
     messages: ChatwootMessageRow[],
   ) => ChatwootMessageRow[] | Promise<ChatwootMessageRow[]>;
+  // Whether the run that queued this turn is still wanted, handed straight to `runLoadedTurn`,
+  // which asks it inside the `ingest:` lock and again before each post. REQUIRED and nullable so a
+  // future caller has to answer it: `null` says "nothing queued this, nothing can call it off".
+  stillWanted: ((db?: ScopedDb) => Promise<boolean>) | null;
   // Label for the single summary log line ("debounce flush" / "reengage").
   label: string;
   // When set (the debounce flush passes "debounce"), emit a flow line for the coalescing under the
@@ -207,6 +211,7 @@ export async function coalesceAndRunTurn(
     );
   }
   const outcome = await runLoadedTurn({
+    stillWanted: ctx.stillWanted,
     loaded,
     tenantId,
     instanceId,
@@ -229,7 +234,11 @@ export async function coalesceAndRunTurn(
   // #8: the pre-handoff backlog was re-coalesced — and the bot re-transferred for the old reason —
   // after a human returned the conversation). "superseded" stays put by design: the re-armed flush
   // answers the FULL burst.
-  if (outcome !== "superseded") {
+  // "stale" stays put too, and NOT by the same reasoning: superseded means a newer message will
+  // re-answer this burst, while stale means the burst was withdrawn with the thread the command
+  // cleared. Advancing on it would declare handled a set of messages nothing ever answered, and the
+  // next inbound would arm a flush that starts after them.
+  if (outcome !== "superseded" && outcome !== "stale") {
     await advanceHandledWatermark({
       tenantId,
       conversationDbId: convDbId,
@@ -453,28 +462,6 @@ export async function flushDebounceJob(
   // the worker → retry with backoff (watermark not advanced, so the retry re-answers the same burst).
   // The error is also surfaced on the conversation (item 6) so the operator can re-engage; a
   // successful answer clears it.
-  // The command's fence, and the last thing asked before the graph runs. Every cancel reaches PENDING
-  // rows only, so a flush already CLAIMED when /reset arrived is past all of them — and it is a
-  // queued TURN: coalescing the burst and invoking rewrites the very thread the command cleared,
-  // with the operator having been told the conversation was started over. The reply is the smaller
-  // half; the checkpoint is the one that outlives the command.
-  //
-  // Asked HERE and not at the top, for the reason every other fence on this path is asked late: the
-  // gate read and the authorization call above are both waits the command can land inside, and an
-  // answer from before them is an answer about a different moment. Nothing is written between this
-  // and the invoke.
-  //
-  // No watermark advance on the way out, unlike the gate-closed and refusal branches: those declare
-  // the burst HANDLED, and a burst the reset erased was not handled, it was withdrawn. The messages
-  // are gone with the thread either way, and the next inbound arms a fresh flush.
-  if (await jobRetired(job, base)) {
-    logger.info(
-      "debounce flush: the burst was retired while claimed (conv=%s), standing down",
-      String(conversationId),
-    );
-    return { outcome: "done" };
-  }
-
   const watermark = ctx.watermark;
   try {
     const outcome = await coalesceAndRunTurn(
@@ -487,6 +474,18 @@ export async function flushDebounceJob(
         convDbId: ctx.convDbId,
         loaded: ctx.loaded,
         settings: ctx.settings,
+        // The command's fence. Every cancel reaches PENDING rows only, so a flush already CLAIMED
+        // when /reset arrived is past all of them — and it is a queued TURN: coalescing the burst
+        // and invoking rewrites the very thread the command cleared, with the operator having been
+        // told the conversation was started over. The reply is the smaller half; the checkpoint is
+        // the one that outlives the command.
+        //
+        // Handed down rather than asked here, because here is not where the turn writes. Asked at
+        // the top it would answer about a moment before the message fetch, the burst selection and
+        // the model — all waits the command lands inside — and the run would still recreate the
+        // thread. `runLoadedTurn` asks it inside the `ingest:` lock, which is the boundary the
+        // divider and the claim are written at, and again before each post.
+        stillWanted: async (scoped) => !(await jobRetired(job, base, scoped)),
         // Re-read, not the value captured before the authorization call: that call is a round-trip
         // to somebody else's endpoint with a ceiling of ten seconds, and a message that arrived and
         // was REFUSED inside that window has already had the watermark advanced past it by its own

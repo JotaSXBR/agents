@@ -150,7 +150,11 @@ let inboxDbId = 0n;
 // that lands before the run starts is a different (and easier) test than one that lands mid-turn.
 function retireOn(
   s: { client: ChatwootClient },
-  method: "toggleStatus" | "sendMessage" | "setConversationLabels",
+  method:
+    | "toggleStatus"
+    | "sendMessage"
+    | "setConversationLabels"
+    | "getConversationLabels",
 ): () => Promise<boolean> {
   let wanted = true;
   const holder = s.client as unknown as Record<
@@ -1096,6 +1100,33 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
 
     expect(outcome).toBe("messaged");
     expect(s.labelSets).toEqual([["follow-up"]]);
+    expect(s.resolved).toEqual([]);
+  });
+
+  // One round trip earlier, and the write it guards is the label SET. Reading the conversation's
+  // current labels is a Chatwoot call like any other, so a command landing inside it finds an answer
+  // taken before it — and the merged list then puts back the very labels the reset peeled off.
+  test("a reset landing during the label read withholds the label write", async () => {
+    await seedConv(9996, null);
+    const s = stub();
+    const wanted = retireOn(s, "getConversationLabels");
+    const outcome = await runAgentNudge({
+      tenantId,
+      threadId: `${tenantId}:${instanceId}:9996`,
+      nudge: { source: "followup", kind: "inactivity", step: 1 },
+      postActions: { assignLabels: ["follow-up"], resolve: true },
+      stillWanted: wanted,
+      base: appDb,
+      deps: {
+        makeModel: () => new FakeListChatModel({ responses: ["Tudo certo?"] }),
+        makeClient: s.makeClient,
+        checkpointer: new MemorySaver(),
+        persistUsage: async () => {},
+      },
+    });
+
+    expect(outcome).toBe("messaged");
+    expect(s.labelSets).toEqual([]);
     expect(s.resolved).toEqual([]);
   });
 

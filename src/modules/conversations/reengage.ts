@@ -217,6 +217,9 @@ export async function reengageConversation(
 
   const outcome = await coalesceAndRunTurn(
     {
+      // An operator pressing "re-engage" in the console: the turn IS the action, there is no queued
+      // job behind it and nothing that could call it off while it runs.
+      stillWanted: null,
       tenantId,
       instanceId: resolved.instanceId,
       conversationId: resolved.conversationId,
