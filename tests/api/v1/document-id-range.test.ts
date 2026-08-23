@@ -11,6 +11,19 @@ import { parseMcpId } from "@/modules/mcp/write";
 // (`BigInt(params.id)`) and the next route added will reach for it too. The per-route behaviour is
 // pinned below it, so the sweep cannot pass by measuring nothing.
 
+// The HTTP routes, which have a response contract to keep, and the writes that reach the same
+// columns without one. Split because only the first half can be asked about its declared statuses,
+// and kept in one place because both sweeps below have to grow together.
+const API_FILES = [
+  "src/api/v1/documents.controller.ts",
+  "src/api/v1/document-templates.controller.ts",
+];
+const NON_ROUTE_FILES = [
+  "src/modules/mcp/write.ts",
+  "src/modules/mcp/write-documents.ts",
+  "src/modules/agents/service.ts",
+];
+
 describe("requireDbId", () => {
   test("takes the largest id a column can hold, and refuses the next one", () => {
     expect(requireDbId(MAX_DB_ID.toString())).toBe(MAX_DB_ID);
@@ -51,13 +64,7 @@ describe("no document surface converts a caller's id with bare BigInt", () => {
   // because each round fixed the site it was shown and left the next one. It is the list, not the
   // sites, that is the guard: an entry here is what makes the NEXT surface fail loudly instead of
   // being found by a reviewer.
-  const FILES = [
-    "src/api/v1/documents.controller.ts",
-    "src/api/v1/document-templates.controller.ts",
-    "src/modules/mcp/write.ts",
-    "src/modules/mcp/write-documents.ts",
-    "src/modules/agents/service.ts",
-  ];
+  const FILES = [...API_FILES, ...NON_ROUTE_FILES];
 
   test("params, body, query and args ids use the bounded parse", async () => {
     const offenders: string[] = [];
@@ -89,6 +96,51 @@ describe("no document surface converts a caller's id with bare BigInt", () => {
         ].length,
       ).toBe(1);
     }
+  });
+});
+
+// The other half of the same defect, and it took a review round to see: a route can use the bounded
+// parse and still LIE about it. `requireDbId` answers 400, and a `response` declaration that omits
+// 400 leaves the generated OpenAPI contract advertising a set of statuses the route does not keep —
+// so a generated client meets an unhandled one on a plainly malformed id.
+//
+// Swept across both controllers rather than fixed on the route that was found, because the omission
+// is invisible at the call site: the parse is in the handler and the declaration is in the options
+// object below it, and nothing ties them together.
+describe("a route that can answer 400 says so in its contract", () => {
+  const ROUTE = /\n {2}\.(get|post|patch|put|delete)\(/g;
+
+  async function routesOf(file: string) {
+    const src = await Bun.file(file).text();
+    const cuts = [...src.matchAll(ROUTE)].map((m) => m.index as number);
+    return cuts.map((start, i) => {
+      const body = src.slice(start, cuts[i + 1] ?? src.length);
+      return { path: body.match(/"([^"]*)"/)?.[1] ?? "?", body };
+    });
+  }
+
+  test("every route reaching the bounded parse declares 400", async () => {
+    const offenders: string[] = [];
+    for (const file of API_FILES) {
+      for (const route of await routesOf(file)) {
+        if (!/requireDbId|parseDbId/.test(route.body)) continue;
+        const declared = route.body.match(/response:\s*errors\(([^)]*)\)/);
+        if (!declared?.[1]?.includes("400")) {
+          offenders.push(`${file} ${route.path}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  // …and the sweep is looking at something. Without this it passes just as well when the split finds
+  // no routes at all, which is exactly how a source-reading check goes quietly blind.
+  test("it finds the routes it is meant to read", async () => {
+    const routes = await routesOf("src/api/v1/documents.controller.ts");
+    expect(routes.length).toBeGreaterThan(3);
+    expect(
+      routes.filter((r) => /requireDbId/.test(r.body)).length,
+    ).toBeGreaterThan(2);
   });
 });
 

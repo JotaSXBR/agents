@@ -119,7 +119,11 @@ export const documentsController = new Elysia({
         "List issued documents",
         "Lists the documents the tenant has issued.",
       ),
-      response: errors(401, 403),
+      // 400 because `templateId` reaches `requireDbId`: the pattern above admits any run of digits,
+      // and one past 2^63-1 is refused by the range check rather than by the transport. A status the
+      // route returns and the contract does not name is a status no generated client knows how to
+      // handle — the same reason the issue route names 409.
+      response: errors(400, 401, 403),
     },
   )
   .post(
