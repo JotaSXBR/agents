@@ -1,4 +1,11 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  setSystemTime,
+  test,
+} from "bun:test";
 import { rm } from "node:fs/promises";
 import { PrismaPg } from "@prisma/adapter-pg";
 import type { z } from "zod";
@@ -407,6 +414,26 @@ describe.skipIf(!dbUp)("buildDocumentTools", () => {
     const after = await suDb.issuedDocument.count({ where: { tenantId } });
     expect(mid).toBe(before + 1);
     expect(after).toBe(mid);
+  });
+
+  // The dedupe window is a RETRY's, not a conversation's. Nothing in the key was time-bound, so it
+  // never expired: the same values asked for again weeks later — a customer coming back for the same
+  // service, or a document the agent produced for a turn that was then discarded — answered with the
+  // FROZEN document. Its old number, its old date, and a validity that may already have run out. A
+  // document a customer receives today has to be dated today.
+  test("the same values on another day are another document", async () => {
+    const before = await suDb.issuedDocument.count({ where: { tenantId } });
+    const args = { ...ARGS, cliente: "Outro dia" };
+    await tool(newTurnState()).invoke(args);
+    setSystemTime(new Date(Date.now() + 26 * 60 * 60 * 1000));
+    try {
+      await tool(newTurnState()).invoke(args);
+    } finally {
+      setSystemTime();
+    }
+    expect(await suDb.issuedDocument.count({ where: { tenantId } })).toBe(
+      before + 2,
+    );
   });
 
   // The playground has no conversation to attach a file to, so a document tool is simulated there

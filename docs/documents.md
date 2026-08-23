@@ -198,7 +198,14 @@ A document that was issued and then not delivered — a turn taken over, superse
 **left as it is**, not revoked. The idempotency key is derived from the values, so the next turn's
 identical call returns that same row and delivers it; revoking would turn a recoverable state into a
 permanent refusal. The cost is that "Recently issued" lists a document nobody received yet, which is
-a reporting gap and not a delivery one.
+a reporting gap and not a delivery one, and the operator can send it by hand.
+
+**The key carries the calendar day**, so that recovery is bounded. Without it the key never expires:
+a customer coming back weeks later and asking for the same thing, with the same values, was answered
+with the frozen document — its old number, its old date, and a validity that may already have run
+out. A retry is what the key covers, and a day is a generous window for one. The day is the same one
+the document prints, resolved in the agent's timezone, so a reused document is one dated the day it
+is being sent.
 
 At most one document per turn, and the slot is **reserved before the await**, the way `send_image`
 reserves a download. One model response's tool calls run under `Promise.all`, so a check that only

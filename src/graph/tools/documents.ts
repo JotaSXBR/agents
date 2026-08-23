@@ -1,9 +1,10 @@
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import { z } from "zod";
 import type { PrismaClient } from "@/../generated/prisma/client";
+import { DEFAULT_TIMEZONE } from "@/graph/time";
 import { AppError } from "@/lib/errors";
 import type { DocumentField } from "@/modules/documents/blocks";
-import { issueDocument } from "@/modules/documents/issue";
+import { calendarDay, issueDocument } from "@/modules/documents/issue";
 import { failableTool, toolFailure } from "./failure";
 import type { TurnState } from "./native";
 
@@ -107,9 +108,21 @@ export function documentToolSchema(fields: DocumentField[]): z.ZodTypeAny {
   return z.object(shape).strict();
 }
 
-// Same values, same document. Derived from the thread and the values rather than taken as an
-// argument, so a retried turn — the model repeating itself, the graph resuming — reuses the row
+// Same values, same day, same document. Derived from the thread and the values rather than taken as
+// an argument, so a retried turn — the model repeating itself, the graph resuming — reuses the row
 // instead of putting a second numbered document in front of one customer.
+//
+// The DAY is in the key because a retry is what this covers, and a key with nothing time-bound in it
+// never expires: a customer coming back weeks later for the same service, with the same values, was
+// answered with the frozen document — its old number, its old date, and a validity that may have run
+// out. A conversation is not a window; a day is a generous one for a retry and a short one for
+// everything else.
+//
+// It is also the answer to a document the agent issued for a turn that was then DISCARDED — taken
+// over, superseded, blocked. The row stays: it is the record that the agent produced it, and the
+// operator can see it and send it by hand. Within the day, the same request reuses it rather than
+// burning a second number; after that, it stops being reachable by accident.
+//
 // Key ORDER is not part of the value. Zod rebuilds the parsed object in the schema's order, and the
 // schema's order is the template's declared fields — so reordering those between a call and its
 // retry changes `JSON.stringify` and therefore the key, and the retry issues a SECOND numbered
@@ -128,10 +141,11 @@ function idempotencyKey(
   templateId: bigint,
   threadId: string | undefined,
   values: unknown,
+  day: string,
 ): string {
   const hasher = new Bun.CryptoHasher("sha256");
   hasher.update(JSON.stringify(canonical(values ?? {})));
-  return `doc:${templateId}:${threadId ?? "unbound"}:${hasher.digest("hex").slice(0, 32)}`;
+  return `doc:${templateId}:${threadId ?? "unbound"}:${day}:${hasher.digest("hex").slice(0, 32)}`;
 }
 
 // Refusals no retry can get past, because they are somebody's decision rather than a fault in the
@@ -222,6 +236,9 @@ export function buildDocumentTools(
               selection.templateId,
               deps.threadId,
               input,
+              // The same calendar the document PRINTS, so the window and the date on the page agree:
+              // a document reused within the key's life is one dated the day it is being sent.
+              calendarDay(new Date(), deps.timezone ?? DEFAULT_TIMEZONE),
             ),
             values: input,
             threadId: deps.threadId ?? null,
