@@ -148,7 +148,10 @@ export const documentTemplatesController = new Elysia({
     "/preview",
     async ({ tenantContext, body }) => {
       const bytes = await previewDocumentTemplate(ctxOrThrow(tenantContext), {
-        id: body.id ? BigInt(body.id) : undefined,
+        // `!== undefined`, not truthiness: "0" is a supplied id, and reading it as "no id given"
+        // answers a lookup for a template that does not exist with a blank draft preview — telling
+        // the operator their template rendered.
+        id: body.id !== undefined ? BigInt(body.id) : undefined,
         name: body.name,
         blocks: body.blocks,
         blockText: body.blockText,

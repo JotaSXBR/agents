@@ -59,7 +59,11 @@ export const documentsController = new Elysia({
       instance: instanceIdentity,
       documents: await listIssuedDocuments(ctxOrThrow(tenantContext), {
         limit: query.limit ? Number(query.limit) : undefined,
-        templateId: query.templateId ? BigInt(query.templateId) : undefined,
+        // `!== undefined` for the same reason the preview route uses it: `?templateId=0` is a
+        // filter, and dropping it answers with EVERY document instead of none. (`limit` above can
+        // stay truthy-checked — its pattern refuses "0" at the transport.)
+        templateId:
+          query.templateId !== undefined ? BigInt(query.templateId) : undefined,
         threadId: query.threadId,
       }),
     }),

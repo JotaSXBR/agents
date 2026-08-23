@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button, Card, FormField, Input, useToast } from "@/client/components";
 import { api } from "@/client/lib/api";
-import { mediaFetch } from "@/client/lib/media";
 import {
   afterCompanySave,
   companyChanges,
@@ -11,6 +10,7 @@ import {
   COMPANY_FIELDS as FIELDS,
   nextCompanyDraft,
 } from "./companyDraft";
+import { useCompanyLogoUrl } from "./useCompanyLogoUrl";
 
 // The letterhead every issued document carries: name, tax id, address, contacts and a logo. It lives
 // on this tab rather than in Settings because it exists only to feed documents, and an operator
@@ -35,7 +35,7 @@ export function CompanyProfileCard({
   const [form, setForm] = useState(emptyCompanyForm);
   const draft = form.draft;
   const [saving, setSaving] = useState(false);
-  const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const logoUrl = useCompanyLogoUrl(company?.logoKey, company?.logoVersion);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -47,34 +47,6 @@ export function CompanyProfileCard({
     // advance below.) The rule lives next door with its decision table.
     setForm((current) => nextCompanyDraft(current, company));
   }, [company]);
-
-  // The logo endpoint is tenant-scoped, so a bare <img src> would omit the active-tenant header and
-  // a SUPER_ADMIN would get "a target tenant is required" instead of a picture. mediaFetch + a blob
-  // URL is the same fix MediaImage applies.
-  useEffect(() => {
-    let revoked: string | null = null;
-    let cancelled = false;
-    if (!company?.logoKey) {
-      setLogoUrl(null);
-      return;
-    }
-    void (async () => {
-      const res = await mediaFetch(
-        `/api/v1/tenant-settings/company/logo?v=${company.logoVersion}`,
-      );
-      if (!res.ok || cancelled) return;
-      revoked = URL.createObjectURL(await res.blob());
-      setLogoUrl(revoked);
-    })();
-    return () => {
-      cancelled = true;
-      if (revoked) URL.revokeObjectURL(revoked);
-    };
-    // The VERSION, not the key: the key is derived from the tenant id and the file extension, so
-    // replacing a PNG with another PNG leaves it identical and this effect would never run again —
-    // the card would keep showing the previous letterhead while issued documents carry the new one.
-    // It is also the cache buster the response's own max-age needs.
-  }, [company?.logoKey, company?.logoVersion]);
 
   const label: Record<(typeof FIELDS)[number], string> = {
     name: t("documents.company.name", "Company name"),

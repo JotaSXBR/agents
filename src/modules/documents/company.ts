@@ -366,7 +366,19 @@ export async function readCompanyLogo(
   if (!company.logoKey) return null;
   const format = logoExtOf(company.logoKey);
   if (!format) return null;
-  const file = Bun.file(logoPath(company.logoKey));
-  if (!(await file.exists())) return null;
-  return { data: Buffer.from(await file.arrayBuffer()), format };
+  // The read itself can fail, and an `exists()` check does not cover it: a clear or a cross-format
+  // replacement unlinks this very file, and landing between the check and the read turns a MISSING
+  // logo — the case this function exists to absorb — into a rejected promise that aborts the whole
+  // preview or issuance. Every reason the bytes are unavailable has to come out as the same null.
+  //
+  // NOT COVERED BY A TEST: reaching it needs the unlink to land between two statements here, which
+  // no single-process test can schedule. The stand-ins that ARE reachable (a missing file, a
+  // directory at this path) answer null with or without the catch, so a test on one of them would
+  // pass for the wrong reason. The property is structural instead: there is one exit, and it is
+  // null.
+  const bytes = await Bun.file(logoPath(company.logoKey))
+    .arrayBuffer()
+    .catch(() => null);
+  if (!bytes) return null;
+  return { data: Buffer.from(bytes), format };
 }

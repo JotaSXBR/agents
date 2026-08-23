@@ -621,6 +621,12 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
         appDb,
       ),
     ).rejects.toThrow(/100/);
+    // A template id of ZERO is a supplied id, not a missing one. No sequence hands out 0, so the
+    // honest answer is "no such template" — the truthy reading rendered a blank draft preview
+    // instead, telling the operator their template was fine.
+    await expect(
+      previewDocumentTemplate(ctx(tenantA), { id: 0n }, appDb),
+    ).rejects.toThrow(/not found/i);
     // The blocks a CALLER writes are checked the way a write checks them, unknown property and all.
     // Tolerance belongs to what came out of storage — a property a newer build wrote — and never to
     // what the caller just sent: a preview that accepts it renders a PDF nobody can save.
@@ -1332,6 +1338,17 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
         appDb,
       ),
     ).rejects.toThrow(/newer version wrote/);
+  });
+
+  // The same zero, on the list filter: `?templateId=0` selects the documents of a template that
+  // cannot exist, which is none of them. Read as "no filter given" it answers with every document
+  // the tenant has ever issued.
+  test("filters by a template id of zero rather than ignoring it", async () => {
+    const all = await listIssuedDocuments(ctx(tenantA), {}, appDb);
+    expect(all.length).toBeGreaterThan(0);
+    expect(
+      await listIssuedDocuments(ctx(tenantA), { templateId: 0n }, appDb),
+    ).toEqual([]);
   });
 
   // The template can be deleted between the read that loads it and the insert that references it.

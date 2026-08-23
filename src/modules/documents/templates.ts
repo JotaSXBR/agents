@@ -774,7 +774,8 @@ export async function previewDocumentTemplate(
   // The RAW row, not the DTO: a preview built on the tolerant reading renders a template whose
   // unreadable half has already been dropped, and then says "this would work" about a patch the
   // apply refuses. Same source, same answer.
-  const saved = input.id ? await rawTemplateRow(ctx, input.id, base) : null;
+  const saved =
+    input.id !== undefined ? await rawTemplateRow(ctx, input.id, base) : null;
   // The same metadata gate a write passes. Without it a preview renders a prefix the create would
   // refuse — preview and apply disagreeing again — and feeds an unbounded string into a PDF built on
   // the request thread.
