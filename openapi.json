@@ -25794,6 +25794,8 @@
                     }
                   },
                   "threadId": {
+                    "pattern": "^[0-9]{1,20}:[0-9]{1,20}:[0-9]{1,20}$",
+                    "maxLength": 64,
                     "description": "Conversation thread key (tenant:instance:conversation) this document belongs to.",
                     "type": "string"
                   },
@@ -25832,6 +25834,8 @@
                     }
                   },
                   "threadId": {
+                    "pattern": "^[0-9]{1,20}:[0-9]{1,20}:[0-9]{1,20}$",
+                    "maxLength": 64,
                     "description": "Conversation thread key (tenant:instance:conversation) this document belongs to.",
                     "type": "string"
                   },
@@ -25870,6 +25874,8 @@
                     }
                   },
                   "threadId": {
+                    "pattern": "^[0-9]{1,20}:[0-9]{1,20}:[0-9]{1,20}$",
+                    "maxLength": 64,
                     "description": "Conversation thread key (tenant:instance:conversation) this document belongs to.",
                     "type": "string"
                   },

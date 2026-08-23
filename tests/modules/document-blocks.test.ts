@@ -687,6 +687,27 @@ describe("parseDocumentValues", () => {
   });
 });
 
+// The currency code is drawn beside every amount, and a length check let two different failures
+// through: "$$$" makes Intl throw, so the renderer's fallback prints the raw code next to the
+// number, and a code outside Latin-1 is drawn as a different character in every price on the page.
+describe("the currency code is three letters", () => {
+  test("refuses a three-character value that is not a code", () => {
+    expect(parseDocumentStyle({ currency: "$$$" }).currency).toBe(
+      DOCUMENT_STYLE_DEFAULTS.currency,
+    );
+    expect(parseDocumentStyle({ currency: "中AB" }).currency).toBe(
+      DOCUMENT_STYLE_DEFAULTS.currency,
+    );
+  });
+
+  // Case is a SPELLING, not a different currency: normalised rather than refused, beside the
+  // baseFontSize clamp and for the same reason.
+  test("normalises case instead of refusing it", () => {
+    expect(parseDocumentStyle({ currency: "brl" }).currency).toBe("BRL");
+    expect(parseDocumentStyle({ currency: "usd" }).currency).toBe("USD");
+  });
+});
+
 describe("parseDocumentStyle", () => {
   test("fills defaults and keeps what was supplied", () => {
     const s = parseDocumentStyle({ font: "serif", accentColor: "#AABBCC" });
@@ -826,6 +847,58 @@ describe("authored text has to be printable", () => {
       parseAuthoredTemplate(
         [{ id: "t", type: "text", text: "Orçamento — “à vista” € 1.299,90" }],
         [],
+        {},
+      ).ok,
+    ).toBe(true);
+  });
+
+  // Nested rows are where an operator actually writes labels — "Validade", "Condições" — and they
+  // were the half a key-by-key check missed. The collection walks the block instead of naming its
+  // properties, so a row inside a header and a row inside a fields block are found the same way a
+  // title is, and a block type added later is covered without a line.
+  test("finds text nested inside a row, not just at the top of a block", () => {
+    expect(
+      parseAuthoredTemplate(
+        [
+          {
+            id: "h",
+            type: "header",
+            title: "ok",
+            meta: [{ label: "Validade 😀", value: "7 dias" }],
+          },
+        ],
+        [],
+        {},
+      ).ok,
+    ).toBe(false);
+    expect(
+      parseAuthoredTemplate(
+        [
+          {
+            id: "f",
+            type: "fields",
+            rows: [{ label: "Cliente", value: "中" }],
+          },
+        ],
+        [],
+        {},
+      ).ok,
+    ).toBe(false);
+  });
+
+  // …and it does NOT trip over the keys that NAME things rather than print them. A block id is
+  // never drawn — it exists so the console can edit one block's text by id — so an author writing
+  // in their own script must not be refused over a value no reader will ever see. Refusing only
+  // what the write actually changes is the rule; a check that cannot tell the two apart is a check
+  // that invents failures.
+  test("identifiers are not held to what the page can print", () => {
+    expect(
+      parseAuthoredTemplate(
+        [
+          { id: "项目", type: "lineItems", field: "itens" },
+          { id: "t", type: "text", text: "ok", align: "center" },
+        ],
+        [{ name: "itens", label: "Itens", type: "lineItems" }],
         {},
       ).ok,
     ).toBe(true);

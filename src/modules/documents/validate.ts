@@ -276,9 +276,51 @@ export function parseAuthoredTemplate(
   return { ok: true, content: { ...shared.content, style } };
 }
 
-// Every string a template PRINTS, from the halves the caller wrote. Labels and titles included:
-// they are drawn on the page like any other text, and a heading is exactly where an operator reaches
-// for a symbol.
+// Keys that NAME something rather than print it: an id, a discriminator, a reference to a declared
+// field, an enum list. Everything else in a block is drawn on the page.
+//
+// A deny-list, not an allow-list, and that is the point. Naming the printing keys is how a nested
+// row gets missed — `header.meta[]` and `fields.rows[]` were, and they are exactly where an operator
+// writes "Validade: 7 dias". A block type added later prints by default here; only a new STRUCTURAL
+// key needs a line, and forgetting one costs a refusal on a value already constrained to an
+// identifier, which shows up immediately instead of silently.
+const NON_PRINTING_KEYS = new Set([
+  "id",
+  "type",
+  "spaceAfter",
+  "field",
+  "discountField",
+  "taxField",
+  "columns",
+  "align",
+  "variant",
+  "name",
+]);
+
+// Every string a template PRINTS, from the halves the caller wrote. Nested objects are walked, so a
+// label inside a header's meta row or a fields block's rows is found the same way a title is.
+function walkStrings(
+  value: unknown,
+  path: string,
+  out: [string, string][],
+): void {
+  if (typeof value === "string") {
+    out.push([path, value]);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, i) => {
+      walkStrings(item, `${path}[${i}]`, out);
+    });
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (NON_PRINTING_KEYS.has(key)) continue;
+    walkStrings(child, path ? `${path}.${key}` : key, out);
+  }
+}
+
 function authoredText(
   content: {
     blocks: DocumentBlock[];
@@ -290,16 +332,12 @@ function authoredText(
   const out: [string, string][] = [];
   if (authored.blocks) {
     for (const block of content.blocks) {
-      for (const key of ["title", "subtitle", "heading", "text"] as const) {
-        const value = (block as Record<string, unknown>)[key];
-        if (typeof value === "string")
-          out.push([`blocks."${block.id}".${key}`, value]);
-      }
+      walkStrings(block, `blocks."${block.id}"`, out);
     }
   }
   if (authored.fields) {
     for (const field of content.fields) {
-      out.push([`fields."${field.name}".label`, field.label]);
+      walkStrings(field, `fields."${field.name}"`, out);
     }
   }
   const footer = content.style?.footerText;

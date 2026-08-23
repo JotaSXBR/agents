@@ -18,6 +18,7 @@ import {
 import { type CompanyLogo, readCompanyLogo } from "./company";
 import { formatDate, formatDocumentNumber } from "./format";
 import { calendarDay } from "./issue";
+import { unprintableProblem } from "./printable";
 import { renderDocumentPdf } from "./render";
 import { sampleValues } from "./sample";
 import {
@@ -256,6 +257,13 @@ export function templateMetadataProblem(input: {
     !templateNumberPrefixSchema.safeParse(input.numberPrefix ?? null).success
   ) {
     return "numberPrefix: must be at most 20 characters.";
+  }
+  // The prefix is DRAWN: it is the front of every document number on the page. A length check alone
+  // let a character the fonts cannot encode through, and the renderer then prints a different one —
+  // on every document that template ever issues.
+  if (typeof input.numberPrefix === "string") {
+    const problem = unprintableProblem(input.numberPrefix, "numberPrefix");
+    if (problem) return problem;
   }
   return null;
 }

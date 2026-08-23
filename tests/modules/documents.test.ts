@@ -693,6 +693,24 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
         appDb,
       ),
     ).rejects.toThrow(/numberPrefix/);
+    // …and the same gate holds it to what the page can print: the prefix is DRAWN, at the front of
+    // every document number that template ever issues, so a length check alone let a character the
+    // fonts turn into a different one through.
+    await expect(
+      previewDocumentTemplate(
+        ctx(tenantA),
+        { id: templateId, numberPrefix: "ORÇ😀-" },
+        appDb,
+      ),
+    ).rejects.toThrow(/numberPrefix/);
+    await expect(
+      updateDocumentTemplate(
+        ctx(tenantA),
+        templateId,
+        { numberPrefix: "ORÇ😀-" },
+        appDb,
+      ),
+    ).rejects.toThrow(/numberPrefix/);
 
     // The sample-value path is untouched: omitting values still renders.
     const bytes = await previewDocumentTemplate(

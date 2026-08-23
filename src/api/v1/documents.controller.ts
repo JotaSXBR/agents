@@ -50,6 +50,21 @@ function ctxOrThrow(ctx: TenantContext | null): TenantContext {
 // BigInt parse error into a 400 by matching the word "BigInt" in an engine's message. That mapping
 // was measured and it does work today — but it is a coupling to wording nobody here controls, and a
 // malformed id is a validation failure the route can name on its own.
+// The conversation key an issued document is bound to, constrained to the SHAPE the runtime writes
+// and bounded.
+//
+// `issued_documents.thread_id` is indexed (tenantId, threadId), so a long enough value is refused by
+// POSTGRES with an index-row-size error — a 500 for a field a caller typed, on a route that
+// advertises validation. Three numeric ids is what the key IS (tenantId:instanceId:conversationId),
+// so anything else was never going to match a conversation anyway, and the length follows from the
+// shape rather than being a second guess at it.
+export const threadIdSchema = t.String({
+  pattern: "^[0-9]{1,20}:[0-9]{1,20}:[0-9]{1,20}$",
+  maxLength: 64,
+  description:
+    "Conversation thread key (tenant:instance:conversation) this document belongs to.",
+});
+
 export const documentsController = new Elysia({
   prefix: "/v1/documents",
   tags: ["Resources"],
@@ -138,12 +153,7 @@ export const documentsController = new Elysia({
               'Values keyed by the template\'s declared field names. A lineItems field takes [{"description","quantity","unitPrice"}].',
           }),
         ),
-        threadId: t.Optional(
-          t.String({
-            description:
-              "Conversation thread key (tenant:instance:conversation) this document belongs to.",
-          }),
-        ),
+        threadId: t.Optional(threadIdSchema),
         conversationId: t.Optional(
           t.String({
             pattern: "^[0-9]+$",

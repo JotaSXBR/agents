@@ -160,7 +160,14 @@ export const documentStyleSchema = z.object({
   margin: z.enum(["narrow", "normal", "wide"]),
   pageSize: z.enum(["A4", "LETTER"]),
   locale: z.enum(["pt-BR", "en-US"]),
-  currency: z.string().length(3),
+  // Three ASCII LETTERS. Length alone accepted "$$$" and "中AB": the first makes Intl throw, and the
+  // renderer's fallback then prints the raw code beside every amount; the second is drawn as a
+  // different character in every price on the page.
+  //
+  // NOTE: no `.transform` to upper-case here — a transform does not survive z.toJSONSchema, and this
+  // schema is published as the authoring contract. Case is normalised by parseDocumentStyle, beside
+  // the baseFontSize clamp, for the same reason: "brl" is a spelling, not a different currency.
+  currency: z.string().regex(/^[A-Za-z]{3}$/),
   footerText: z.string().max(200).optional(),
   showPageNumbers: z.boolean(),
 });
@@ -185,6 +192,7 @@ export function parseDocumentStyle(value: unknown): DocumentStyle {
   };
   return {
     ...merged,
+    currency: merged.currency.toUpperCase(),
     baseFontSize: Math.min(
       BASE_FONT_SIZE_MAX,
       Math.max(BASE_FONT_SIZE_MIN, Math.round(merged.baseFontSize)),
