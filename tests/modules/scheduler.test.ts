@@ -10,6 +10,7 @@ import {
   failJob,
   reapStaleJobs,
   rescheduleJob,
+  retireJobsByDedupeKey,
 } from "@/modules/scheduler/service";
 import { registerJobHandler, runClaimed } from "@/modules/scheduler/worker";
 
@@ -363,6 +364,54 @@ describe.skipIf(!dbUp)("scheduler", () => {
     });
     await failJob(tenantId, id, await seqOf(id), 4, "boom again", appDb);
     expect((await statusOf(id)).status).toBe("DEAD");
+  });
+
+  // The tombstone calls off a RUN, so it reaches the two statuses that have one. A DEAD row does not:
+  // nothing is executing it for the claim_seq bump to fence, and DONE would erase the classification
+  // an operator reads to know the work was definitively lost — the reason revokeJobsByKeyPrefixOn
+  // spares it too, and the invariant memory/compact.ts already writes down ("a DEAD row is not
+  // PENDING and reset leaves it alone").
+  test("retire calls off PENDING and CLAIMED runs, and spares a DEAD row", async () => {
+    const ids: Record<string, bigint> = {};
+    for (const [key, status] of [
+      ["dk-retire-pending", "PENDING"],
+      ["dk-retire-claimed", "CLAIMED"],
+      ["dk-retire-dead", "DEAD"],
+    ] as const) {
+      ids[key] = await enqueueJob({
+        tenantId,
+        kind: "FOLLOWUP",
+        dedupeKey: key,
+        runAt: past(),
+        base: appDb,
+      });
+      if (status !== "PENDING") {
+        await suDb.schedulerJob.update({
+          where: { id: ids[key] },
+          data: { status, lastError: status === "DEAD" ? "boom" : null },
+        });
+      }
+      await retireJobsByDedupeKey(tenantId, "FOLLOWUP", key, appDb);
+    }
+
+    expect((await statusOf(ids["dk-retire-pending"] as bigint)).status).toBe(
+      "DONE",
+    );
+    expect((await statusOf(ids["dk-retire-claimed"] as bigint)).status).toBe(
+      "DONE",
+    );
+
+    const dead = await suDb.schedulerJob.findUniqueOrThrow({
+      where: { id: ids["dk-retire-dead"] as bigint },
+      select: { status: true, lastError: true, payload: true },
+    });
+    expect(dead.status).toBe("DEAD");
+    expect(dead.lastError).toBe("boom");
+    // Not even the stamp: for this kind `cancelledAt` is read only by jobRetired, which asks about a
+    // run — writing it on a row nobody runs says nothing and only muddies the record.
+    expect(
+      (dead.payload as { cancelledAt?: unknown }).cancelledAt,
+    ).toBeUndefined();
   });
 
   test("reaper requeues a stranded CLAIMED job", async () => {

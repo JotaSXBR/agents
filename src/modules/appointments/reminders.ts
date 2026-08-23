@@ -181,7 +181,17 @@ export async function cancelAppointmentReminders(
 // between reading the command and this statement committing, where "before or after the command" has
 // no answer to get right.
 //
-// Returns the number of rows retired.
+// TWO scopes in one statement, over different row sets. The `cancelledAt` stamp is the APPOINTMENT's
+// cancel marker, not a note about a run: projectAppointmentEvents and the follow-up sweep both read
+// it, and to both a row whose start is still ahead is a LIVE appointment until the stamp lands. So it
+// goes on every row of the thread, DEAD ones included — fencing it on status would leave a
+// dead-lettered reminder in the prompt, and follow-ups paused on it, after the operator was told the
+// conversation had been cleared. The STATUS transition is the narrower scope: only a queued or
+// in-flight row has a run to call off, and moving a DEAD row to DONE would erase the dead-letter an
+// operator may still need to read (the same reason retireJobsByDedupeKey fences the whole statement —
+// there the stamp has no reader but jobRetired, so it can).
+//
+// Returns the number of rows the command reached — retired or merely tombstoned.
 export async function cancelThreadAppointmentReminders(
   tenantId: bigint,
   threadId: string,
@@ -191,7 +201,11 @@ export async function cancelThreadAppointmentReminders(
     const stamp = JSON.stringify({ cancelledAt: new Date().toISOString() });
     return db.$executeRaw`
       UPDATE scheduler_jobs
-         SET status = 'DONE',
+         SET status = CASE
+                        WHEN status IN ('PENDING', 'CLAIMED')
+                          THEN 'DONE'::"SchedulerJobStatus"
+                        ELSE status
+                      END,
              payload = payload || ${stamp}::jsonb,
              claim_seq = claim_seq + 1,
              updated_at = now()

@@ -202,8 +202,17 @@ export async function cancelPendingJobsByPrefix(
 // at the end, since completeJob/rescheduleJob/failJob all CAS on the token the claim handed out.
 //
 // One atomic statement, never read-modify-write, so a concurrent re-arm's payload is stamped or
-// replaced whole. UNCONDITIONAL by design: a caller that cannot afford to retire work armed after it
-// asked runs this BEFORE its slow steps, so that re-arm lands afterwards and revives its own row.
+// replaced whole. Unconditional over ARM TIME by design: a caller that cannot afford to retire work
+// armed after it asked runs this BEFORE its slow steps, so that re-arm lands afterwards and revives
+// its own row.
+//
+// Fenced on STATUS, though: only a queued or in-flight row has a run to call off. A DEAD row is left
+// alone because marking it DONE would erase the dead-letter an operator may still need to read, and
+// nothing is executing it for the claim_seq bump to fence — the same rule revokeJobsByKeyPrefixOn
+// states below. The fence is safe here because this stamp has exactly one reader, jobRetired, which
+// asks about a RUN. It is not safe everywhere: cancelThreadAppointmentReminders writes the same shape
+// and cannot use it, because there `cancelledAt` also marks the APPOINTMENT cancelled and is read by
+// projectAppointmentEvents / the follow-up sweep, for whom a DEAD row is still a live appointment.
 // Returns the number of rows retired.
 export async function retireJobsByDedupeKey(
   tenantId: bigint,
@@ -221,7 +230,8 @@ export async function retireJobsByDedupeKey(
              updated_at = now()
        WHERE tenant_id = ${tenantId}
          AND kind = ${kind}::"SchedulerJobKind"
-         AND dedupe_key = ${dedupeKey}`;
+         AND dedupe_key = ${dedupeKey}
+         AND status IN ('PENDING', 'CLAIMED')`;
   });
 }
 

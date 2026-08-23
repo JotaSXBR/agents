@@ -10,6 +10,7 @@ import {
   cancelThreadAppointmentReminders,
   computeReminderJobs,
   enqueueAppointmentReminders,
+  hasLiveAppointment,
   reminderNudge,
 } from "@/modules/appointments/reminders";
 import {
@@ -480,6 +481,49 @@ describe.skipIf(!dbUp)("a reminder retired while claimed", () => {
     });
 
     expect(s.sent).toEqual([]);
+  });
+
+  // A dead-lettered reminder is still an APPOINTMENT. projectAppointmentEvents and the follow-up
+  // sweep both read a row whose start is ahead as LIVE whatever its status, so /reset has to reach it
+  // — a status fence on the whole statement would leave the appointment in the prompt and follow-ups
+  // paused on it, right after the operator was told the conversation had been cleared. And it has to
+  // reach it without erasing WHY the job died, which is the operator's only record of the failure.
+  // Its own thread, so the outcome does not depend on what the tests above left behind.
+  test("a dead-lettered reminder is cancelled without losing its dead-letter", async () => {
+    const deadThread = `${tenantId}:${instanceId}:${CONV_ID + 1}`;
+    const startISO = new Date(Date.now() + 86_400_000).toISOString();
+    await suDb.schedulerJob.create({
+      data: {
+        tenantId,
+        kind: "APPOINTMENT_REMINDER",
+        dedupeKey: "reminder:evt-5:60",
+        status: "DEAD",
+        attempts: 5,
+        lastError: "google: 502 Bad Gateway",
+        runAt: new Date(),
+        payload: {
+          threadId: deadThread,
+          eventId: "evt-5",
+          calendarId: "primary",
+          startISO,
+        },
+      },
+    });
+    // The control: dead-lettered, and the appointment it stands for is live all the same.
+    expect(await hasLiveAppointment(tenantId, deadThread, appDb)).toBe(true);
+
+    await cancelThreadAppointmentReminders(tenantId, deadThread, appDb);
+
+    expect(await hasLiveAppointment(tenantId, deadThread, appDb)).toBe(false);
+    const row = await suDb.schedulerJob.findFirst({
+      where: {
+        tenantId,
+        kind: "APPOINTMENT_REMINDER",
+        dedupeKey: "reminder:evt-5:60",
+      },
+    });
+    expect(row?.status).toBe("DEAD");
+    expect(row?.lastError).toBe("google: 502 Bad Gateway");
   });
 
   test("an un-cancelled one still reaches the customer", async () => {
