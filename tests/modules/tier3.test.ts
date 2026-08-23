@@ -63,7 +63,18 @@ function ctx(t: bigint): TenantContext {
 // nobody, which is the shape that lets the unassign proceed.
 function makeStub(
   live: { assigneeType?: string | null; assigneeId?: number | null } = {},
+  // A holder that appears only from the SECOND live read on. The hand-back reads the conversation
+  // twice — once to decide whether the unassign is aimed at somebody who is still there, once inside
+  // the mirror write — and a takeover landing between them is visible only to the second. It carries
+  // `updated_at` because that is what makes the mirror write take the versioned path and return a
+  // state at all; without a version the write is unversioned and the caller learns nothing from it.
+  lateLive: {
+    assigneeType: string;
+    assigneeId: number;
+    updatedAt: number;
+  } | null = null,
 ) {
+  let liveReads = 0;
   const calls = {
     getMessages: 0,
     sendMessage: [] as { content: string; isPrivate: boolean }[],
@@ -128,15 +139,31 @@ function makeStub(
       calls.toggleStatus.push(status);
       return {};
     },
-    getConversation: async (cid: number) => ({
-      id: cid,
-      status: "pending",
-      meta: {
-        assignee_type: live.assigneeType ?? null,
-        assignee:
-          live.assigneeId != null ? { id: live.assigneeId, name: "Ana" } : null,
-      },
-    }),
+    getConversation: async (cid: number) => {
+      liveReads += 1;
+      const late = lateLive !== null && liveReads > 1 ? lateLive : null;
+      return late
+        ? {
+            id: cid,
+            status: "pending",
+            updated_at: late.updatedAt,
+            meta: {
+              assignee_type: late.assigneeType,
+              assignee: { id: late.assigneeId, name: "Bea" },
+            },
+          }
+        : {
+            id: cid,
+            status: "pending",
+            meta: {
+              assignee_type: live.assigneeType ?? null,
+              assignee:
+                live.assigneeId != null
+                  ? { id: live.assigneeId, name: "Ana" }
+                  : null,
+            },
+          };
+    },
   };
   return {
     calls,
@@ -714,6 +741,36 @@ describe.skipIf(!dbUp)("tier-3 conversation ops (stub client)", () => {
     });
     expect(row?.assigneeType).toBe("User");
     expect(row?.assigneeId).toBe(42);
+  });
+
+  // And the window one step further in: the unassign was correctly aimed — nobody was holding it when
+  // it was decided — and the human arrives before the mirror write reads the conversation back. That
+  // read is what the row and the console event are built from, so an outcome derived from the FIRST
+  // read reports the agent as having it back while everything else this call produced names a person.
+  test("a takeover found by the mirror read is reported, not the earlier snapshot", async () => {
+    const stub = makeStub(
+      {},
+      {
+        assigneeType: "User",
+        assigneeId: 4321,
+        updatedAt: Math.floor(Date.now() / 1000) + 60,
+      },
+    );
+    const outcome = await returnConversationToAgent(
+      ctx(tenant),
+      convId,
+      { makeClient: stub.makeClient },
+      appDb,
+    );
+    // It DID unassign: at the moment that was decided the conversation was nobody's.
+    expect(stub.calls.unassignConversation).toBe(1);
+    expect(outcome).toBe("taken-over");
+    // And the row the same call wrote agrees, which is the disagreement being closed.
+    const row = await suDb.conversation.findUnique({
+      where: { id: convId },
+      select: { assigneeType: true, assigneeId: true },
+    });
+    expect([row?.assigneeType, row?.assigneeId]).toEqual(["User", 4321]);
   });
 
   // "User" and "AgentBot" are separate id namespaces in Chatwoot, so the comparison is the whole

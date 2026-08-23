@@ -1345,17 +1345,23 @@ export async function returnConversationToAgent(
     status: "pending",
     ...(newHolder ?? { assigneeId: null, assigneeType: null }),
   });
+  // Who the mirror ends up naming, resolved ONCE and read by both the event and the return below.
+  // It is the LAST thing that looked at the conversation, not the first: `mirrorConsoleWrite` does
+  // its own live read AFTER the unassign, so a human who claimed it in that window is here and
+  // nowhere in `newHolder` — and the row and the broadcast already say so.
+  //
   // The fallback names the holder that SURVIVED, not nobody: `mirrorConsoleWrite` returns null when
   // its versioned read comes back empty, and it has already written this same holder to the row. A
   // null here would tell every open console the conversation is unassigned while Chatwoot and the
   // mirror both say a human has it.
+  const finalHolder = state
+    ? { assigneeType: state.assigneeType, assigneeId: state.assigneeId }
+    : (newHolder ?? { assigneeType: null, assigneeId: null });
   broadcastConversationEvent(tenantId, {
     conversationId: String(id),
     status: state?.status ?? "pending",
-    assigneeId: state ? state.assigneeId : (newHolder?.assigneeId ?? null),
-    assigneeType: state
-      ? state.assigneeType
-      : (newHolder?.assigneeType ?? null),
+    assigneeId: finalHolder.assigneeId,
+    assigneeType: finalHolder.assigneeType,
     lastEventAt:
       (state ? state.lastEventAt : conv.lastEventAt)?.toISOString() ?? null,
   });
@@ -1363,7 +1369,11 @@ export async function returnConversationToAgent(
   // hand-back it asked for as having happened. Nothing throws on this path: the status WAS set to
   // pending and the mirror WAS corrected — the one thing withheld is the unassign, which is exactly
   // what the caller told its operator it was doing.
-  return newHolder === null ? "returned" : "taken-over";
+  //
+  // Read off the same value the console just received, because the two answering differently is the
+  // defect rather than a detail: a caller told "returned" while the row it triggered names a person
+  // has nothing to notice the disagreement with.
+  return finalHolder.assigneeId === null ? "returned" : "taken-over";
 }
 
 export async function setConversationStatus(
