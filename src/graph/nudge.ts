@@ -470,19 +470,26 @@ export async function runAgentNudge(
   // THE RULE for the asks below, because a check placed by intuition is a check the next branch is
   // born without: ONE ask per stretch of I/O that precedes a write, and never any I/O between an ask
   // and the write it guards. The answer is a fact about another process, so it decays over exactly
-  // the time this function spends waiting — and only over that time. Which makes the asks
-  // enumerable rather than a matter of taste; these are all of them, and each names its stretch:
+  // the time this function spends waiting — and only over that time.
+  //
+  // Which puts the asks in two groups. The DETERMINISTIC post-actions are reached by seven ends
+  // after seven different waits, so their ask lives inside `applyPostActions` (twice: once on entry,
+  // once before the resolve, because the labels in between are two more round trips). No call site
+  // asks on their behalf, and none can forget to — the contact-auth refusal is the end that proved
+  // that rule needs enforcing rather than repeating.
+  //
+  // What is left are the asks that guard something else, and they are enumerable:
   //
   //   1. the entry, covering everything the caller did before this (asked immediately below);
-  //   2. the contact-authorization request, whose refusal branch writes the post-actions;
-  //   3. the thread claim, asked INSIDE the `ingest:` lock because that is what makes it sound;
-  //   4. the model invoke, asked once it returns, on the throw path as well as the clean one;
-  //   5. the post-model ownership probe, whose answer every end below consumes;
-  //   6. the moderation call inside deliverPromisedLine;
-  //   7. the guardrail judge's call.
+  //   2. the thread claim, asked INSIDE the `ingest:` lock because that is what makes it sound, and
+  //      handed that transaction's own connection because opening a second one there stalls the lock;
+  //   3. the model invoke, asked once it returns, on the throw path as well as the clean one;
+  //   4. the post-model ownership probe, whose answer the sends below consume;
+  //   5. the moderation call inside deliverPromisedLine;
+  //   6. the guardrail judge's call.
   //
-  // A new end that writes does not need a check of its own — it needs to be placed after one of
-  // these, with no I/O in between. A new WAIT does.
+  // A new end that writes needs no check of its own — it needs to be placed after one of these, with
+  // no I/O in between, or to write through applyPostActions. A new WAIT does.
 
   // NOTE: Asked HERE, alongside the live gate and for its reason: before any model spend. It buys more
   // than the money, though — an invoked graph writes the proactive turn into the conversation's
@@ -559,9 +566,20 @@ export async function runAgentNudge(
   }: {
     canMessage: boolean;
     allowResolve?: boolean;
-  }): Promise<void> => {
+  }): Promise<"applied" | "stale"> => {
     const actions = params.postActions;
-    if (!actions || !canMessage) return;
+    if (!actions || !canMessage) return "applied";
+    // The ask lives HERE and not at the seven call sites, which is the difference between a rule
+    // and a habit: every one of those sites reaches this after a wait of its own (the model, the
+    // ownership probe, the authorization request, a send), and a rule that has to be re-applied by
+    // hand at each is one the next end is born without — which is exactly how the contact-auth
+    // refusal arrived. Asked once here, no caller can forget it and none needs to remember.
+    //
+    // Reported back, because ONE end has nothing else to say: the contact-authorization refusal
+    // writes only these actions, so "silent" there would tell the operator the agent chose not to
+    // speak when what happened is that the command called the run off. Every other end's outcome is
+    // decided by what reached the customer and ignores this.
+    if (!(await stillWanted())) return "stale";
     const labels = actions.assignLabels?.filter((l) => l.trim());
     if (labels && labels.length > 0) {
       try {
@@ -575,7 +593,11 @@ export async function runAgentNudge(
         );
       }
     }
-    if (allowResolve && actions.resolve) {
+    // And again, because the labels above are two Chatwoot round trips and the resolve is the
+    // heaviest thing this function does: closing a conversation the operator has just cleared and
+    // handed back to the agent is not a label to peel off, it is the attendance ended. Same rule as
+    // the ask at the top, applied to the wait between them.
+    if (allowResolve && actions.resolve && (await stillWanted())) {
       try {
         await client.toggleStatus(conversationId, "resolved");
         // NOTE: A follow-up ladder only advances while the customer stays silent (an inbound ends the
@@ -602,6 +624,7 @@ export async function runAgentNudge(
         );
       }
     }
+    return "applied";
   };
   // The contact authorization gate applies to proactive sends too (docs/contact-auth.md): a
   // follow-up is a turn the agent starts, and a contact the reactive gate would refuse must not be
@@ -650,17 +673,15 @@ export async function runAgentNudge(
       // human took during those seconds is writing on their conversation. A probe that cannot
       // answer means we do not know, and we do not touch it.
       //
-      // And ownership is not the only thing those seconds can change. This is a WRITING end like the
-      // six below, so it answers the same question they do first: /reset can retire this run inside
-      // the same window, and then these labels land on a conversation the operator was told had been
-      // cleared. Asked before the probe, so a retired run does not spend the round trip either.
-      if (!(await stillWanted())) return "stale";
+      // The retirement question this end also has to answer is asked by applyPostActions itself,
+      // below the probe rather than above it: an ask placed here would be separated from the write
+      // by that round trip, which is the whole failure this branch was added to prevent.
       const stillOurs = await botStillOwnsIt().catch(() => "unavailable");
-      await applyPostActions({
+      const applied = await applyPostActions({
         canMessage: stillOurs === "ours",
         allowResolve: false,
       });
-      return "silent";
+      return applied === "stale" ? "stale" : "silent";
     }
     // Allowed, and the ownership probe above happened BEFORE a round-trip that may have taken ten
     // seconds. The same reason the refusal re-asks: a human who took the conversation during the

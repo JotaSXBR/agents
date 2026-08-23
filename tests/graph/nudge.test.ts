@@ -1070,6 +1070,58 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
   // the checks around them never see. A job retired while the turn ran reaches the customer through
   // this path alone — and the transfer itself is NOT undone by the fence: the tool already ran, and
   // the conversation stays with the human queue. Withholding the sentence is the part still ours.
+  // Inside applyPostActions itself. The labels are two Chatwoot round trips and the resolve follows
+  // them, so a command landing between the two is a conversation the operator just cleared and
+  // handed back to the agent being CLOSED — which is not a label to peel off afterwards, it is the
+  // attendance ended. The labels that already went out stay: they were written before the command,
+  // and the reset clears them on its own way through.
+  test("a reset landing between the labels and the resolve withholds the resolve", async () => {
+    await seedConv(9994, null);
+    const s = stub();
+    const wanted = retireOn(s, "setConversationLabels");
+    const outcome = await runAgentNudge({
+      tenantId,
+      threadId: `${tenantId}:${instanceId}:9994`,
+      nudge: { source: "followup", kind: "inactivity", step: 1 },
+      postActions: { assignLabels: ["follow-up"], resolve: true },
+      stillWanted: wanted,
+      base: appDb,
+      deps: {
+        makeModel: () => new FakeListChatModel({ responses: ["Tudo certo?"] }),
+        makeClient: s.makeClient,
+        checkpointer: new MemorySaver(),
+        persistUsage: async () => {},
+      },
+    });
+
+    expect(outcome).toBe("messaged");
+    expect(s.labelSets).toEqual([["follow-up"]]);
+    expect(s.resolved).toEqual([]);
+  });
+
+  // The control: nothing retired, and the resolve follows the labels.
+  test("the same turn resolves when nothing retires it", async () => {
+    await seedConv(9995, null);
+    const s = stub();
+    const outcome = await runAgentNudge({
+      tenantId,
+      threadId: `${tenantId}:${instanceId}:9995`,
+      nudge: { source: "followup", kind: "inactivity", step: 1 },
+      postActions: { assignLabels: ["follow-up"], resolve: true },
+      base: appDb,
+      deps: {
+        makeModel: () => new FakeListChatModel({ responses: ["Tudo certo?"] }),
+        makeClient: s.makeClient,
+        checkpointer: new MemorySaver(),
+        persistUsage: async () => {},
+      },
+    });
+
+    expect(outcome).toBe("messaged");
+    expect(s.labelSets).toEqual([["follow-up"]]);
+    expect(s.resolved).toEqual([9995]);
+  });
+
   // The window of the POST-MODEL ownership probe, whose answer every end below it consumes — the
   // silent branch, the template, the two notes and the post-actions. The check above that probe
   // answers for the model call and not for the round trip after it, so a command landing inside the

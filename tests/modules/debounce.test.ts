@@ -23,6 +23,7 @@ import {
   claimDueDebounceJobs,
   claimDueJobs,
   enqueueJob,
+  retireJobsByDedupeKey,
 } from "@/modules/scheduler/service";
 import { seedChatwootInstance } from "../utils/chatwoot";
 import {
@@ -403,6 +404,57 @@ describe.skipIf(!dbUp)("debounce", () => {
       (rows[0]?.payload as { burstStartedAt: number } | undefined)
         ?.burstStartedAt,
     ).toBe(t0.getTime());
+  });
+
+  // /reset retires the burst, but a flush already CLAIMED is past every cancel — and this one is a
+  // queued TURN: coalescing and invoking rewrites the thread the command just cleared, with the
+  // operator having been told the conversation was started over. The reply is the smaller half.
+  test("a burst retired while claimed stands down before reading it", async () => {
+    await seedConversation(838);
+    const thread = threadOf(838);
+    const row = await suDb.schedulerJob.create({
+      data: {
+        tenantId,
+        kind: "DEBOUNCE",
+        dedupeKey: debounceDedupeKey(thread),
+        status: "CLAIMED",
+        runAt: new Date(),
+        payload: { threadId: thread, agentBotId: 9, burstStartedAt: 1 },
+      },
+      select: { id: true, claimSeq: true },
+    });
+    // What /reset does to it, while this run holds the claim.
+    await retireJobsByDedupeKey(
+      tenantId,
+      "DEBOUNCE",
+      debounceDedupeKey(thread),
+      suDb,
+    );
+    const sent: Array<[number, string]> = [];
+    const calls = { getMessages: 0 };
+
+    const out = await flushDebounceJob({
+      // The payload the worker captured at claim time — before the stamp landed.
+      job: { ...jobFor(838), id: row.id, claimSeq: row.claimSeq },
+      base: appDb,
+      deps: {
+        makeModel: () => {
+          throw new Error("a retired burst must not reach the model");
+        },
+        makeClient: makeStub({
+          pages: [page([{ id: 1, content: "oi" }])],
+          sent,
+          calls,
+        }),
+        checkpointer: new MemorySaver(),
+      },
+    });
+
+    expect(out).toEqual({ outcome: "done" });
+    expect(sent).toEqual([]);
+    // Stood down BEFORE reading the burst, which is what tells this apart from a turn that ran and
+    // chose to stay quiet.
+    expect(calls.getMessages).toBe(0);
   });
 
   test("flush coalesces the burst into one reply and advances the watermark", async () => {

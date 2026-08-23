@@ -148,6 +148,9 @@ describe.skipIf(!dbUp)("the redirect closing records its own origin", () => {
         status: "open",
         threadId: `${tenantId}:${instanceId}:${WIDGET_CONV_2}`,
         lastInboundAt: new Date(),
+        // The link this chat opened from, AFTER the sibling's redirect below. That ordering is what
+        // makes the two one episode rather than the contact's latest row on each inbox.
+        redirectLinkedAt: new Date(Date.now() - 59_000),
       },
     });
     const waInbox = await suDb.inbox.create({
@@ -170,6 +173,7 @@ describe.skipIf(!dbUp)("the redirect closing records its own origin", () => {
         chatwootStatusAt: SIBLING_AT,
         threadId: `${tenantId}:${instanceId}:${SIBLING_CONV}`,
         lastInboundAt: new Date(),
+        redirectSentAt: new Date(Date.now() - 60_000),
       },
     });
     const s = stubClient();
@@ -191,5 +195,73 @@ describe.skipIf(!dbUp)("the redirect closing records its own origin", () => {
     });
     expect(row.resolvedBy).toBe("redirect_closing");
     expect(row.resolvedByAt).toBe(SIBLING_AT);
+  });
+
+  // The resolve trigger reaches deliverRedirectClosing straight from a webhook, so it carries no job
+  // and every retirement check inside that function is one it skips. What stands in for them is the
+  // episode: /reset clears BOTH anchors, so a run that read the pair before the command finds none
+  // after it — and the goodbye, plus the RESOLVE that follows it, do not land on a conversation the
+  // operator was told had been erased.
+  test("a cleared episode leaves no sibling to say goodbye to", async () => {
+    const WIDGET = 503;
+    const SIBLING = 8803;
+    const contact = await suDb.contact.create({
+      data: { tenantId, chatwootInstanceId: instanceId, chatwootContactId: 78 },
+    });
+    const widgetInbox = await suDb.inbox.findFirstOrThrow({
+      where: { tenantId, chatwootInboxId: 41 },
+    });
+    await suDb.conversation.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        inboxId: widgetInbox.id,
+        contactId: contact.id,
+        chatwootConversationId: WIDGET,
+        status: "open",
+        threadId: `${tenantId}:${instanceId}:${WIDGET}`,
+        lastInboundAt: new Date(),
+        // What the command leaves behind on both sides.
+        redirectLinkedAt: null,
+      },
+    });
+    const waInbox = await suDb.inbox.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        chatwootInboxId: 43,
+        name: "WhatsApp (reset)",
+        channelType: "Channel::Whatsapp",
+      },
+    });
+    await suDb.conversation.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        inboxId: waInbox.id,
+        contactId: contact.id,
+        chatwootConversationId: SIBLING,
+        status: "open",
+        threadId: `${tenantId}:${instanceId}:${SIBLING}`,
+        lastInboundAt: new Date(),
+        redirectSentAt: null,
+      },
+    });
+    const s = stubClient();
+
+    const outcome = await deliverRedirectClosing({
+      tenantId,
+      instanceId,
+      widgetConversationId: WIDGET,
+      entryInboxId: 43,
+      closingMessage: "Até logo!",
+      closeChat: false,
+      base: appDb,
+      deps: { makeClient: s.makeClient },
+    });
+
+    // The claim is still taken — there is simply no paired conversation left to reach.
+    expect(outcome).toBe("delivered");
+    expect(s.statuses).toEqual([]);
   });
 });

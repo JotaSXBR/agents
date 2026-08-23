@@ -1178,6 +1178,15 @@ describe.skipIf(!dbUp)(
             runAt: new Date(Date.now() + 3_600_000),
             payload: { threadId, eventId: "evt-198", calendarId: "c" },
           },
+          // A queued TURN, not a message: the flush coalesces the burst that arrived before the
+          // command and invokes the graph, recreating the thread this reset clears.
+          {
+            tenantId,
+            kind: "DEBOUNCE",
+            dedupeKey: `debounce:${threadId}`,
+            runAt: new Date(Date.now() + 3_600_000),
+            payload: { threadId, agentBotId: 1, burstStartedAt: Date.now() },
+          },
         ],
       });
       const cw = fakeChatwoot();
@@ -1187,15 +1196,26 @@ describe.skipIf(!dbUp)(
       const jobs = await suDb.schedulerJob.findMany({
         where: {
           tenantId,
-          kind: { in: ["REDIRECT_FOLLOWUP", "APPOINTMENT_REMINDER"] },
+          kind: {
+            in: ["REDIRECT_FOLLOWUP", "APPOINTMENT_REMINDER", "DEBOUNCE"],
+          },
         },
         select: { kind: true, status: true, payload: true },
         orderBy: { kind: "asc" },
       });
+      // Enum declaration order, which is what Prisma sorts an enum column by.
       expect(jobs.map((j) => [j.kind, j.status])).toEqual([
+        ["DEBOUNCE", "DONE"],
         ["APPOINTMENT_REMINDER", "DONE"],
         ["REDIRECT_FOLLOWUP", "DONE"],
       ]);
+      // Tombstoned too, and for the same reason as the reminder: a flush already CLAIMED is past
+      // every cancel, so the stamp is the only thing its handler can see.
+      const debounce = jobs.find((j) => j.kind === "DEBOUNCE");
+      expect(
+        (debounce?.payload as { cancelledAt?: unknown } | undefined)
+          ?.cancelledAt,
+      ).toBeTruthy();
       // Cancelling alone is not enough for the reminder: `loadAppointmentContext` re-reads these
       // rows on EVERY turn and cannot tell a cancelled job from a fired one, so without the
       // tombstone the appointment block stays in the prompt after the reset.

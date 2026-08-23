@@ -405,6 +405,10 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
         threadId: `${tenantId}:${instanceId}:${ENTRY_CONV}`,
         lastEventAt: new Date(),
         lastInboundAt: new Date(),
+        // The anchors a real episode carries, in the order the funnel writes them: the entry side
+        // sends the redirect, then the chat it opened is linked. Without them the two rows are
+        // simply the contact's latest conversation on each inbox, which is not an episode.
+        redirectSentAt: new Date(Date.now() - 60_000),
       },
     });
     await suDb.conversation.create({
@@ -418,6 +422,7 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
         threadId: widgetThread,
         lastEventAt: new Date(),
         lastInboundAt: new Date(),
+        redirectLinkedAt: new Date(Date.now() - 59_000),
       },
     });
   });

@@ -83,6 +83,27 @@ export function followUpDedupeKey(widgetThreadId: string): string {
 // chat the customer reused keeps its original link time and reads as unpaired — because the cost of
 // not clearing a sibling is a ladder that outlives a reset, and the cost of clearing the wrong one
 // is a real appointment going unremembered.
+// The pairing rule, in one place because it is asked in two: which entry conversation and which
+// widget conversation belong to the SAME run of the funnel. The anchors are the evidence and the
+// order is the funnel's own — the entry side sends the redirect, then the chat that opens from it is
+// linked — so a widget chat linked BEFORE this entry conversation ever sent anything is a different
+// episode, and one linked after is this one.
+//
+// It doubles as the generation /reset invalidates, which is the whole reason the closing can trust
+// it: the command clears BOTH anchors, so a run that read the pair before the command and acts after
+// it finds no pair to act on. That is what stands in for a retirement check on the resolve-webhook
+// trigger, which has no job to ask about.
+export function sameRedirectEpisode(
+  entrySentAt: Date | null,
+  widgetLinkedAt: Date | null,
+): boolean {
+  return (
+    entrySentAt !== null &&
+    widgetLinkedAt !== null &&
+    widgetLinkedAt.getTime() >= entrySentAt.getTime()
+  );
+}
+
 export interface RedirectEpisode {
   entryConversationId: number | null;
   widgetConversationId: number | null;
@@ -151,10 +172,7 @@ export async function resolveRedirectEpisode(
     return {
       entryConversationId: entry?.chatwootConversationId ?? null,
       widgetConversationId: widget?.chatwootConversationId ?? null,
-      paired:
-        sentAt !== null &&
-        linkedAt !== null &&
-        linkedAt.getTime() >= sentAt.getTime(),
+      paired: sameRedirectEpisode(sentAt, linkedAt),
     };
   });
 }
@@ -355,7 +373,7 @@ async function resolveWhatsAppSibling(
           chatwootConversationId: widgetConversationId,
         },
       },
-      select: { contactId: true },
+      select: { contactId: true, redirectLinkedAt: true },
     });
     if (!widgetConv?.contactId) return null;
     const sibling = await db.conversation.findFirst({
@@ -369,12 +387,30 @@ async function resolveWhatsAppSibling(
         status: true,
         chatwootStatusAt: true,
         lastInboundAt: true,
+        redirectSentAt: true,
         contact: { select: { chatwootContactId: true } },
         inbox: { select: { channelType: true, provider: true } },
       },
-      orderBy: { lastEventAt: "desc" },
+      orderBy: { lastEventAt: { sort: "desc", nulls: "last" } },
     });
     if (!sibling?.contact?.chatwootContactId) return null;
+    // Same question resolveRedirectEpisode asks, and it has to be asked here too: "the contact's
+    // latest conversation on the entry inbox" is not this episode's sibling, it is whichever
+    // WhatsApp conversation that contact touched last. Saying goodbye into the wrong one — and
+    // RESOLVING it — is worse than not saying goodbye at all.
+    //
+    // It is also this path's only fence against /reset. The resolve trigger arrives straight from a
+    // webhook with no job to ask about, so every retirement check in this function is one it skips;
+    // the command clears both anchors, and a run that read them before it finds no episode after.
+    if (
+      !sameRedirectEpisode(sibling.redirectSentAt, widgetConv.redirectLinkedAt)
+    ) {
+      logger.info(
+        "channel-redirect: no paired WhatsApp sibling for the widget conversation (conv=%d)",
+        widgetConversationId,
+      );
+      return null;
+    }
     return {
       chatwootConversationId: sibling.chatwootConversationId,
       status: sibling.status,

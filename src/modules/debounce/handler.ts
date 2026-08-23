@@ -31,7 +31,7 @@ import {
 import { announceFailedTurn } from "@/modules/conversations/failure-note";
 import { emitFlowEvent } from "@/modules/flowlog/service";
 import type { FlowStage } from "@/modules/flowlog/stages";
-import type { ClaimedJob } from "@/modules/scheduler/service";
+import { type ClaimedJob, jobRetired } from "@/modules/scheduler/service";
 import {
   type JobResult,
   registerDeadLetterHandler,
@@ -453,6 +453,28 @@ export async function flushDebounceJob(
   // the worker → retry with backoff (watermark not advanced, so the retry re-answers the same burst).
   // The error is also surfaced on the conversation (item 6) so the operator can re-engage; a
   // successful answer clears it.
+  // The command's fence, and the last thing asked before the graph runs. Every cancel reaches PENDING
+  // rows only, so a flush already CLAIMED when /reset arrived is past all of them — and it is a
+  // queued TURN: coalescing the burst and invoking rewrites the very thread the command cleared,
+  // with the operator having been told the conversation was started over. The reply is the smaller
+  // half; the checkpoint is the one that outlives the command.
+  //
+  // Asked HERE and not at the top, for the reason every other fence on this path is asked late: the
+  // gate read and the authorization call above are both waits the command can land inside, and an
+  // answer from before them is an answer about a different moment. Nothing is written between this
+  // and the invoke.
+  //
+  // No watermark advance on the way out, unlike the gate-closed and refusal branches: those declare
+  // the burst HANDLED, and a burst the reset erased was not handled, it was withdrawn. The messages
+  // are gone with the thread either way, and the next inbound arms a fresh flush.
+  if (await jobRetired(job, base)) {
+    logger.info(
+      "debounce flush: the burst was retired while claimed (conv=%s), standing down",
+      String(conversationId),
+    );
+    return { outcome: "done" };
+  }
+
   const watermark = ctx.watermark;
   try {
     const outcome = await coalesceAndRunTurn(

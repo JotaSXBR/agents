@@ -68,7 +68,11 @@ import {
   readDirectFence,
 } from "@/modules/conversations/failure-note";
 import { returnConversationToAgent } from "@/modules/conversations/service";
-import { armDebounce, resolveDebounceConfig } from "@/modules/debounce/service";
+import {
+  armDebounce,
+  debounceDedupeKey,
+  resolveDebounceConfig,
+} from "@/modules/debounce/service";
 import { advanceHandledWatermark } from "@/modules/debounce/watermark";
 import { emitFlowEvent } from "@/modules/flowlog/service";
 import { armCompaction } from "@/modules/memory/compact";
@@ -1377,6 +1381,25 @@ async function maybeConsumeCommandOrGate(params: {
             chatwootThreadId(tenantId, instanceId, convId),
             base,
           ),
+      );
+      // The LAST per-conversation kind, and the one this command reached past for longest. A
+      // debounce flush is a queued TURN: it coalesces the burst that arrived before the command and
+      // invokes the graph, which recreates the thread this reset is about to clear — and the reply
+      // is the smaller half of that, since the invoke rewrites the checkpoint whether or not the
+      // watermark lets the message out. Retired here with the rest, and the handler asks before it
+      // invokes, because a flush already CLAIMED is past every cancel.
+      //
+      // Which completes the sweep: of the eleven scheduler kinds, five are per-conversation
+      // (FOLLOWUP, REDIRECT_FOLLOWUP, APPOINTMENT_REMINDER, MEMORY_COMPACT, INGEST_MESSAGE) and this
+      // is the sixth. The other five are fleet-wide sweeps and outbound retries that know nothing
+      // about a conversation.
+      await step("cancel pending debounce", "mensagens em espera", () =>
+        retireJobsByDedupeKey(
+          tenantId,
+          "DEBOUNCE",
+          debounceDedupeKey(chatwootThreadId(tenantId, instanceId, convId)),
+          base,
+        ),
       );
     }
 
