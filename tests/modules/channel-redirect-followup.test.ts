@@ -378,7 +378,12 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
     // Both sides of the pair: stages 2 and 3 message the WhatsApp sibling, and stage 3 resolves both,
     // so without the entry side those stages have nothing to do and prove nothing.
     const contact = await suDb.contact.create({
-      data: { tenantId, chatwootContactId: 991, name: "Cliente" },
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        chatwootContactId: 991,
+        name: "Cliente",
+      },
     });
     const entryInbox = await suDb.inbox.create({
       data: {

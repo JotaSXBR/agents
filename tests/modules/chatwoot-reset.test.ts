@@ -293,7 +293,12 @@ describe.skipIf(!dbUp)(
         },
       });
       const contact = await suDb.contact.create({
-        data: { tenantId, chatwootContactId: CONTACT_CW_ID, name: "Cliente" },
+        data: {
+          tenantId,
+          chatwootInstanceId: instanceId,
+          chatwootContactId: CONTACT_CW_ID,
+          name: "Cliente",
+        },
       });
       // Test mode must already be ACTIVE for this conversation, or /reset defers to the silence gate.
       await suDb.conversation.create({
