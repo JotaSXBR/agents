@@ -36,6 +36,7 @@ import { parseDocumentStyle } from "@/modules/documents/blocks";
 import {
   slugProblem,
   templateMetadataProblem,
+  templateNameSchema,
 } from "@/modules/documents/templates";
 import { parseAuthoredTemplate } from "@/modules/documents/validate";
 import { normalizeSettingsForStorage } from "@/modules/images/settings";
@@ -1424,7 +1425,10 @@ async function createMissingComponents(
     await db.documentTemplate.create({
       data: {
         tenantId,
-        name: tpl.name,
+        // The value the gate APPROVED, not the one it was handed: `templateNameSchema` trims before
+        // it measures, so a name padded with whitespace passes a bound the raw string fails. The
+        // name becomes the tool's title, carried by every granted agent on every turn.
+        name: templateNameSchema.parse(tpl.name),
         slug: tpl.slug,
         description: tpl.description ?? null,
         blocks: content.content.blocks as unknown as Prisma.InputJsonValue,

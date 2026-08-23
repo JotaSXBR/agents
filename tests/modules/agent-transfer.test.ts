@@ -953,6 +953,43 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
     );
   });
 
+  // The gate and the WRITE have to agree on what the value is. `templateNameSchema` trims before it
+  // measures, so a name padded with whitespace passes a check the raw string would fail — and this
+  // path wrote the raw string. The name becomes the tool's title, which every granted agent carries
+  // on every turn, so a hand-edited bundle could plant a huge one past a bound that had just
+  // approved it.
+  test("stores the name the metadata gate approved, not the raw one", async () => {
+    const exp = await exportAgent(srcCtx(), srcAgentId, appDb, {
+      includeComponents: true,
+    });
+    const tampered = structuredClone(exp);
+    const tpl = tampered.components?.documentTemplates?.find(
+      (t) => t.slug === "orcamento",
+    );
+    if (!tpl) throw new Error("bundle missing the document template");
+    tpl.slug = "orcamento_espacado";
+    // Under the 120-character bound once trimmed, far past it as written.
+    tpl.name = `${" ".repeat(500)}Orçamento${" ".repeat(500)}`;
+    const { agent, warnings } = await importAgent(dstCtx(), tampered, appDb);
+    expect(warnings.some((w) => w.code === "documentTemplateInvalid")).toBe(
+      false,
+    );
+    const row = await suDb.documentTemplate.findFirst({
+      where: { tenantId: dstTenant, slug: "orcamento_espacado" },
+      select: { name: true },
+    });
+    expect(row?.name).toBe("Orçamento");
+    await suDb.$executeRawUnsafe(
+      `DELETE FROM document_templates WHERE tenant_id = ${dstTenant} AND slug = 'orcamento_espacado'`,
+    );
+    await suDb.$executeRawUnsafe(
+      `DELETE FROM agent_tool_selections WHERE agent_id = ${BigInt(agent.id)}`,
+    );
+    await suDb.$executeRawUnsafe(
+      `DELETE FROM agents WHERE id = ${BigInt(agent.id)}`,
+    );
+  });
+
   // A discriminated union refuses the WHOLE array on one unknown arm, so a grant of a source a newer
   // release added would make an otherwise importable agent unimportable — and say nothing about
   // which part was the problem. Dropped with a count instead.

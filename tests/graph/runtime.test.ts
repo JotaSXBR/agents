@@ -2188,6 +2188,175 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
     }
   });
 
+  // The same revoke, on a turn whose ONLY output was the document. Nothing reaches the customer
+  // either way, but the two reasons for that are not the same event: a delivery that FAILED is a
+  // turn error the operator has to see (private note, lastError, alert), and a document the operator
+  // themselves pulled back is their own decision arriving. Reporting the decision as a failure
+  // alerts them about their own click.
+  test("an attachment-only turn whose document was revoked does not fail the turn", async () => {
+    await seedConversation(946, null);
+    const dir = `/tmp/fazerai-runtime-revoked-only-${process.pid}`;
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const agent = await suDb.agent.findFirst({
+      where: { tenantId },
+      select: { id: true },
+    });
+    const tpl = await createDocumentTemplate(
+      { tenantId, userId: null, role: "TENANT_ADMIN" },
+      {
+        name: "Orçamento só anexo",
+        slug: "orcamento_so_anexo",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+      },
+      appDb,
+    );
+    await suDb.agentToolSelection.create({
+      data: {
+        tenantId,
+        agentId: agent?.id as bigint,
+        source: "DOCUMENT",
+        documentTemplateId: BigInt(tpl.id),
+        enabledTools: [],
+        knowledgeBaseIds: [],
+      },
+    });
+    const calls: Array<[string, number, string]> = [];
+    try {
+      const outcome = await runAgentTurn({
+        tenantId,
+        instanceId,
+        agentBotId: 9,
+        event: incoming({ conversationId: 946 }),
+        base: appDb,
+        deps: {
+          makeModel: () =>
+            new SendDocumentThenReplyModel(
+              // No text at all: the document WAS the turn.
+              "",
+              "send_orcamento_so_anexo",
+              {
+                cliente: "Ana Ribeiro",
+                itens: [
+                  { description: "Consultoria", quantity: 1, unitPrice: 100 },
+                ],
+                validade: "2026-09-05",
+              },
+              async () => {
+                await suDb.issuedDocument.updateMany({
+                  where: { tenantId, templateId: BigInt(tpl.id) },
+                  data: { revoked: true },
+                });
+              },
+            ) as unknown as BaseChatModel,
+          makeClient: makeImageClient(calls),
+          checkpointer: new MemorySaver(),
+          documentsStorageDir: dir,
+        },
+      });
+      // Nothing was sent and nothing failed: an empty turn, not a broken one.
+      expect(outcome).toBe("empty");
+      expect(calls).toEqual([]);
+      // …and no deferred resolve closed a conversation the customer never heard back on.
+      expect((await mirroredStatus(946)) === "resolved").toBe(false);
+    } finally {
+      await suDb.$executeRawUnsafe(
+        `DELETE FROM agent_tool_selections WHERE tenant_id = ${tenantId}`,
+      );
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // …and the other half of THAT rule, on the attachment-only turn. A lookup that could not be made
+  // is not the operator deciding anything: the file was held back by an outage, and nothing reached
+  // the customer. That is the turn error the alert exists for — reading it as a decision would leave
+  // an unanswered conversation with nothing on it saying why.
+  test("an attachment-only turn whose revocation lookup fails still fails loudly", async () => {
+    await seedConversation(947, null);
+    const dir = `/tmp/fazerai-runtime-lookupfail-only-${process.pid}`;
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const agent = await suDb.agent.findFirst({
+      where: { tenantId },
+      select: { id: true },
+    });
+    const tpl = await createDocumentTemplate(
+      { tenantId, userId: null, role: "TENANT_ADMIN" },
+      {
+        name: "Orçamento instável só anexo",
+        slug: "orcamento_instavel_so_anexo",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+      },
+      appDb,
+    );
+    await suDb.agentToolSelection.create({
+      data: {
+        tenantId,
+        agentId: agent?.id as bigint,
+        source: "DOCUMENT",
+        documentTemplateId: BigInt(tpl.id),
+        enabledTools: [],
+        knowledgeBaseIds: [],
+      },
+    });
+    const flaky = appDb.$extends({
+      query: {
+        issuedDocument: {
+          async findUnique({ args, query }) {
+            const select = args.select as Record<string, unknown> | undefined;
+            if (
+              select &&
+              Object.keys(select).length === 1 &&
+              select.revoked === true
+            ) {
+              throw new Error("connection lost");
+            }
+            return query(args);
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+    const calls: Array<[string, number, string]> = [];
+    try {
+      await expect(
+        runAgentTurn({
+          tenantId,
+          instanceId,
+          agentBotId: 9,
+          event: incoming({ conversationId: 947 }),
+          base: flaky,
+          deps: {
+            makeModel: () =>
+              new SendDocumentThenReplyModel(
+                "",
+                "send_orcamento_instavel_so_anexo",
+                {
+                  cliente: "Ana Ribeiro",
+                  itens: [
+                    { description: "Consultoria", quantity: 1, unitPrice: 100 },
+                  ],
+                  validade: "2026-09-05",
+                },
+              ) as unknown as BaseChatModel,
+            makeClient: makeImageClient(calls),
+            checkpointer: new MemorySaver(),
+            documentsStorageDir: dir,
+          },
+        }),
+      ).rejects.toThrow(/anexo: nada foi entregue/);
+      expect(calls).toEqual([]);
+    } finally {
+      await suDb.$executeRawUnsafe(
+        `DELETE FROM agent_tool_selections WHERE tenant_id = ${tenantId}`,
+      );
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   // The recheck fails CLOSED and, just as importantly, LOCALLY. It runs inside the loop that also
   // delivers the model's text, so an exception escaping it would cost the customer an answer they
   // were owed — over a lookup about an attachment. The document is held back; the reply is not.

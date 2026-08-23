@@ -234,22 +234,36 @@ async function applyDeferredResolve(
 // Delivers the files the agent queued this turn (an image, a document), AFTER the same gates the
 // reply passes. Best-effort per file: one failed attachment must not cost the customer the reply that
 // follows it. Invariant: called only on the "posted" and "empty" outcomes — a superseded, taken-over
-// or blocked turn drops the queue, exactly like the deferred resolve intent. Returns whether the
-// customer actually received something, which is what makes an attachment-only turn count as
-// answered.
+// or blocked turn drops the queue, exactly like the deferred resolve intent.
+//
+// TWO answers, not one bit. "Did the customer receive something?" is what makes an attachment-only
+// turn count as answered — but the caller also has to know WHY nothing arrived, and those are
+// different events: a delivery that failed is a turn error the operator has to be told about
+// (private note, lastError, alert), while a document they revoked while the model was still writing
+// is their own decision landing. One flag answered both, so an attachment-only turn whose document
+// the operator withdrew alerted them about their own click.
+interface AttachmentDelivery {
+  // Something reached the customer.
+  sent: boolean;
+  // At least one attachment was attempted and did not get through. A revocation is NOT a failure:
+  // nothing was attempted for it.
+  failed: boolean;
+}
+
 async function deliverPendingAttachments(
   client: ChatwootClient,
   conversationId: number,
   turnState: TurnState,
   flow: FlowContext,
   document?: { tenantId: bigint; base: PrismaClient },
-): Promise<boolean> {
+): Promise<AttachmentDelivery> {
   // NOTE: Sorted by the model's tool-call order, not by the order the downloads finished in — the
   // batch runs concurrently, and a caption only makes sense next to the picture it was written for.
   const queued = turnState.pendingAttachments
     .splice(0)
     .sort((a, b) => a.order - b.order);
   let sent = false;
+  let failed = false;
   for (const file of queued) {
     // A document is queued as BYTES, and bytes cannot say whether the row is still deliverable. The
     // operator can revoke between the tool issuing it and this loop running — the model still had a
@@ -283,6 +297,10 @@ async function deliverPendingAttachments(
         return null;
       });
       if (live?.revoked !== false) {
+        // A lookup that could not be made is not a decision: it held the file back without anyone
+        // choosing to, so it counts as a failure to deliver. Only an answer saying `revoked` is the
+        // operator's own click arriving.
+        if (live === null) failed = true;
         emitFlowEvent(flow, {
           stage: "tool",
           // Skipped, not an error: the operator revoked it, and the trail should read as the
@@ -325,9 +343,10 @@ async function deliverPendingAttachments(
         detail: { tool: file.tool, outcome: "failed" },
         errorMessage: msg,
       });
+      failed = true;
     }
   }
-  return sent;
+  return { sent, failed };
 }
 
 // Builds the client + tools + graph from an already-loaded AgentConfig, invokes the thread, re-checks
@@ -997,7 +1016,7 @@ export async function runLoadedTurn(
     // reported "empty" would leave a stale turn error on a conversation that was just answered.
     if (!reply) {
       const queued = turnState.pendingAttachments.length;
-      const sent = await deliverPendingAttachments(
+      const { sent, failed } = await deliverPendingAttachments(
         client,
         conversationId,
         turnState,
@@ -1012,10 +1031,18 @@ export async function runLoadedTurn(
       // NOTE: ...unless a handoff already answered. Then the files were NOT the turn, and a throw
       // would record a turn error (private note, lastError, alert) on a conversation that was both
       // answered and correctly handed to a human.
+      // NOTE: ...or unless nothing FAILED. A document the operator revoked while the model was
+      // still writing held itself back on purpose, and reporting their own decision as a turn error
+      // alerts them about their own click. Nothing was delivered either way, so the turn is empty —
+      // and the deferred resolve is skipped with it, because a conversation the customer never
+      // heard back on must not close.
       if (queued > 0 && !sent && !handedOff) {
-        throw new Error(
-          "envio de anexo: nada foi entregue e o turno não tinha resposta em texto",
-        );
+        if (failed) {
+          throw new Error(
+            "envio de anexo: nada foi entregue e o turno não tinha resposta em texto",
+          );
+        }
+        return "empty";
       }
       await applyDeferredResolve(client, conversationId, turnState, flow, {
         tenantId,
