@@ -274,6 +274,27 @@ export async function jobRetired(
   return retired;
 }
 
+// The SAME question as a SQL predicate, for the one caller that cannot ask it and then act: a write
+// whose condition has to be evaluated by the statement that writes, because the command it races
+// does two things in order (retire, then clear what the write would restore) and any read/act pair
+// can be split between them.
+//
+// It lives HERE, touching the function above, because the two are one rule written twice and that is
+// how a rule starts drifting. tests/modules/scheduler.test.ts asserts they agree on every state a
+// row can be in — including the absent one, where both answer "not retired" for the reason the
+// function documents: an unknown is not a retirement.
+export function jobNotRetiredSql(job: ClaimedJob): Prisma.Sql {
+  return Prisma.sql`NOT EXISTS (
+    SELECT 1
+      FROM scheduler_jobs sj
+     WHERE sj.id = ${job.id}
+       AND sj.tenant_id = ${job.tenantId}
+       AND (
+         sj.claim_seq <> ${job.claimSeq}
+         OR sj.payload->>'cancelledAt' IS NOT NULL
+       ))`;
+}
+
 // REVOKED, not merely cancelled: PENDING **and** CLAIMED rows under a dedupeKey prefix are retired.
 //
 // The last and strongest of the four, and the difference is deliberate. The two cancels reach PENDING

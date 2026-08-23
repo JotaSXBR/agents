@@ -145,6 +145,26 @@ let tenantId = 0n;
 let instanceId = 0n;
 let inboxDbId = 0n;
 
+// Turns one of the stub's Chatwoot calls into the moment /reset lands: the returned closure answers
+// `stillWanted` and flips the first time that call is made. The point is the POSITION — a retirement
+// that lands before the run starts is a different (and easier) test than one that lands mid-turn.
+function retireOn(
+  s: { client: ChatwootClient },
+  method: "toggleStatus" | "sendMessage" | "setConversationLabels",
+): () => Promise<boolean> {
+  let wanted = true;
+  const holder = s.client as unknown as Record<
+    string,
+    (...a: never[]) => unknown
+  >;
+  const inner = holder[method]?.bind(s.client);
+  holder[method] = ((...args: never[]) => {
+    wanted = false;
+    return inner?.(...args);
+  }) as (...a: never[]) => unknown;
+  return async () => wanted;
+}
+
 function stub() {
   const messages: Array<[number, string]> = [];
   const notes: Array<[number, string]> = [];
@@ -1050,20 +1070,102 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
   // the checks around them never see. A job retired while the turn ran reaches the customer through
   // this path alone — and the transfer itself is NOT undone by the fence: the tool already ran, and
   // the conversation stays with the human queue. Withholding the sentence is the part still ours.
+  // The window of the POST-MODEL ownership probe, whose answer every end below it consumes — the
+  // silent branch, the template, the two notes and the post-actions. The check above that probe
+  // answers for the model call and not for the round trip after it, so a command landing inside the
+  // GET reached labels and a resolve on a conversation it had just cleared.
+  test("a job retired during the post-model ownership probe writes nothing", async () => {
+    await seedConv(9992, null);
+    const s = stub();
+    let wanted = true;
+    let probes = 0;
+    const inner = await s.makeClient();
+    const client = {
+      ...inner,
+      getConversation: async (c: number) => {
+        // The PRE-invoke probe answers cleanly; the command lands inside the one AFTER the model.
+        if (probes++ > 0) wanted = false;
+        return { id: c, status: "pending", meta: {} };
+      },
+    } as unknown as ChatwootClient;
+
+    const outcome = await runAgentNudge({
+      tenantId,
+      threadId: `${tenantId}:${instanceId}:9992`,
+      nudge: { source: "followup", kind: "inactivity", step: 1 },
+      postActions: { assignLabels: ["follow-up"], resolve: true },
+      requireLiveBotOwnership: true,
+      stillWanted: async () => wanted,
+      base: appDb,
+      deps: {
+        // SILENT on purpose. A spoken reply leaves through the freeform branch, which asks again
+        // over the judge's stretch and would answer for this window by accident; the silent end
+        // posts no message and goes straight to the post-actions, which is the end that had nothing
+        // between the probe and the write.
+        makeModel: () =>
+          new FakeListChatModel({ responses: [FOLLOWUP_SKIP_SENTINEL] }),
+        makeClient: async () => client,
+        checkpointer: new MemorySaver(),
+        persistUsage: async () => {},
+      },
+    });
+
+    expect(outcome).toBe("stale");
+    // The probe itself said "ours" — the abort is the retirement's, not the ownership's, which is
+    // what makes this the probe's window and not a rerun of the ownership fence.
+    expect(probes).toBe(2);
+    expect(s.messages).toEqual([]);
+    expect(s.labelSets).toEqual([]);
+    expect(s.resolved).toEqual([]);
+  });
+
+  // The control for the two above: the same live-gated shape, nothing retired, everything applies.
+  test("the same live-gated turn messages and labels when nothing retires it", async () => {
+    await seedConv(9993, null);
+    const s = stub();
+    const inner = await s.makeClient();
+    const client = {
+      ...inner,
+      getConversation: async (c: number) => ({
+        id: c,
+        status: "pending",
+        meta: {},
+      }),
+    } as unknown as ChatwootClient;
+
+    const outcome = await runAgentNudge({
+      tenantId,
+      threadId: `${tenantId}:${instanceId}:9993`,
+      nudge: { source: "followup", kind: "inactivity", step: 1 },
+      postActions: { assignLabels: ["follow-up"] },
+      requireLiveBotOwnership: true,
+      base: appDb,
+      deps: {
+        makeModel: () => new FakeListChatModel({ responses: ["Tudo certo?"] }),
+        makeClient: async () => client,
+        checkpointer: new MemorySaver(),
+        persistUsage: async () => {},
+      },
+    });
+
+    expect(outcome).toBe("messaged");
+    expect(s.messages).toEqual([[9993, "Tudo certo?"]]);
+    expect(s.labelSets).toEqual([["follow-up"]]);
+  });
+
   test("a retired job's handoff line is withheld, but the transfer stands", async () => {
     await seedConv(9983, null);
     const s = stub();
-    let asks = 0;
+    // The command lands AT THE TRANSFER, mid-turn — the only window in which the line is already
+    // owed and the run is already retired. Counting asks instead would pin the abort to whichever
+    // check happens to be second, and the run would stop before it ever transferred.
+    const wanted = retireOn(s, "toggleStatus");
     const outcome = await runAgentNudge({
       tenantId,
       threadId: `${tenantId}:${instanceId}:9983`,
       nudge: { source: "followup", kind: "inactivity", step: 1 },
       postActions: { assignLabels: ["follow-up"], resolve: true },
-      // Yes on the read before the turn, no by the time the promised line goes out.
-      stillWanted: async () => {
-        asks += 1;
-        return asks < 2;
-      },
+      stillWanted: wanted,
       base: appDb,
       deps: {
         makeModel: () =>
@@ -1327,18 +1429,16 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
     // promised line becomes an operator NOTE and returns before any other check.
     await seedConv(9987, null, new Date(Date.now() - 48 * 3_600_000));
     const s = stub();
-    let asks = 0;
+    // Same rendezvous as the sibling above: the command lands at the transfer, inside the turn that
+    // then throws.
+    const wanted = retireOn(s, "toggleStatus");
     await expect(
       runAgentNudge({
         tenantId,
         threadId: `${tenantId}:${instanceId}:9987`,
         nudge: { source: "followup", kind: "inactivity", step: 1 },
         postActions: { assignLabels: ["follow-up"], resolve: true },
-        // Yes before the turn, no by the time it has failed.
-        stillWanted: async () => {
-          asks += 1;
-          return asks < 2;
-        },
+        stillWanted: wanted,
         base: appDb,
         deps: {
           makeModel: () =>

@@ -1,4 +1,4 @@
-import type { PrismaClient } from "@/../generated/prisma/client";
+import { Prisma, type PrismaClient } from "@/../generated/prisma/client";
 import logger from "@/api/lib/logger";
 import basePrisma from "@/api/lib/prisma";
 import { isTurnInFlight } from "@/graph/inflight";
@@ -17,6 +17,7 @@ import { isFollowUpLive } from "@/modules/followups/eligibility";
 import {
   type ClaimedJob,
   enqueueJob,
+  jobNotRetiredSql,
   jobRetired,
 } from "@/modules/scheduler/service";
 import { type JobResult, registerJobHandler } from "@/modules/scheduler/worker";
@@ -377,15 +378,27 @@ export async function followUpHandler(
   // Read immediately before each write rather than once at the top: the command arrives whenever it
   // arrives, and the interesting moment is precisely while the nudge's model call runs. Returns
   // whether the stamp landed, so a caller that would continue the sequence can stop instead.
+  //
+  // ONE statement, not a read then a write. Everywhere else the two marks are read to decide whether
+  // to keep going, and the gap between deciding and acting is covered by there being no I/O in it.
+  // Here the gap cannot be closed that way, because the command does two things in ORDER: it retires
+  // the job first and clears `last_follow_up_at` later, so a stamp that reads between them finds the
+  // job live, and writes after the clear. The condition therefore has to be evaluated by the same
+  // statement that writes — then the stamp lands strictly before the retirement or not at all.
+  //
+  // The condition is `jobNotRetiredSql`, the scheduler's own predicate, and not a copy of it written
+  // here: the JS reader and this one are one rule, and they are kept side by side there so a change
+  // to either is a change in front of the other. NOT-retired rather than live, so an absent row
+  // still stamps — an unknown is not a retirement.
   const stampUnlessRetired = async (): Promise<boolean> => {
-    if (await jobRetired(job, base)) return false;
-    await runScopedOn(base, sysCtx(tenantId), (db) =>
-      db.conversation.update({
-        where: { id: ctx.conv.id },
-        data: { lastFollowUpAt: new Date() },
-      }),
+    const stamped = await runScopedOn(base, sysCtx(tenantId), (db) =>
+      db.$executeRaw(Prisma.sql`
+        UPDATE conversations
+           SET last_follow_up_at = now()
+         WHERE id = ${ctx.conv.id}
+           AND ${jobNotRetiredSql(job)}`),
     );
-    return true;
+    return stamped > 0;
   };
 
   // Business hours: reschedule into the next open window rather than messaging out of hours (same

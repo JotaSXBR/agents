@@ -462,6 +462,23 @@ export async function runAgentNudge(
   const stillWanted = async (): Promise<boolean> =>
     params.stillWanted === undefined || (await params.stillWanted());
 
+  // THE RULE for the asks below, because a check placed by intuition is a check the next branch is
+  // born without: ONE ask per stretch of I/O that precedes a write, and never any I/O between an ask
+  // and the write it guards. The answer is a fact about another process, so it decays over exactly
+  // the time this function spends waiting — and only over that time. Which makes the asks
+  // enumerable rather than a matter of taste; these are all of them, and each names its stretch:
+  //
+  //   1. the entry, covering everything the caller did before this (asked immediately below);
+  //   2. the contact-authorization request, whose refusal branch writes the post-actions;
+  //   3. the thread claim, asked INSIDE the `ingest:` lock because that is what makes it sound;
+  //   4. the model invoke, asked once it returns, on the throw path as well as the clean one;
+  //   5. the post-model ownership probe, whose answer every end below consumes;
+  //   6. the moderation call inside deliverPromisedLine;
+  //   7. the guardrail judge's call.
+  //
+  // A new end that writes does not need a check of its own — it needs to be placed after one of
+  // these, with no I/O in between. A new WAIT does.
+
   // NOTE: Asked HERE, alongside the live gate and for its reason: before any model spend. It buys more
   // than the money, though — an invoked graph writes the proactive turn into the conversation's
   // thread, so a retired job asked only at the send boundary would still leave memory of a message
@@ -880,6 +897,16 @@ export async function runAgentNudge(
     // would read it as busy and reschedule until the process restarts.
     const claim = await runScopedOn(base, sysCtx(tenantId), (db) =>
       withEntityLock(db, `ingest:${graphThreadId}`, async () => {
+        // The one ask that has to happen HERE and cannot be hoisted out: everything below writes the
+        // thread (the divider, the marker, and then the invoke), and /reset clears exactly those
+        // under this same lock. Outside it the answer decays — the authorization call and the drain
+        // above both take time, and a reset that lands in either window clears the memory and then
+        // has this run write it back, leaving the operator told the conversation was cleared and the
+        // agent still answering from it. Inside the lock there is no such window in either
+        // direction: either this claims the thread first (and the clear refuses on isTurnInFlight)
+        // or the clear ran first (and this sees the tombstone). Asked BEFORE markTurnInFlight, so a
+        // retired run takes no claim it would then have to release.
+        if (!(await stillWanted())) return null;
         // A thread keyed by CONVERSATION rather than by contact-inbox (resolveGraphThreadId, when the
         // contact-inbox is unknown) carries a single attendance by construction: there is no earlier
         // one for a divider to separate this from, and no sidecar row keyed by contact-inbox to
@@ -967,6 +994,7 @@ export async function runAgentNudge(
         return decided;
       }),
     );
+    if (claim === null) return "stale";
     if (claim.closedConversationId !== null && contactInboxId !== null) {
       // Outside the lock: this opens its own transaction, and nesting one inside an advisory-lock
       // transaction would hold that lock across a second connection's work.
@@ -1057,6 +1085,12 @@ export async function runAgentNudge(
     canMessagePost = true;
   } else {
     const owned = await botStillOwnsIt();
+    // The probe is its own stretch of time, and every end below consumes its answer: the silent
+    // branch, the template, the two notes and the post-actions all write without asking again. The
+    // check above this block answers for the model call, not for this round trip. Above the
+    // `unavailable` return as well, so a retired run reports what it is rather than asking for a
+    // retry it must not get.
+    if (!(await stillWanted())) return "stale";
     // Fail closed: nothing has been posted yet, so a probe that could not run costs a retry and
     // nothing else.
     if (owned === "unavailable") return "live-unavailable";

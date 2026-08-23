@@ -93,7 +93,7 @@ function authFetch(response: () => Response) {
   return { calls, fetchImpl };
 }
 
-async function seedConv(convId: number) {
+async function seedConv(convId: number, contactInboxId: number | null = null) {
   await suDb.conversation.create({
     data: {
       tenantId,
@@ -101,6 +101,7 @@ async function seedConv(convId: number) {
       inboxId: inboxDbId,
       chatwootConversationId: convId,
       contactId,
+      contactInboxId,
       status: "pending",
       threadId: `${tenantId}:${instanceId}:${convId}`,
       lastEventAt: new Date(),
@@ -237,6 +238,92 @@ describe.skipIf(!dbUp)("contact authorization on the proactive nudge", () => {
     expect(auth.calls).toHaveLength(1);
     expect(s.messages).toEqual([]);
     expect(s.notes).toEqual([]);
+  });
+
+  // The ALLOWED path, and the window this gate opened for every run that passes it. The
+  // authorization request is a round-trip to somebody else's endpoint with a ten-second ceiling, and
+  // it sits between the run's entry check and the moment the thread is claimed — so a /reset landing
+  // inside it used to be followed by this run writing the attendance marker, the divider and the
+  // turn itself back onto a thread the command had just cleared. Nothing reaches the customer (the
+  // post-generation check stops that), which is exactly what made it invisible: the operator is told
+  // the conversation was cleared and the agent goes on answering from the memory it recreated.
+  //
+  // The ask that stops it is inside the `ingest:` lock, the one position where the answer cannot
+  // decay before the write, because the command's own clear needs the same lock.
+  test("a /reset during the authorization call leaves the thread untouched", async () => {
+    const CIB = 7791;
+    await seedConv(9413, CIB);
+    const s = labelStub();
+    let wanted = true;
+    const auth = authFetch(() => {
+      // Retired while the endpoint was being asked — and ALLOWED, so nothing else stops the run.
+      wanted = false;
+      return new Response('{"authorized":true}', { status: 200 });
+    });
+    const outcome = await runAgentNudge({
+      tenantId,
+      threadId: `${tenantId}:${instanceId}:9413`,
+      nudge: { source: "followup", kind: "inactivity" },
+      postActions: { assignLabels: ["seguimento"] },
+      stillWanted: async () => wanted,
+      base: appDb,
+      deps: {
+        makeModel: () => new FakeListChatModel({ responses: ["Tudo certo?"] }),
+        makeClient: s.makeClient,
+        checkpointer: new MemorySaver(),
+        persistUsage: async () => {},
+        contactAuthFetch: auth.fetchImpl,
+      },
+    });
+
+    expect(outcome).toBe("stale");
+    expect(auth.calls).toHaveLength(1);
+    // The durable half: had the run gone on, this row would name the conversation the reset cleared.
+    const row = await suDb.agentThread.findUnique({
+      where: {
+        tenantId_chatwootInstanceId_contactInboxId: {
+          tenantId,
+          chatwootInstanceId: instanceId,
+          contactInboxId: CIB,
+        },
+      },
+    });
+    expect(row).toBeNull();
+    expect(s.labelWrites).toEqual([]);
+  });
+
+  // The control: the same allowed turn, nothing retired, and the marker IS written.
+  test("the same allowed turn does claim the thread when nothing retires it", async () => {
+    const CIB = 7792;
+    await seedConv(9414, CIB);
+    const s = labelStub();
+    const auth = authFetch(
+      () => new Response('{"authorized":true}', { status: 200 }),
+    );
+    await runAgentNudge({
+      tenantId,
+      threadId: `${tenantId}:${instanceId}:9414`,
+      nudge: { source: "followup", kind: "inactivity" },
+      base: appDb,
+      deps: {
+        makeModel: () => new FakeListChatModel({ responses: ["Tudo certo?"] }),
+        makeClient: s.makeClient,
+        checkpointer: new MemorySaver(),
+        persistUsage: async () => {},
+        contactAuthFetch: auth.fetchImpl,
+      },
+    });
+
+    const row = await suDb.agentThread.findUnique({
+      where: {
+        tenantId_chatwootInstanceId_contactInboxId: {
+          tenantId,
+          chatwootInstanceId: instanceId,
+          contactInboxId: CIB,
+        },
+      },
+    });
+    expect(row?.lastConversationId).toBe(9414);
   });
 
   // The gate's refusal is a WRITING end: it skips the model but still applies the operator's

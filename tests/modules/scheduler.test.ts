@@ -1,13 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "@/../generated/prisma/client";
+import { Prisma, PrismaClient } from "@/../generated/prisma/client";
 import {
+  type ClaimedJob,
   claimDueCompactionJobs,
   claimDueJobs,
   claimDueTrafficJobs,
   completeJob,
   enqueueJob,
   failJob,
+  jobNotRetiredSql,
+  jobRetired,
   reapStaleJobs,
   rescheduleJob,
   retireJobsByDedupeKey,
@@ -412,6 +415,73 @@ describe.skipIf(!dbUp)("scheduler", () => {
     expect(
       (dead.payload as { cancelledAt?: unknown }).cancelledAt,
     ).toBeUndefined();
+  });
+
+  // "Is this run retired?" is written twice — once as a read (`jobRetired`) and once as a SQL
+  // predicate (`jobNotRetiredSql`), because one caller has to evaluate it inside the statement that
+  // writes. Two expressions of one rule is how a rule starts drifting, so this pins them to the same
+  // answer on every state a row can be in. The absent row is in the table on purpose: both must say
+  // NOT retired there, since an unknown is not a retirement.
+  test("the retirement predicate agrees with the retirement read, in both forms", async () => {
+    const claimOf = async (dedupeKey: string): Promise<ClaimedJob> => {
+      const id = await enqueueJob({
+        tenantId,
+        kind: "FOLLOWUP",
+        dedupeKey,
+        runAt: past(),
+        base: appDb,
+      });
+      const [claimed] = await claimDueJobs(1, appDb, new Date(), tenantId);
+      if (!claimed || claimed.id !== id) {
+        throw new Error(`claim did not return ${dedupeKey}`);
+      }
+      return claimed;
+    };
+    const sqlSaysRetired = async (job: ClaimedJob): Promise<boolean> => {
+      const rows = await suDb.$queryRaw<Array<{ live: boolean }>>(
+        Prisma.sql`SELECT ${jobNotRetiredSql(job)} AS live`,
+      );
+      return !rows[0]?.live;
+    };
+
+    // (a) claimed and untouched
+    const live = await claimOf("dk-pred-live");
+    expect(await jobRetired(live, appDb)).toBe(false);
+    expect(await sqlSaysRetired(live)).toBe(false);
+
+    // (b) tombstoned by the command
+    const tombstoned = await claimOf("dk-pred-tomb");
+    await retireJobsByDedupeKey(tenantId, "FOLLOWUP", "dk-pred-tomb", appDb);
+    expect(await jobRetired(tombstoned, appDb)).toBe(true);
+    expect(await sqlSaysRetired(tombstoned)).toBe(true);
+
+    // (c) token moved with no tombstone — a re-arm this run was superseded by, which is the half a
+    // condition written from the stamp alone would miss.
+    const superseded = await claimOf("dk-pred-seq");
+    await suDb.schedulerJob.update({
+      where: { id: superseded.id },
+      data: { claimSeq: superseded.claimSeq + 1 },
+    });
+    expect(await jobRetired(superseded, appDb)).toBe(true);
+    expect(await sqlSaysRetired(superseded)).toBe(true);
+
+    // (e) stamped with the token untouched. Not hypothetical: the per-event appointment cancel
+    // (cancelAppointmentReminders) writes exactly this shape — `cancelledAt` on every row of an
+    // event, no claim_seq bump — so a predicate written from the token alone would read a cancelled
+    // booking as a live run.
+    const stamped = await claimOf("dk-pred-stamp");
+    await suDb.$executeRaw`
+      UPDATE scheduler_jobs
+         SET payload = payload || '{"cancelledAt":"2026-01-01T00:00:00.000Z"}'::jsonb
+       WHERE id = ${stamped.id}`;
+    expect(await jobRetired(stamped, appDb)).toBe(true);
+    expect(await sqlSaysRetired(stamped)).toBe(true);
+
+    // (d) absent
+    const gone = await claimOf("dk-pred-gone");
+    await suDb.schedulerJob.delete({ where: { id: gone.id } });
+    expect(await jobRetired(gone, appDb)).toBe(false);
+    expect(await sqlSaysRetired(gone)).toBe(false);
   });
 
   test("reaper requeues a stranded CLAIMED job", async () => {
