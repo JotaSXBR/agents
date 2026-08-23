@@ -184,18 +184,30 @@ export const DOCUMENT_STYLE_DEFAULTS: DocumentStyle = {
   showPageNumbers: false,
 };
 
+// PER KEY, not per object, and that is the whole difference. `.partial().safeParse` fails wholesale:
+// one property this version cannot read — a font family or a margin name a NEWER build wrote — and
+// the result was every setting replaced by its default. The console then saved those defaults back
+// over the stored style, so a patch of one property reset the other eight while reporting success.
+//
+// Reading key by key keeps everything this version does understand and defaults only what it does
+// not, which is the same tolerance storage already promises for a block it cannot parse.
 export function parseDocumentStyle(value: unknown): DocumentStyle {
-  const parsed = documentStyleSchema.partial().safeParse(value ?? {});
-  const merged = {
-    ...DOCUMENT_STYLE_DEFAULTS,
-    ...(parsed.success ? parsed.data : {}),
-  };
+  const raw = (value ?? {}) as Record<string, unknown>;
+  const merged: Record<string, unknown> = { ...DOCUMENT_STYLE_DEFAULTS };
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    for (const [key, schema] of Object.entries(documentStyleSchema.shape)) {
+      if (!(key in raw)) continue;
+      const parsed = (schema as z.ZodType).safeParse(raw[key]);
+      if (parsed.success) merged[key] = parsed.data;
+    }
+  }
+  const style = merged as unknown as DocumentStyle;
   return {
-    ...merged,
-    currency: merged.currency.toUpperCase(),
+    ...style,
+    currency: style.currency.toUpperCase(),
     baseFontSize: Math.min(
       BASE_FONT_SIZE_MAX,
-      Math.max(BASE_FONT_SIZE_MIN, Math.round(merged.baseFontSize)),
+      Math.max(BASE_FONT_SIZE_MIN, Math.round(style.baseFontSize)),
     ),
   };
 }

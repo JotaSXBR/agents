@@ -725,6 +725,27 @@ describe("parseDocumentStyle", () => {
     expect(parseDocumentStyle({ baseFontSize: 10.4 }).baseFontSize).toBe(10);
   });
 
+  // Per KEY, not per object. `.partial().safeParse` fails wholesale, so ONE property this version
+  // cannot read — a font family a newer build wrote — replaced every setting with its default, and
+  // the console then saved those defaults back: a patch of one property resetting the other eight
+  // while reporting success.
+  test("keeps the settings it understands beside one it does not", () => {
+    const parsed = parseDocumentStyle({
+      font: "brand-grotesk-2027",
+      accentColor: "#123456",
+      margin: "wide",
+      locale: "en-US",
+      currency: "usd",
+      showPageNumbers: true,
+    });
+    expect(parsed.font).toBe(DOCUMENT_STYLE_DEFAULTS.font);
+    expect(parsed.accentColor).toBe("#123456");
+    expect(parsed.margin).toBe("wide");
+    expect(parsed.locale).toBe("en-US");
+    expect(parsed.currency).toBe("USD");
+    expect(parsed.showPageNumbers).toBe(true);
+  });
+
   test("falls back to defaults for a block written by an older version", () => {
     expect(parseDocumentStyle({ font: "comic-sans" })).toEqual(
       DOCUMENT_STYLE_DEFAULTS,

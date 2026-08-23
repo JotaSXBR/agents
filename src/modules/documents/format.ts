@@ -1,4 +1,5 @@
 import type { DocumentStyle } from "./blocks";
+import { unprintableCharacters } from "./printable";
 
 // Locale-aware formatting for the values a document prints. Bun ships full ICU, so Intl is the right
 // tool here — the old quote renderer avoided it and printed "1299.90 BRL", which is not how a price
@@ -14,12 +15,23 @@ export function formatMoney(
   currency: string,
 ): string {
   try {
-    return new Intl.NumberFormat(locale, {
+    const formatted = new Intl.NumberFormat(locale, {
       style: "currency",
       currency,
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     }).format(value);
+    // The SYMBOL is chosen by Intl, not by anyone this code can refuse: INR, KRW, THB, VND and ILS
+    // are perfectly valid codes whose symbols (₹ ₩ ฿ ₫ ₪) the standard 14 PDF fonts cannot encode,
+    // and the renderer would draw a different character beside every amount on the page. Measured:
+    // BRL, USD, EUR, GBP and JPY all come back printable; those five do not.
+    //
+    // So the check belongs HERE, at the only place that knows what the symbol turned out to be. The
+    // fallback is the same one an unknown code already gets — the amount followed by its code — and
+    // "1299,90 INR" is a price a reader can act on, which "1299,90 -" is not.
+    return unprintableCharacters(formatted).length === 0
+      ? formatted
+      : `${value.toFixed(2)} ${currency}`;
   } catch {
     // An unknown currency code throws rather than degrading. The document still has to render, and
     // "1299.90 XYZ" is legible; refusing to produce the PDF is not.

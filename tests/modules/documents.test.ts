@@ -1374,6 +1374,53 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     ).toEqual([]);
   });
 
+  // The same tolerance through the SAVE, which is where it costs something: a style property a
+  // newer build wrote used to make the whole parse fail, and the write-back then stored every
+  // default over the operator's settings — a patch of one colour resetting margin, locale, currency
+  // and page numbers, with a 200.
+  test("a style patch keeps settings beside a value this version cannot read", async () => {
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const tpl = await createDocumentTemplate(
+      ctx(tenantA),
+      {
+        name: "Estilo do futuro",
+        slug: "estilo_do_futuro",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: { ...starter.style, margin: "wide", currency: "USD" },
+      },
+      appDb,
+    );
+    const id = BigInt(tpl.id);
+    // What a newer build left behind: a font family this one does not know.
+    await suDb.documentTemplate.update({
+      where: { id },
+      data: {
+        style: {
+          ...(tpl.style as unknown as Record<string, unknown>),
+          font: "brand-grotesk-2027",
+        } as never,
+      },
+    });
+
+    const saved = await updateDocumentTemplate(
+      ctx(tenantA),
+      id,
+      { style: { accentColor: "#123456" } },
+      appDb,
+    );
+    expect(saved.style.accentColor).toBe("#123456");
+    expect(saved.style.margin).toBe("wide");
+    expect(saved.style.currency).toBe("USD");
+    // …and the value it could not read is still in the row, so the build that wrote it still works.
+    const raw = await suDb.documentTemplate.findUnique({
+      where: { id },
+      select: { style: true },
+    });
+    expect((raw?.style as { font?: string })?.font).toBe("brand-grotesk-2027");
+  });
+
   // The template can be deleted between the read that loads it and the insert that references it.
   // The foreign key then refuses the row, and a raw P2003 reaches the caller as a 500 — and an agent
   // turn as an integration-failure alert about somebody deleting their own template. It is the same

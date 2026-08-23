@@ -246,6 +246,11 @@ export function templateMetadataProblem(input: {
   ) {
     return "name: must be between 1 and 120 characters.";
   }
+  // The name is DRAWN: it resolves {{doc_title}}, which every bundled starter prints in its header.
+  if (typeof input.name === "string") {
+    const problem = unprintableProblem(input.name, "name");
+    if (problem) return problem;
+  }
   if (
     input.description !== undefined &&
     !templateDescriptionSchema.safeParse(input.description ?? null).success
@@ -658,11 +663,22 @@ async function patched(
       data.fields = rawFields as unknown as Prisma.InputJsonValue;
     }
     if (patch.style !== undefined) {
-      // Written back over the raw stored style: every key this version understands comes from the
-      // validated parse, anything else is carried through untouched.
+      // Written back over the raw stored style, taking ONLY the properties the patch addressed.
+      //
+      // Spreading the whole parsed style looks equivalent and is not: the parse fills every property
+      // it could not read with a default, so a `font` a newer build wrote was replaced by "sans" on
+      // any style save — an operator changing a colour silently downgrading a setting they cannot
+      // even see. Storage is tolerant on the way out precisely so that value survives; writing the
+      // parsed view back is how that guarantee is lost, and it is the same mistake `toDto` made for
+      // whole blocks.
+      const written = Object.keys(patch.style as Record<string, unknown>);
       data.style = {
         ...rawStyle,
-        ...content.style,
+        ...Object.fromEntries(
+          written
+            .filter((k) => k in content.style)
+            .map((k) => [k, (content.style as Record<string, unknown>)[k]]),
+        ),
       } as unknown as Prisma.InputJsonValue;
     }
   }
