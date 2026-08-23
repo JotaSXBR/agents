@@ -134,19 +134,51 @@ export function DocumentTemplateModal({
     );
   }, [template, texts]);
 
-  const draft = useMemo(
-    () =>
-      template
-        ? {
-            id: template.id,
-            name,
-            blockText,
-            style,
-            numberPrefix: numberPrefix || null,
-          }
-        : null,
-    [template, name, blockText, style, numberPrefix],
-  );
+  // What this modal would WRITE: the fields whose value here differs from the row it was opened on.
+  //
+  // The modal holds a snapshot from when the list was loaded, so sending every field back makes a
+  // wording-only edit overwrite a name, prefix or style an API or MCP client set in the meantime —
+  // the same multi-transport overwrite `blockText` exists to avoid for the blocks. The server's row
+  // lock serialises the writes; it cannot know that a field this request restated was never edited
+  // here.
+  //
+  // The PREVIEW is built from this too, and that is the point of it being one value: a preview
+  // assembled from the modal's whole state shows the stale style beside the new wording, while the
+  // save that follows keeps the concurrent style — the preview describing a document the apply will
+  // not produce, which is the one thing it must never do.
+  const changes = useMemo(() => {
+    if (!template || !style) return null;
+    const patch: Record<string, unknown> = {};
+    if (name !== template.name) patch.name = name;
+    if (description !== (template.description ?? "")) {
+      patch.description = description || null;
+    }
+    if (numberPrefix !== (template.numberPrefix ?? "")) {
+      patch.numberPrefix = numberPrefix || null;
+    }
+    if (enabled !== template.enabled) patch.enabled = enabled;
+    if (Object.keys(blockText).length > 0) patch.blockText = blockText;
+    const changedStyle = Object.fromEntries(
+      Object.entries(style as unknown as Record<string, unknown>).filter(
+        ([k, v]) =>
+          v !== (template.style as unknown as Record<string, unknown>)[k],
+      ),
+    );
+    if (Object.keys(changedStyle).length > 0) patch.style = changedStyle;
+    return patch;
+  }, [template, style, name, description, numberPrefix, enabled, blockText]);
+
+  const draft = useMemo(() => {
+    if (!template || !changes) return null;
+    // Only the properties the preview route takes; the rest of the patch does not render.
+    const shown = ["name", "blockText", "style", "numberPrefix"] as const;
+    return {
+      id: template.id,
+      ...Object.fromEntries(
+        shown.filter((k) => k in changes).map((k) => [k, changes[k]]),
+      ),
+    };
+  }, [template, changes]);
   const preview = useDocumentPreview(
     draft as Record<string, unknown> | null,
     // This OPEN, not this template: cancelling and reopening the same one has to drop the preview
@@ -155,35 +187,15 @@ export function DocumentTemplateModal({
   );
 
   async function save() {
-    if (!template || !style) return;
+    if (!template || !style || !changes) return;
     // The session this save belongs to. An operator can close the modal and reopen it for another
     // template while the request is in flight; when the old one lands, its success would close the
     // NEW modal and report a result about a template that is no longer on screen.
     const session = sessionRef.current;
     setSaving(true);
     try {
-      // Only what CHANGED. The modal holds a snapshot from when the list was loaded, and sending
-      // every field back makes a wording-only edit overwrite a name, prefix or style an API or MCP
-      // client set in the meantime — the same multi-transport overwrite `blockText` exists to avoid
-      // for the blocks. The server's row lock serialises the writes; it cannot know that a field
-      // this request restated was never edited here.
-      const patch: Record<string, unknown> = {};
-      if (name !== template.name) patch.name = name;
-      if (description !== (template.description ?? "")) {
-        patch.description = description || null;
-      }
-      if (numberPrefix !== (template.numberPrefix ?? "")) {
-        patch.numberPrefix = numberPrefix || null;
-      }
-      if (enabled !== template.enabled) patch.enabled = enabled;
-      if (Object.keys(blockText).length > 0) patch.blockText = blockText;
-      const changedStyle = Object.fromEntries(
-        Object.entries(style as unknown as Record<string, unknown>).filter(
-          ([k, v]) =>
-            v !== (template.style as unknown as Record<string, unknown>)[k],
-        ),
-      );
-      if (Object.keys(changedStyle).length > 0) patch.style = changedStyle;
+      // The same diff the preview was built from, so what is sent is what was shown.
+      const patch = changes;
       if (Object.keys(patch).length === 0) {
         showToast(t("common.saved", "Saved."), "success");
         baselineRef.current = null;

@@ -14,6 +14,7 @@ import { runScopedOn, type ScopedDb, type TenantContext } from "@/lib/tenancy";
 import { collectOversizedTextChanges } from "@/modules/agents/text-caps";
 import { isOutOfHoursNow, parseSchedule } from "@/modules/business-hours/hours";
 import { renameAgentBots } from "@/modules/chatwoot/provisioning";
+import { parseTemplateContent } from "@/modules/documents/validate";
 import { ensureTenantSweep } from "@/modules/followups/handlers";
 import { readFollowUpConfig } from "@/modules/followups/settings";
 import { normalizeSettingsForStorage } from "@/modules/images/settings";
@@ -761,6 +762,13 @@ export interface ToolSelectionView {
       toolName: string;
       description: string | null;
       enabled: boolean;
+      // Whether the RUNTIME would actually expose this tool, which is a different question from the
+      // stored flag: assembly also skips a template whose content this build cannot parse — one
+      // written by a newer version, after a downgrade — because a tool with an empty argument list
+      // that renders a blank document is worse for the customer than a tool the agent does not
+      // have. A screen that answers "what can this agent call" has to ask the same question the
+      // assembly does, or it draws a tool that is not in the graph.
+      available: boolean;
     }[];
     knowledgeBases: {
       id: string;
@@ -1053,6 +1061,10 @@ async function buildToolSelectionView(
       slug: true,
       description: true,
       enabled: true,
+      // Selected to answer `available` below, the same way the toolset assembly answers it.
+      blocks: true,
+      fields: true,
+      style: true,
     },
     orderBy: { name: "asc" },
   });
@@ -1112,6 +1124,8 @@ async function buildToolSelectionView(
         toolName: `send_${d.slug}`,
         description: d.description,
         enabled: d.enabled,
+        available:
+          d.enabled && parseTemplateContent(d.blocks, d.fields, d.style).ok,
       })),
     },
   };

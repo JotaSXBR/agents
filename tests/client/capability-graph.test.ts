@@ -82,8 +82,30 @@ describe("buildGroups — every grant source is drawn", () => {
       { id: "4", name: "CRM", tools: [{ name: "crm_lookup" }] },
     ],
     documentTemplates: [
-      { id: "5", name: "Orçamento", toolName: "send_orcamento", enabled: true },
-      { id: "6", name: "Antigo", toolName: "send_antigo", enabled: false },
+      {
+        id: "5",
+        name: "Orçamento",
+        toolName: "send_orcamento",
+        enabled: true,
+        available: true,
+      },
+      // Disabled by the operator.
+      {
+        id: "6",
+        name: "Antigo",
+        toolName: "send_antigo",
+        enabled: false,
+        available: false,
+      },
+      // ENABLED, but its content is unreadable by this build — written by a newer version and seen
+      // after a downgrade. The assembly skips it, and only `available` says so.
+      {
+        id: "7",
+        name: "Do futuro",
+        toolName: "send_futuro",
+        enabled: true,
+        available: false,
+      },
     ],
   } as unknown as ToolCatalog;
 
@@ -123,15 +145,19 @@ describe("buildGroups — every grant source is drawn", () => {
     expect(documents?.items).toEqual(["send_orcamento"]);
   });
 
-  // A grant on a DISABLED template draws nothing either: the runtime skips those when it builds the
-  // toolset, so drawing it claims a tool that is not in the agent's graph.
-  test("a grant on a disabled template draws nothing", () => {
-    const groups = buildGroups(
-      catalog,
-      [{ source: "DOCUMENT", documentTemplateId: "6" }],
-      t,
-    );
-    expect(groups.find((g) => g.key === "document")).toBeUndefined();
+  // A grant the ASSEMBLY would skip draws nothing either, and it has to answer to both ways that
+  // happens: the operator disabled the template, or this build cannot read its content (one written
+  // by a newer version, seen after a downgrade). Only the second distinguishes `available` from
+  // `enabled`, which is why it is here — drawing it claims a tool that is not in the agent's graph.
+  test("a grant the runtime would skip draws nothing", () => {
+    for (const id of ["6", "7"]) {
+      const groups = buildGroups(
+        catalog,
+        [{ source: "DOCUMENT", documentTemplateId: id }],
+        t,
+      );
+      expect(groups.find((g) => g.key === "document")).toBeUndefined();
+    }
   });
 
   // A grant pointing at a template that is gone resolves to nothing, the way a stale MCP or

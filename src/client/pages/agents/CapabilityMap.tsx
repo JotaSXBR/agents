@@ -126,10 +126,11 @@ export function buildGroups(
     .map(
       (g) =>
         catalog.documentTemplates.find(
-          // ENABLED, because the runtime skips a disabled template when it builds the toolset. The
-          // map is the operator's answer to "what can this agent call"; drawing a tool that is not
-          // in the graph is worse than drawing nothing, since the picture reads as complete.
-          (d) => d.id === g.documentTemplateId && d.enabled,
+          // AVAILABLE, not merely enabled: assembly also skips a template whose content this build
+          // cannot parse. The map is the operator's answer to "what can this agent call", and
+          // drawing a tool that is not in the graph is worse than drawing nothing, since the
+          // picture reads as complete. One question, asked of the catalog that answers it.
+          (d) => d.id === g.documentTemplateId && d.available,
         )?.toolName,
     )
     .filter((n): n is string => !!n);
