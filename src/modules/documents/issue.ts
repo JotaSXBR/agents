@@ -13,6 +13,7 @@ import {
   parseDocumentStyle,
 } from "./blocks";
 import { documentVerdict } from "./deliverable";
+import { documentDraws } from "./draws";
 import { formatDate, formatDocumentNumber } from "./format";
 import { renderDocumentPdf } from "./render";
 import { readRenderContext } from "./templates";
@@ -207,7 +208,7 @@ export async function issueDocument(
       "errors.invalidDocumentValues",
     );
   }
-  const { company } = await readRenderContext(ctx, base);
+  const { company, logo } = await readRenderContext(ctx, base);
   const snapshot: DocumentSnapshot = {
     blocks: content.content.blocks,
     fields: content.content.fields,
@@ -217,6 +218,36 @@ export async function issueDocument(
     issuedAt: now.toISOString(),
     issuedDate: calendarDay(now, params.timezone ?? DEFAULT_TIMEZONE),
   };
+
+  // Refused BEFORE the insert, which is what keeps a number from being burned for it: the counter is
+  // bumped once the row exists, and an issued document is immutable, so a blank one is blank
+  // forever. This is the exact question — every value is resolved here — and it is why the authoring
+  // gate only has to answer the unconditional half.
+  //
+  // The number is not assigned yet, so the meta below carries a placeholder for it. It has to be
+  // NON-EMPTY: `{{doc_number}}` always resolves to something at render, and a block that is only
+  // that token draws.
+  if (
+    !documentDraws({
+      blocks: snapshot.blocks,
+      fields: snapshot.fields,
+      style: snapshot.style,
+      values: snapshot.values,
+      company,
+      hasLogo: logo !== null,
+      meta: {
+        number: formatDocumentNumber(1, prepared.numberPrefix),
+        date: formatDate(printedDate(snapshot), snapshot.style.locale),
+        title: prepared.name,
+      },
+    })
+  ) {
+    throw new AppError(
+      "this document would be blank: with the values given, no block prints anything.",
+      400,
+      "errors.documentWouldBeBlank",
+    );
+  }
 
   // `create` rather than `createMany({ skipDuplicates })` because the counter must be bumped exactly
   // once per row actually inserted, and skipDuplicates cannot say whether it inserted.

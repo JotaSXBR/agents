@@ -15,7 +15,13 @@ import { z } from "zod";
 // `text` block; the API and MCP reorder freely. Addressing by index means a reorder from one
 // transport makes the other write into the wrong block, and nothing would report it.
 const blockBase = {
-  id: z.string().min(1).max(40),
+  id: z
+    .string()
+    .min(1)
+    .max(40)
+    .refine((id) => !isPrototypeName(id), {
+      message: "is a property of every object, so it cannot be used as an id",
+    }),
   spaceAfter: z.enum(["none", "sm", "md", "lg"]).optional(),
 };
 
@@ -127,8 +133,33 @@ export type DocumentFieldType = (typeof FIELD_TYPES)[number];
 // would then refuse to see.
 export const FIELD_NAME_RE = /^[a-z][a-z0-9_]{0,39}$/;
 
+// Names that are already properties of every plain object, plus the one that IS the prototype link.
+//
+// Both halves of this feature use caller-chosen names as keys of ordinary objects: values are keyed
+// by field name, and the console's wording edits are keyed by block id. On such an object,
+// `values.constructor` answers with a function nobody stored — so an optional field called
+// `constructor`, omitted by the agent, arrives at validation as `[Function: Object]` and the write
+// fails on a value the caller never sent. `__proto__` is worse and quieter: assigning to it sets the
+// prototype instead of creating a property, so the console reports a saved edit it did not make.
+//
+// DERIVED, not listed: the set is whatever this runtime puts on Object.prototype, so it cannot go
+// stale against a platform that adds one. `__proto__` is in it already — it is an accessor property
+// declared there, and spelling it out separately was a clause that never ran. Refusing these two
+// dozen names costs nothing real (none is a plausible name for a field or a block in a commercial
+// document) and it means every lookup downstream can stay a plain property read.
+const PROTOTYPE_NAMES = new Set(Object.getOwnPropertyNames(Object.prototype));
+
+export function isPrototypeName(name: string): boolean {
+  return PROTOTYPE_NAMES.has(name);
+}
+
 export const documentFieldSchema = z.object({
-  name: z.string().regex(FIELD_NAME_RE),
+  name: z
+    .string()
+    .regex(FIELD_NAME_RE)
+    .refine((name) => !isPrototypeName(name), {
+      message: "is a property of every object, so it cannot be used as a name",
+    }),
   label: z.string().min(1).max(60),
   type: z.enum(FIELD_TYPES),
   required: z.boolean().optional(),
@@ -212,44 +243,23 @@ export function parseDocumentStyle(value: unknown): DocumentStyle {
   };
 }
 
-// Whether a block puts anything on the page.
+// Whether a block can EVER put something on the page, from the template alone.
 //
-// "Not a divider" is not the same question, and the difference is a blank page nobody refused: a
-// text block whose text is empty, or a header with no title, no subtitle, no logo, no company and no
-// rows, both parse and both draw nothing. A template made of those consumes a number from its
-// sequence and attaches an empty PDF to a customer's conversation.
+// Deliberately only the unconditional half. Whether a given document draws depends on the values
+// that arrive at the turn — an optional field, a logo the tenant has not uploaded, a discount of
+// zero — and that question is answered exactly, with those values in hand, by documentDraws in
+// draws.ts. Trying to answer it here means guessing, and a guess either refuses a template that is
+// perfectly fine for the tenant that wrote it or misses the case anyway.
 //
-// A `fields` block always has at least one row by schema, and a `totals` block draws its lines
-// whatever the numbers are — a total of zero is still a total. Those two are settled where they are
-// declared. A `lineItems` block is not: with its header switched off, all it draws is rows, and
-// only a REQUIRED field guarantees there is one (a required lineItems value must be non-empty, see
-// the values gate). That is why the declared fields are an argument here.
-export function blockDraws(
-  block: DocumentBlock,
-  fields: DocumentField[] = [],
-): boolean {
+// What is left is what no value can rescue: a divider draws a rule and nothing else, and a text
+// block with no text has nothing to resolve. An error at the keyboard beats a surprise at the turn,
+// which is the only reason this exists beside the exact check.
+export function blockCanDraw(block: DocumentBlock): boolean {
   switch (block.type) {
     case "divider":
       return false;
     case "text":
-      // Whitespace is not content: the renderer draws a line of nothing.
       return block.text.trim() !== "";
-    case "header":
-      return Boolean(
-        block.title?.trim() ||
-          block.subtitle?.trim() ||
-          block.showLogo ||
-          block.showCompany ||
-          block.meta?.length,
-      );
-    case "lineItems":
-      // The header row is content of its own: a table announcing its columns is a table, even
-      // before an item arrives. Switched off, an omitted optional field leaves an empty view — and
-      // if that is the whole layout, a numbered blank page.
-      return (
-        block.showHeader !== false ||
-        fields.some((f) => f.name === block.field && f.required === true)
-      );
     default:
       return true;
   }

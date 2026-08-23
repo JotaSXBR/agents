@@ -21,6 +21,7 @@
     "documentTemplateSlugTaken": "Já existe um modelo de documento com este identificador",
     "documentTemplateUnreadable": "Este modelo contém conteúdo escrito por uma versão mais nova, então não pode ser salvo por aqui",
     "documentTooLarge": "O documento é muito grande para processar",
+    "documentWouldBeBlank": "Este documento sairia em branco",
     "emailDomainNotAllowed": "Domínio de email não permitido",
     "emailInUse": "Email já está em uso",
     "fileTooLarge": "O arquivo é muito grande",

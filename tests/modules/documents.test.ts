@@ -1486,6 +1486,61 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     await clearCompanyLogo(ctx(tenantB), appDb);
   });
 
+  // The exact question, asked where every value is known: would THIS document draw anything? Four
+  // review rounds tried to answer it from the template alone and each found another conditional the
+  // one before had missed. Refused BEFORE the insert, so no number is burned for a blank page — an
+  // issued document is immutable, and a blank one is blank forever.
+  test("refuses to issue a document that would come out blank", async () => {
+    const tpl = await createDocumentTemplate(
+      ctx(tenantA),
+      {
+        name: "Só observações",
+        slug: `so_observacoes_${process.pid}`,
+        // Passes authoring: the text block has text. What it has is a token for an OPTIONAL field.
+        blocks: [{ id: "obs", type: "text", text: "{{observacoes}}" }],
+        fields: [{ name: "observacoes", label: "Observações", type: "text" }],
+      },
+      appDb,
+    );
+    const id = BigInt(tpl.id);
+    const before = await suDb.documentTemplate.findUnique({
+      where: { id },
+      select: { lastNumber: true },
+    });
+    await expect(
+      issueDocument({
+        tenantId: tenantA,
+        templateId: id,
+        idempotencyKey: `blank-${process.pid}`,
+        values: {},
+        base: appDb,
+        storageDir: DIR,
+      }),
+    ).rejects.toThrow(/blank/i);
+    // No row, and no number spent on it.
+    const after = await suDb.documentTemplate.findUnique({
+      where: { id },
+      select: { lastNumber: true },
+    });
+    expect(after?.lastNumber).toBe(before?.lastNumber ?? 0);
+    expect(await suDb.issuedDocument.count({ where: { templateId: id } })).toBe(
+      0,
+    );
+
+    // …and the same template issues fine once the field has a value.
+    const ok = await issueDocument({
+      tenantId: tenantA,
+      templateId: id,
+      idempotencyKey: `blank-ok-${process.pid}`,
+      values: { observacoes: "Sem juros para pagamento à vista." },
+      base: appDb,
+      storageDir: DIR,
+    });
+    expect(ok.status).toBe("READY");
+    await suDb.issuedDocument.deleteMany({ where: { templateId: id } });
+    await suDb.documentTemplate.delete({ where: { id } });
+  });
+
   // The template can be deleted between the read that loads it and the insert that references it.
   // The foreign key then refuses the row, and a raw P2003 reaches the caller as a 500 — and an agent
   // turn as an integration-failure alert about somebody deleting their own template. It is the same

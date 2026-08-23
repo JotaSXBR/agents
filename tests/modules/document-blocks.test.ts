@@ -812,7 +812,12 @@ describe("a layout has to print something", () => {
   // "Not a divider" is the wrong question, and these are the two blocks that answer it wrongly: a
   // text block with no text, and a header with everything turned off. Both parse, both draw a blank
   // page, and both would consume a number from the template's sequence to attach it.
-  test("refuses blocks that parse and print nothing", () => {
+  // Only what NO value can rescue. A text block with nothing in it has nothing to resolve, whatever
+  // arrives at the turn — while a header showing a logo, a hidden table, or a totals block asking
+  // for a discount all DEPEND on the values, and those are settled exactly at issuance (see
+  // document-draws.test.ts, which holds that answer against the renderer). Guessing at them here
+  // refuses templates that are perfectly fine for the tenant that wrote them.
+  test("refuses text blocks that can never resolve to anything", () => {
     expect(
       parseAuthoredTemplate([{ id: "t", type: "text", text: "" }], [field], {})
         .ok,
@@ -824,57 +829,22 @@ describe("a layout has to print something", () => {
         {},
       ).ok,
     ).toBe(false);
+  });
+
+  // …and does NOT refuse the ones whose answer depends on values. A bare header is the letterhead
+  // for a tenant that has one, a hidden table draws once an item arrives: refusing either here
+  // would be this gate guessing at a turn it cannot see.
+  test("accepts a layout whose output depends on the values", () => {
     expect(
       parseAuthoredTemplate([{ id: "h", type: "header" }], [field], {}).ok,
-    ).toBe(false);
-  });
-
-  // A line-items table draws its HEADER row before any item arrives, so a table is content by
-  // itself. With the header switched off, all it draws is rows — and only a required field
-  // guarantees there is one, because a required lineItems value must be non-empty while an optional
-  // one can simply be omitted. As the whole layout, that is a numbered blank page.
-  test("a table with no header needs a field that must be filled", () => {
-    const items = { name: "itens", label: "Itens", type: "lineItems" };
-    const table = { id: "i", type: "lineItems", field: "itens" };
-    expect(parseAuthoredTemplate([table], [items], {}).ok).toBe(true);
-    expect(
-      parseAuthoredTemplate([{ ...table, showHeader: false }], [items], {}).ok,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       parseAuthoredTemplate(
-        [{ ...table, showHeader: false }],
-        [{ ...items, required: true }],
+        [{ id: "i", type: "lineItems", field: "itens", showHeader: false }],
+        [{ name: "itens", label: "Itens", type: "lineItems" }],
         {},
       ).ok,
     ).toBe(true);
-    // …and beside a block that draws, the hidden table is not the question at all.
-    expect(
-      parseAuthoredTemplate(
-        [
-          { id: "h", type: "header", title: "Orçamento" },
-          { ...table, showHeader: false },
-        ],
-        [items],
-        {},
-      ).ok,
-    ).toBe(true);
-  });
-
-  // …and a header draws as soon as ANY of its parts is on, including the two that carry no text of
-  // their own.
-  test("a header draws when any of its parts is on", () => {
-    for (const on of [
-      { title: "Orçamento" },
-      { subtitle: "válido por 7 dias" },
-      { showLogo: true },
-      { showCompany: true },
-      { meta: [{ label: "Validade", value: "7 dias" }] },
-    ]) {
-      expect(
-        parseAuthoredTemplate([{ id: "h", type: "header", ...on }], [field], {})
-          .ok,
-      ).toBe(true);
-    }
   });
 
   test("one printing block is enough, whichever it is", () => {
@@ -1011,6 +981,51 @@ describe("authored text has to be printable", () => {
 // statement. Zod strips an unknown key; the write refuses it by name (see the authoring gate above),
 // so a schema published without `additionalProperties: false` would promise a permissiveness no
 // write honours — and the client would be refused by a document it had every reason to trust.
+// Both halves of this feature key ordinary objects by a name the caller chose: values by field
+// name, the console's wording edits by block id. On such an object those names are already taken.
+describe("names that every object already has", () => {
+  const items = { name: "cliente", label: "Cliente", type: "text" };
+
+  // `values.constructor` answers with a function nobody stored, so an OPTIONAL field with this name,
+  // omitted by the agent, arrives at validation as a function and the write fails on a value the
+  // caller never sent.
+  test("a field cannot be called constructor", () => {
+    expect(
+      parseAuthoredTemplate(
+        [{ id: "t", type: "text", text: "ok" }],
+        [{ ...items, name: "constructor" }],
+        {},
+      ).ok,
+    ).toBe(false);
+  });
+
+  // Assigning to `__proto__` sets the prototype instead of creating a property, so the console
+  // reports a saved wording edit it did not make. `toString` and `constructor` are read back as
+  // inherited functions.
+  test("a block id cannot be one either", () => {
+    for (const id of ["__proto__", "constructor", "toString", "valueOf"]) {
+      expect(
+        parseAuthoredTemplate([{ id, type: "text", text: "ok" }], [items], {})
+          .ok,
+      ).toBe(false);
+    }
+  });
+
+  // …and the ordinary names are untouched, including the lowercase spellings that only LOOK like
+  // they collide: property names are case-sensitive, so `tostring` is nobody's property.
+  test("ordinary names still pass", () => {
+    for (const name of ["cliente", "tostring", "valueof", "prototype"]) {
+      expect(
+        parseAuthoredTemplate(
+          [{ id: name, type: "text", text: "ok" }],
+          [{ ...items, name }],
+          {},
+        ).ok,
+      ).toBe(true);
+    }
+  });
+});
+
 describe("documentAuthoringSchema", () => {
   test("publishes every object as closed, nested rows included", () => {
     const schema = documentAuthoringSchema();

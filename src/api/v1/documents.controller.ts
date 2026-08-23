@@ -38,6 +38,7 @@ import {
 // translate('errors.documentTemplateUnreadable', 'This template contains content a newer version wrote, so it cannot be saved from here')
 // translate('errors.invalidDocumentNumberPrefix', 'The document number prefix is too long')
 // translate('errors.documentNotStored', 'This document could not be stored')
+// translate('errors.documentWouldBeBlank', 'This document would be blank')
 // translate('errors.logoNotFound', 'Logo not found')
 
 function ctxOrThrow(ctx: TenantContext | null): TenantContext {

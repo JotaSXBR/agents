@@ -21,6 +21,7 @@
     "documentTemplateSlugTaken": "A document template with this identifier already exists",
     "documentTemplateUnreadable": "This template contains content a newer version wrote, so it cannot be saved from here",
     "documentTooLarge": "Document is too large to process",
+    "documentWouldBeBlank": "This document would be blank",
     "emailDomainNotAllowed": "Email domain is not allowed",
     "emailInUse": "Email already in use",
     "fileTooLarge": "File is too large",

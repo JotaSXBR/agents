@@ -1,7 +1,7 @@
 import { type ZodError, z } from "zod";
 import { AppError } from "@/lib/errors";
 import {
-  blockDraws,
+  blockCanDraw,
   type DocumentBlock,
   type DocumentField,
   type DocumentStyle,
@@ -260,17 +260,16 @@ export function parseAuthoredTemplate(
   // A layout that draws NOTHING is not a document. `blocks` defaults to [] and templates default to
   // enabled, so an omitted layout became a granted tool that issued a numbered, blank PDF — burning
   // a number from the template's sequence and attaching an empty page to a customer's conversation.
-  // A divider on its own is the same thing, and so is a text block with no text or a header with
-  // nothing turned on: the rule is about what PRINTS, not about the count or the type.
+  // A divider on its own is the same thing, and so is a text block with no text: the rule is about
+  // what PRINTS, not about the count. Only the UNCONDITIONAL half is asked here — whether a given
+  // document draws depends on values that arrive at the turn, and that is settled exactly by
+  // documentDraws before a number is assigned.
   if (authored.blocks) {
-    const draws = shared.content.blocks.some((b) =>
-      blockDraws(b, shared.content.fields),
-    );
-    if (!draws) {
+    if (!shared.content.blocks.some(blockCanDraw)) {
       return {
         ok: false,
         reason:
-          "blocks: a document needs at least one block that prints something (header, text, fields, lineItems or totals) — as written, every issued document would be a numbered blank page.",
+          "blocks: a document needs at least one block that can print something (header, text, fields, lineItems or totals) — as written, every issued document would be a numbered blank page.",
       };
     }
   }
