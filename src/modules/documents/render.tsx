@@ -48,6 +48,23 @@ const MARGIN: Record<DocumentStyle["margin"], number> = {
   wide: 60,
 };
 
+// The footer is drawn as an absolutely-positioned `fixed` element, so it is outside the flow and the
+// page has to be told where the body must stop. Two things went wrong with one number: the space was
+// reserved when `showPageNumbers` was on, while the footer RENDERS whenever there is footer text or
+// page numbers — so a footer with text and no numbers floated over the last rows of the body, on
+// every page. Asked as one question here, by the same condition that decides whether it renders.
+//
+// And a reserve is only a bound if what it reserves for cannot grow past it. The authored footer is
+// capped at 200 characters, but a `{{token}}` in it resolves at issuance to whatever the field
+// holds, so the DRAWN footer is unbounded — which is why it is clipped to the same number of lines
+// this reserves for.
+export const FOOTER_MAX_LINES = 2;
+
+export function footerReserve(style: DocumentStyle): number {
+  if (!style.footerText && !style.showPageNumbers) return 0;
+  return FOOTER_MAX_LINES * Math.round((style.baseFontSize - 2) * 1.4);
+}
+
 const SPACE_AFTER: Record<"none" | "sm" | "md" | "lg", number> = {
   none: 0,
   sm: 6,
@@ -104,7 +121,7 @@ function styles(style: DocumentStyle) {
   return StyleSheet.create({
     page: {
       paddingTop: MARGIN[style.margin],
-      paddingBottom: MARGIN[style.margin] + (style.showPageNumbers ? 18 : 0),
+      paddingBottom: MARGIN[style.margin] + footerReserve(style),
       paddingHorizontal: MARGIN[style.margin],
       fontSize: size,
       fontFamily: FONT_FAMILY[style.font],
@@ -151,6 +168,14 @@ function styles(style: DocumentStyle) {
       justifyContent: "space-between",
       fontSize: size - 2,
       color: "#9ca3af",
+    },
+    // Clipped to what footerReserve reserves for. `maxLines` is a STYLE property in @react-pdf (the
+    // layout reads `node.style.maxLines`) — passed as a prop it is accepted, ignored, and the footer
+    // grows past the space the page held for it.
+    footerText: {
+      marginRight: 8,
+      maxLines: FOOTER_MAX_LINES,
+      textOverflow: "ellipsis",
     },
   });
 }
@@ -434,7 +459,7 @@ export async function renderDocumentPdf(
         ))}
         {input.style.footerText || input.style.showPageNumbers ? (
           <View style={sheet.footer} fixed>
-            <Text>
+            <Text style={sheet.footerText}>
               {input.style.footerText
                 ? resolveTokens(input.style.footerText, vars)
                 : ""}

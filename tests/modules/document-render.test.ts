@@ -1,11 +1,16 @@
 import { describe, expect, test } from "bun:test";
+import { inflateSync } from "node:zlib";
 import {
   DOCUMENT_FONTS,
   DOCUMENT_STYLE_DEFAULTS,
   type DocumentStyle,
 } from "@/modules/documents/blocks";
 import type { CompanyLogo } from "@/modules/documents/company";
-import { renderDocumentPdf } from "@/modules/documents/render";
+import {
+  FOOTER_MAX_LINES,
+  footerReserve,
+  renderDocumentPdf,
+} from "@/modules/documents/render";
 import { sampleValues } from "@/modules/documents/sample";
 import { documentStarters } from "@/modules/documents/starters";
 import { parseTemplateContent } from "@/modules/documents/validate";
@@ -30,6 +35,33 @@ const COMPANY = {
   logoKey: null,
   logoVersion: 0,
 };
+
+// The text the page actually DRAWS, decoded out of the content streams. Assertions about clipping
+// cannot read the input string — the whole question is what survived layout.
+function drawnText(buf: Buffer): string {
+  const raw = buf.toString("latin1");
+  let inflated = "";
+  for (const m of raw.matchAll(/stream\r?\n/g)) {
+    const start = (m.index ?? 0) + m[0].length;
+    const end = raw.indexOf("endstream", start);
+    try {
+      inflated += inflateSync(
+        Buffer.from(raw.slice(start, end), "latin1"),
+      ).toString("latin1");
+    } catch {
+      // Not every stream is deflated; the ones that are not carry no drawing.
+    }
+  }
+  const hex = [...inflated.matchAll(/\[([^\]]*)\]\s*TJ/g)]
+    .flatMap((arr) =>
+      [...(arr[1] ?? "").matchAll(/<([0-9a-f]+)>/g)].map((x) => x[1] ?? ""),
+    )
+    .join("");
+  // The built-in faces encode as one byte per character for Latin text.
+  return (hex.match(/../g) ?? [])
+    .map((b) => String.fromCharCode(Number.parseInt(b, 16)))
+    .join("");
+}
 
 // A 1x1 PNG, inline, so the test never touches the filesystem for it.
 const PNG = Buffer.from(
@@ -152,5 +184,86 @@ describe("renderDocumentPdf", () => {
         expect(bytes.subarray(0, 5).toString()).toBe("%PDF-");
       }
     }
+  });
+});
+
+// The footer is absolutely positioned and `fixed`, so it is outside the flow: the page reserves the
+// space it will occupy, or it draws on top of the last rows of the body, on every page.
+//
+// The reserve and the render have to answer the SAME question. They did not: the space was reserved
+// for page numbers, while the footer renders whenever there is footer text OR page numbers, so a
+// letterhead footer with no page numbers — the ordinary case — overlapped the body.
+describe("footerReserve", () => {
+  const style = (over: Partial<DocumentStyle>): DocumentStyle => ({
+    ...DOCUMENT_STYLE_DEFAULTS,
+    ...over,
+  });
+
+  test("reserves nothing when no footer is drawn", () => {
+    expect(
+      footerReserve(style({ footerText: undefined, showPageNumbers: false })),
+    ).toBe(0);
+  });
+
+  test("reserves for a footer that is only text", () => {
+    expect(
+      footerReserve(style({ footerText: "Obrigado!", showPageNumbers: false })),
+    ).toBeGreaterThan(0);
+  });
+
+  test("reserves for page numbers, and for both together", () => {
+    const numbers = footerReserve(
+      style({ footerText: undefined, showPageNumbers: true }),
+    );
+    expect(numbers).toBeGreaterThan(0);
+    expect(
+      footerReserve(style({ footerText: "x", showPageNumbers: true })),
+    ).toBe(numbers);
+  });
+
+  // The reserve is a fixed number of lines, so it is only a BOUND if the footer cannot draw more of
+  // them. The authored string is capped, but a `{{token}}` in it resolves at issuance to whatever
+  // the field holds — so the drawn footer is clipped to the same number of lines.
+  test("a footer whose token expands is clipped, not wrapped past the reserve", async () => {
+    // A document whose only text is the footer, so what comes back is the footer and nothing else.
+    // The value arrives through a declared FIELD, which is the path that makes the drawn footer
+    // unbounded: the authored string is capped, what a token resolves to is not.
+    const long = Array.from({ length: 60 }, (_, i) => `palavra${i}`).join(" ");
+    const buf = await renderDocumentPdf({
+      blocks: [{ id: "d", type: "divider" }],
+      fields: [{ name: "nota", label: "Nota", type: "text" }],
+      values: { nota: long },
+      style: { ...DOCUMENT_STYLE_DEFAULTS, footerText: "{{nota}}" },
+      company: { ...COMPANY, name: "", document: "", address: "" },
+      meta: META,
+      logo: null,
+    } as unknown as Parameters<typeof renderDocumentPdf>[0]);
+    const text = drawnText(buf);
+    expect(text).toContain("palavra0");
+    // Two lines' worth at this size is about 26 words, so the tail has to be gone.
+    expect(text).not.toContain("palavra59");
+    expect(FOOTER_MAX_LINES).toBe(2);
+  });
+
+  // …and with a page number beside it, which is what the footer text's flex basis is for: measured
+  // at its intrinsic width, a long footer takes the whole row and pushes the number off the page.
+  test("a long footer leaves the page number its place", async () => {
+    const long = Array.from({ length: 60 }, (_, i) => `palavra${i}`).join(" ");
+    const buf = await renderDocumentPdf({
+      blocks: [{ id: "d", type: "divider" }],
+      fields: [{ name: "nota", label: "Nota", type: "text" }],
+      values: { nota: long },
+      style: {
+        ...DOCUMENT_STYLE_DEFAULTS,
+        footerText: "{{nota}}",
+        showPageNumbers: true,
+      },
+      company: { ...COMPANY, name: "", document: "", address: "" },
+      meta: META,
+      logo: null,
+    } as unknown as Parameters<typeof renderDocumentPdf>[0]);
+    const text = drawnText(buf);
+    expect(text).toContain("palavra0");
+    expect(text).toContain("1/1");
   });
 });

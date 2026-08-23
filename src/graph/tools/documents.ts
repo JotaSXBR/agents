@@ -228,6 +228,16 @@ export function buildDocumentTools(
         }
         turnState.documentsInFlight++;
         const order = turnState.attachmentsSeq++;
+        // ONE clock read for the whole issuance. The key carries a calendar day and the document
+        // prints one, and two `new Date()` calls straddling midnight would disagree: the key would
+        // say yesterday while the page says today, so a retry an hour later computes a different key
+        // and issues a SECOND numbered document for one request.
+        //
+        // NOT COVERED BY A TEST: reaching it needs the clock to advance across a day boundary
+        // between two adjacent statements, which a frozen test clock cannot do and a real one cannot
+        // be asked to. The property is structural instead — there is one read, and both consumers
+        // are handed it.
+        const at = new Date();
         try {
           const issued = await issueDocument({
             tenantId: deps.tenantId,
@@ -238,7 +248,7 @@ export function buildDocumentTools(
               input,
               // The same calendar the document PRINTS, so the window and the date on the page agree:
               // a document reused within the key's life is one dated the day it is being sent.
-              calendarDay(new Date(), deps.timezone ?? DEFAULT_TIMEZONE),
+              calendarDay(at, deps.timezone ?? DEFAULT_TIMEZONE),
             ),
             values: input,
             threadId: deps.threadId ?? null,
@@ -248,6 +258,7 @@ export function buildDocumentTools(
             base: deps.base,
             storageDir: deps.storageDir,
             timezone: deps.timezone,
+            now: at,
           });
           if (!issued.bytes) {
             return toolFailure(
