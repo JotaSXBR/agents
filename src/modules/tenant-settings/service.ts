@@ -238,12 +238,12 @@ export async function updateLangfuse(
   input: LangfuseUpdateInput,
   base: PrismaClient = basePrisma,
 ): Promise<LangfuseSettings> {
-  const tenantId = requireTenantId(ctx);
-  const current = await runScopedOn(base, ctx, (db) =>
-    readLangfuseSettings(db, tenantId),
-  );
-
-  let credentialRef = current.credentialRef;
+  requireTenantId(ctx);
+  // Only to VALIDATE the incoming ref; the value that gets written is chosen inside the lock below.
+  // Read here and written back, an omitted credentialRef would carry a pre-lock snapshot over a
+  // credential someone else changed in between — undoing a successful update with a request that
+  // never mentioned it.
+  let credentialRef: string | null = null;
   if (input.credentialRef !== undefined) {
     if (input.credentialRef === null) {
       credentialRef = null;
@@ -274,7 +274,9 @@ export async function updateLangfuse(
     const live = parseLangfuseSettings(raw);
     return langfuseSettingsSchema.parse({
       enabled: input.enabled ?? live.enabled,
-      credentialRef,
+      // The live value when this request did not mention one, like every other field here.
+      credentialRef:
+        input.credentialRef !== undefined ? credentialRef : live.credentialRef,
       sendContent: input.sendContent ?? live.sendContent,
       debug: input.debug ?? live.debug,
     });

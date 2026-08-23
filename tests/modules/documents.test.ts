@@ -743,14 +743,18 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       },
       appDb,
     );
-    await expect(
-      updateDocumentTemplate(
-        ctx(tenantA),
-        BigInt(tpl.id),
-        { style: { ...starter.style, footerText: "{{nao_declarado}}" } },
-        appDb,
-      ),
-    ).rejects.toThrow(/nao_declarado/);
+    const refused = await updateDocumentTemplate(
+      ctx(tenantA),
+      BigInt(tpl.id),
+      { style: { ...starter.style, footerText: "{{nao_declarado}}" } },
+      appDb,
+    ).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(AppError);
+    expect((refused as AppError).message).toContain("nao_declarado");
+    // A 400 and not the 409 about a newer version: the stored content here reads fine, and the
+    // fault is in what the CALLER just sent. The 409 message quotes the original reason, so
+    // matching the reason alone cannot tell the two apart — the status is what does.
+    expect((refused as AppError).statusCode).toBe(400);
     const after = await getDocumentTemplate(
       ctx(tenantA),
       BigInt(tpl.id),
@@ -1334,5 +1338,68 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     expect((failed as AppError).translationKey).toBe(
       "errors.documentTemplateNotFound",
     );
+  });
+
+  // A partial style patch must change ONLY what it names. Validated on its own, the parse fills
+  // every omitted property with a default, and writing that result resets the operator's colour,
+  // margin, locale, currency and page numbers — an edit to one setting silently rewriting the other
+  // eight, reported as a success.
+  test("a partial style patch leaves the settings it did not name alone", async () => {
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const tpl = await createDocumentTemplate(
+      ctx(tenantA),
+      {
+        name: "Estilo próprio",
+        slug: "estilo_proprio",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: {
+          ...starter.style,
+          accentColor: "#AA3311",
+          margin: "wide",
+          currency: "USD",
+          locale: "en-US",
+          showPageNumbers: true,
+        },
+      },
+      appDb,
+    );
+    const id = BigInt(tpl.id);
+    await updateDocumentTemplate(
+      ctx(tenantA),
+      id,
+      { style: { font: "mono" } },
+      appDb,
+    );
+    const after = await getDocumentTemplate(ctx(tenantA), id, appDb);
+    expect(after.style.font).toBe("mono");
+    expect(after.style.accentColor).toBe("#AA3311");
+    expect(after.style.margin).toBe("wide");
+    expect(after.style.currency).toBe("USD");
+    expect(after.style.locale).toBe("en-US");
+    expect(after.style.showPageNumbers).toBe(true);
+  });
+
+  // …and a style the CALLER wrote is still refused by name. The strict pass moved off the merged
+  // value (which carries whatever a newer build stored) onto the patch itself, and it has to still
+  // be there.
+  test("still names a bad value in the style the caller sent", async () => {
+    await expect(
+      updateDocumentTemplate(
+        ctx(tenantA),
+        templateId,
+        { style: { accentColor: "vermelho" } },
+        appDb,
+      ),
+    ).rejects.toThrow(/accentColor/);
+    await expect(
+      updateDocumentTemplate(
+        ctx(tenantA),
+        templateId,
+        { style: { fontt: "serif" } },
+        appDb,
+      ),
+    ).rejects.toThrow(/fontt/);
   });
 });

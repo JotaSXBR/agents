@@ -22,6 +22,7 @@ import { renderDocumentPdf } from "./render";
 import { sampleValues } from "./sample";
 import {
   type AuthoredHalves,
+  authoredStyleProblem,
   type DocumentValues,
   parseAuthoredTemplate,
   parseDocumentValues,
@@ -521,8 +522,27 @@ async function patched(
     const authored = {
       blocks: patch.blocks !== undefined,
       fields: patch.fields !== undefined,
-      style: patch.style !== undefined,
+      // The caller's style is checked strictly on its OWN, just below, because the value VALIDATED
+      // here is the patch merged over the stored style — which carries whatever a newer build put
+      // there, and which the caller did not write.
+      style: false,
     };
+    if (patch.style !== undefined) {
+      const problem = authoredStyleProblem(patch.style);
+      if (problem) {
+        throw new AppError(problem, 400, "errors.invalidDocumentTemplate");
+      }
+    }
+    // MERGED BEFORE validation, not after. A partial patch like {font:"mono"} validated on its own
+    // makes parseDocumentStyle fill every omitted property with a DEFAULT, and spreading that result
+    // over the stored style then resets the operator's colour, margin, locale, currency and page
+    // numbers — an edit to one setting silently rewriting the other eight. Merging first means the
+    // parse sees the style the template actually has.
+    const rawStyle = (stored.style ?? {}) as Record<string, unknown>;
+    const mergedStyle =
+      patch.style !== undefined
+        ? { ...rawStyle, ...(patch.style as Record<string, unknown>) }
+        : rawStyle;
     let content: ReturnType<typeof validated>;
     try {
       // Strict only where the CALLER wrote. A half that came out of storage belongs to whoever
@@ -531,7 +551,7 @@ async function patched(
       content = validated({
         blocks,
         fields: rawFields,
-        style: patch.style ?? stored.style,
+        style: mergedStyle,
         authored,
       });
     } catch (e) {
@@ -539,7 +559,22 @@ async function patched(
       // property) fails the shared parse, and there is no safe way to save around it: writing what
       // parsed would drop it. Refusing keeps it, and says why — the generic "invalid discriminator"
       // reads like the operator's own edit is at fault when they only changed a word.
-      if (e instanceof AppError && !authored.blocks && !authored.fields) {
+      //
+      // Conditioned on the STORED content actually being unreadable: without that test, any failure
+      // on a wording-only or style-only patch — including one caused by what the caller just sent —
+      // was reported as a newer version's doing, pointing them at the wrong remedy while the dry run
+      // answered correctly.
+      const storedUnreadable = !parseTemplateContent(
+        stored.blocks ?? [],
+        stored.fields ?? [],
+        stored.style,
+      ).ok;
+      if (
+        e instanceof AppError &&
+        storedUnreadable &&
+        !authored.blocks &&
+        !authored.fields
+      ) {
         throw new AppError(
           `this template contains content a newer version wrote and this one cannot read, so saving from here would drop it (${e.message}) — edit it from the client that wrote it, or send blocks explicitly to replace them.`,
           409,
@@ -557,12 +592,8 @@ async function patched(
       data.fields = rawFields as unknown as Prisma.InputJsonValue;
     }
     if (patch.style !== undefined) {
-      // Merged ONTO the raw stored style, for the same reason the blocks are: the tolerant read
-      // drops style properties this version does not know, and the console sends style on every
-      // save — so writing the parsed object alone would delete a newer build's settings on an
-      // ordinary edit to the wording. Every key this version understands comes from the validated
-      // parse; anything else is carried through untouched.
-      const rawStyle = (stored.style ?? {}) as Record<string, unknown>;
+      // Written back over the raw stored style: every key this version understands comes from the
+      // validated parse, anything else is carried through untouched.
       data.style = {
         ...rawStyle,
         ...content.style,

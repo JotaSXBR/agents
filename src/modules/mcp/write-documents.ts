@@ -261,7 +261,13 @@ export async function documentTemplateUpdate(
           : {}),
         ...(patch.style !== undefined
           ? {
-              style: parseDocumentStyle(patch.style) as Record<string, unknown>,
+              // Merged over the SAVED style, the way the write merges it. From the patch alone, an
+              // omitted optional (footerText) diffs as removed while the apply keeps it — the diff
+              // describing a change the write will not make.
+              style: parseDocumentStyle({
+                ...current.style,
+                ...(patch.style as Record<string, unknown>),
+              }) as Record<string, unknown>,
             }
           : {}),
       });

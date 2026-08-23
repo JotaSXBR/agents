@@ -111,6 +111,16 @@ describe("documentToolSchema", () => {
     expect(parsed.success).toBe(false);
   });
 
+  // The outer object's strictness cannot see a NESTED key: a discount tucked inside a line item was
+  // stripped before the tool body ran, and the document issued without it.
+  test("refuses an undeclared key inside a line item", () => {
+    const parsed = documentToolSchema(FIELDS).safeParse({
+      cliente: "Ana",
+      itens: [{ description: "x", quantity: 1, unitPrice: 2, desconto: 10 }],
+    });
+    expect(parsed.success).toBe(false);
+  });
+
   test("a template with no fields yields a tool that takes no arguments", () => {
     const shape = (documentToolSchema([]) as z.ZodObject<z.ZodRawShape>).shape;
     expect(Object.keys(shape)).toEqual([]);

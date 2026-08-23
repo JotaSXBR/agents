@@ -71,11 +71,17 @@ function fieldSchema(field: DocumentField): z.ZodTypeAny {
     case "lineItems":
       return described(
         z.array(
-          z.object({
-            description: z.string(),
-            quantity: z.number(),
-            unitPrice: z.number(),
-          }),
+          // Strict INSIDE the item too. The outer object's strictness cannot see a nested key, so a
+          // model putting a discount inside a line item had it stripped before the tool body ran and
+          // issued a document without data it believed it sent — the exact silent drop the strict
+          // schema exists to stop, one level down.
+          z
+            .object({
+              description: z.string(),
+              quantity: z.number(),
+              unitPrice: z.number(),
+            })
+            .strict(),
         ),
       );
   }

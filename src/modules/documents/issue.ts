@@ -1,3 +1,4 @@
+import { rename, rm } from "node:fs/promises";
 import { Prisma, type PrismaClient } from "@/../generated/prisma/client";
 import basePrisma from "@/api/lib/prisma";
 import config from "@/config";
@@ -394,8 +395,24 @@ async function finish(
     },
   });
   const key = storageKey(tenantId, row.id);
-  // Bun.write creates parent directories. The path is derived from numeric ids only.
-  await Bun.write(`${dir}/${key}`, buffer);
+  // Written to a temporary name and RENAMED into place. Two callers holding the same idempotency key
+  // can both find the row PENDING and both render it, and a plain write to the final path lets the
+  // second truncate a file the first already marked READY — so a download in that window serves a
+  // half-written PDF. Rename is atomic within a filesystem: a reader sees the old file or the whole
+  // new one, never part of one.
+  //
+  // Bun.write creates parent directories, which is why the temporary lives beside the target rather
+  // than in a system temp dir — and why the rename cannot cross a filesystem. The suffix keeps two
+  // concurrent renders from sharing the temporary as well.
+  const finalPath = `${dir}/${key}`;
+  const tempPath = `${finalPath}.${process.pid}-${Math.random().toString(36).slice(2, 10)}.part`;
+  await Bun.write(tempPath, buffer);
+  try {
+    await rename(tempPath, finalPath);
+  } catch (e) {
+    await rm(tempPath, { force: true });
+    throw e;
+  }
   // `revoked: false` in the CAS, not only PENDING: an operator can revoke while this render is
   // running, and without it the row would be flipped to READY and its bytes handed back for
   // delivery — revocation losing to a race it should always win.

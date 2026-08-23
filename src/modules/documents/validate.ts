@@ -166,6 +166,21 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+// The style, strictly, on its OWN — separable because a PATCH validates the caller's style against
+// the stored one merged underneath it, and the strict question is only ever about the half the
+// caller wrote. The tolerant reader answers ANY invalid value by returning every default, so an
+// operator who mistyped one colour would have their font, margin and currency silently replaced too
+// — and be told it saved.
+export function authoredStyleProblem(rawStyle: unknown): string | null {
+  const styleIn = rawStyle ?? {};
+  const parsed = documentStyleSchema.partial().safeParse(styleIn);
+  if (!parsed.success) return `style: ${issues(parsed.error)}`;
+  const dropped = droppedKey(styleIn, parsed.data, "");
+  return dropped
+    ? `style: "${dropped}" is not a style property, so it would be stored and never take effect. Check the spelling against document_template_schema, or remove it.`
+    : null;
+}
+
 export interface ParsedAuthoredTemplate {
   blocks: DocumentBlock[];
   fields: DocumentField[];
@@ -222,21 +237,9 @@ export function parseAuthoredTemplate(
     };
   }
 
-  // The style, strictly: the tolerant reader answers ANY invalid value by returning every default,
-  // so an operator who mistyped one colour would have their font, margin and currency silently
-  // replaced too — and be told it saved.
   if (authored.style) {
-    const styleParsed = documentStyleSchema.partial().safeParse(styleIn);
-    if (!styleParsed.success) {
-      return { ok: false, reason: `style: ${issues(styleParsed.error)}` };
-    }
-    const droppedInStyle = droppedKey(styleIn, styleParsed.data, "");
-    if (droppedInStyle) {
-      return {
-        ok: false,
-        reason: `style: "${droppedInStyle}" is not a style property, so it would be stored and never take effect. Check the spelling against document_template_schema, or remove it.`,
-      };
-    }
+    const problem = authoredStyleProblem(styleIn);
+    if (problem) return { ok: false, reason: problem };
   }
 
   return {

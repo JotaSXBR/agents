@@ -221,7 +221,9 @@ describe.skipIf(!dbUp)("MCP document writes", () => {
           ...(tpl?.fields ?? []),
           { name: "observacao", label: "Observação", type: "text" },
         ],
-        style: { ...tpl?.style, font: "mono" },
+        // Only the property being changed: a patch that also resends footerText would agree with a
+        // projection built from the patch alone, and prove nothing about the merge.
+        style: { font: "mono" },
       },
       { base: appDb },
     );
@@ -232,9 +234,14 @@ describe.skipIf(!dbUp)("MCP document writes", () => {
       };
       expect(data.diff.fields).toBeDefined();
       expect(data.diff.fields?.after).toContain("observacao:text");
-      expect(
-        (data.diff.style?.after as { font?: string } | undefined)?.font,
-      ).toBe("mono");
+      const afterStyle = data.diff.style?.after as
+        | { font?: string; footerText?: string }
+        | undefined;
+      expect(afterStyle?.font).toBe("mono");
+      // …and the saved footer is still there: from the patch alone an omitted optional diffs as
+      // REMOVED, which is a change the apply would not make.
+      const savedStyle = tpl?.style as { footerText?: string } | undefined;
+      expect(afterStyle?.footerText).toBe(savedStyle?.footerText);
     }
     // …and still applies nothing.
     const [after] = await listDocumentTemplates(ctx(), appDb);
