@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   LOGO_EXT_BY_TYPE,
   LOGO_MAX_BYTES,
+  LOGO_MAX_PIXELS,
   logoBytesLookLike,
   logoKeyFor,
   logoPixels,
@@ -120,6 +121,30 @@ describe("logoPixels", () => {
     expect(logoPixels(jpeg(640, 480), "jpg")).toBe(640 * 480);
   });
 
+  // The dimensions are UNSIGNED 32-bit, and JavaScript's bitwise operators are not: a width and a
+  // height that both set the high bit come out negative, and two negatives multiply back to a small
+  // positive that sails under the budget. 0xffffffff by 0xffffffff measures as 1.
+  test("reads dimensions past 2^31 as the unsigned numbers they are", () => {
+    const huge = bytes(
+      ...PNG_MAGIC,
+      ...be32(13),
+      0x49,
+      0x48,
+      0x44,
+      0x52,
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      ...PNG_END,
+    );
+    expect(logoPixels(huge, "png")).toBeGreaterThan(LOGO_MAX_PIXELS);
+  });
+
   test("returns null when the header cannot be read", () => {
     expect(logoPixels(bytes(...PNG_MAGIC), "png")).toBeNull();
     expect(logoPixels(bytes(0xff, 0xd8), "jpg")).toBeNull();
@@ -147,6 +172,30 @@ describe("setCompanyLogo", () => {
 
   // The one the size cap cannot catch: a small file that decodes into gigabytes.
   test("refuses an image whose declared dimensions are past the pixel budget", async () => {
+    // Both halves of "too big": a plausible one, and the one that arithmetic could hide — two
+    // dimensions with the high bit set, whose signed product is a harmless-looking 1.
+    await expect(
+      setCompanyLogo(
+        ctx,
+        upload("image/png", [
+          ...PNG_MAGIC,
+          ...be32(13),
+          0x49,
+          0x48,
+          0x44,
+          0x52,
+          0xff,
+          0xff,
+          0xff,
+          0xff,
+          0xff,
+          0xff,
+          0xff,
+          0xff,
+          ...PNG_END,
+        ]),
+      ),
+    ).rejects.toThrow(/pixels/);
     const huge = png(20_000, 20_000);
     expect(huge.length).toBeLessThan(LOGO_MAX_BYTES);
     await expect(

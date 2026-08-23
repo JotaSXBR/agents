@@ -57,12 +57,18 @@ const LOGO_TERMINATORS: Record<"png" | "jpg", number[]> = {
 // around 150pt wide) and still bounded at ~16 MB decoded.
 export const LOGO_MAX_PIXELS = 4_000_000;
 
+// UNSIGNED, which is the whole reason this is a function. PNG writes its dimensions as uint32 and
+// JavaScript's bitwise operators work on SIGNED 32-bit ints, so a value with the high bit set comes
+// back negative — and a width and a height that are both negative multiply to a small POSITIVE
+// number. 0xffffffff by 0xffffffff measures as 1 pixel, which walks straight through the budget
+// below and hands the decoder a file declaring four billion pixels a side.
 function beUint32(bytes: Uint8Array, at: number): number {
   return (
-    ((bytes[at] ?? 0) << 24) |
-    ((bytes[at + 1] ?? 0) << 16) |
-    ((bytes[at + 2] ?? 0) << 8) |
-    (bytes[at + 3] ?? 0)
+    (((bytes[at] ?? 0) << 24) |
+      ((bytes[at + 1] ?? 0) << 16) |
+      ((bytes[at + 2] ?? 0) << 8) |
+      (bytes[at + 3] ?? 0)) >>>
+    0
   );
 }
 

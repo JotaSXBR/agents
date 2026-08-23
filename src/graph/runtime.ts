@@ -252,8 +252,14 @@ async function deliverPendingAttachments(
   for (const file of queued) {
     // A document is queued as BYTES, and bytes cannot say whether the row is still deliverable. The
     // operator can revoke between the tool issuing it and this loop running — the model still had a
-    // response to finish — and revocation has to win that race the same way it wins the download
-    // route's. Asked here, immediately before the send, because anywhere earlier leaves the same gap.
+    // response to finish — and that window is seconds wide, which is where a revocation realistically
+    // lands. Asked here, immediately before the send, because anywhere earlier widens it.
+    //
+    // WHAT IS NOT CLOSED, deliberately: the instant between this read and the HTTP request. The send
+    // is a call to Chatwoot, not a write in our transaction, so no lock makes the two atomic — and a
+    // lock held across it would make revocation, the operator's stop button, wait behind the very
+    // system it is trying to stop. A revoke committing inside that instant delivers, and the document
+    // is revoked from that moment on: the link stops serving it, which is the part that lasts.
     if (file.documentId && document) {
       // Fails CLOSED and, just as importantly, fails LOCALLY: a transient database error here must
       // not throw out of the loop, because the loop is also what delivers the model's text reply.

@@ -40,6 +40,22 @@ export function CompanyProfileCard({
   // same `companyChanges` the save sends is what "unsaved" means here, so the two cannot disagree.
   useNavGuard(Object.keys(companyChanges(form)).length > 0);
   const [saving, setSaving] = useState(false);
+  // ONE logo write at a time, and the reason is that both routes answer with the whole company
+  // block and the card applies what comes back: two in flight are decided by whichever ANSWERS
+  // last, which is not necessarily the one that wrote last. An older response landing after a newer
+  // one puts a superseded logoKey on screen — usually one whose file the newer write has already
+  // deleted, so the letterhead renders broken until somebody reloads.
+  //
+  // Serialised rather than reconciled with a generation counter: an upload is a deliberate act, the
+  // operator expects it to finish, and this is the same shape as creating from a starter.
+  //
+  // The DISABLED CONTROLS are the whole mechanism. A matching `if (busy) return` inside each handler
+  // was written first and then removed: a click is a discrete event, so React has already re-rendered
+  // with the button disabled before a second one can be dispatched — and in the one case that would
+  // beat that, two dispatches inside a single tick, the handler reads the same stale value the
+  // render did and lets both through anyway. It guarded nothing that the button was not already
+  // guarding, and mutation testing is what showed it.
+  const [logoBusy, setLogoBusy] = useState<"upload" | "remove" | null>(null);
   const logoUrl = useCompanyLogoUrl(company?.logoKey, company?.logoVersion);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -106,6 +122,7 @@ export function CompanyProfileCard({
         ),
         "error",
       );
+    setLogoBusy("upload");
     try {
       const { data, error } = await api.api.v1[
         "tenant-settings"
@@ -114,6 +131,8 @@ export function CompanyProfileCard({
       applyLogoOnly(data.company);
     } catch {
       failed();
+    } finally {
+      setLogoBusy(null);
     }
   }
 
@@ -121,6 +140,7 @@ export function CompanyProfileCard({
   // outright. Neither said anything before — the logo simply stayed where it was, which reads as a
   // button that does not work.
   async function removeLogo() {
+    setLogoBusy("remove");
     try {
       const { data, error } =
         await api.api.v1["tenant-settings"].company.logo.delete();
@@ -137,6 +157,8 @@ export function CompanyProfileCard({
         t("documents.company.logoRemoveError", "Could not remove the logo."),
         "error",
       );
+    } finally {
+      setLogoBusy(null);
     }
   }
 
@@ -198,6 +220,8 @@ export function CompanyProfileCard({
           <Button
             variant="secondary"
             size="sm"
+            disabled={logoBusy !== null}
+            loading={logoBusy === "upload"}
             onClick={() => fileRef.current?.click()}
           >
             <ImageUp className="h-4 w-4" aria-hidden="true" />
@@ -207,6 +231,8 @@ export function CompanyProfileCard({
             <Button
               variant="secondary"
               size="sm"
+              disabled={logoBusy !== null}
+              loading={logoBusy === "remove"}
               onClick={removeLogo}
               aria-label={t("common.delete", "Delete")}
             >
