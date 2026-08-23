@@ -71,6 +71,24 @@ export interface WriteDeps {
   base?: PrismaClient;
 }
 
+// The one id parser for every MCP surface, read and write alike.
+//
+// The pattern, not just the throw. `BigInt("")` is 0n and `BigInt(" 17 ")` is 17n, so an id a caller
+// typed wrong does not fail — it becomes a VALID id for some other row, and a write with dry_run
+// false then edits or deletes that one. An id is a run of digits or a mistake worth reporting.
+//
+// One function because it was eight, byte for byte, and a defect fixed in one of eight copies is a
+// defect fixed nowhere: the round that added this rule to the READ parser left the seven writes
+// exactly as they were.
+export function parseMcpId(raw: string, label: string): bigint | WriteResult {
+  if (!/^\d+$/.test(raw)) return err(`invalid ${label}`);
+  try {
+    return BigInt(raw);
+  } catch {
+    return err(`invalid ${label}`);
+  }
+}
+
 // Field-level diff: only keys whose JSON projection changed appear (before → after).
 export function diffFields(
   before: Record<string, unknown>,

@@ -64,7 +64,14 @@ import {
 import { OUTBOUND_EVENTS } from "@/modules/webhooks/outbound/events";
 import { listWebhookSubscriptions } from "@/modules/webhooks/outbound/subscriptions";
 import type { VerifiedToken } from "./oauth/tokens";
-import { err, ok, readGate, type WriteDeps, type WriteResult } from "./write";
+import {
+  err,
+  ok,
+  parseMcpId,
+  readGate,
+  type WriteDeps,
+  type WriteResult,
+} from "./write";
 
 // MCP READ tools — the read half of the expanded admin surface, all gated by the same fence as
 // write reads (mcp:read scope + a tenant target). Each tool projects a tenant-scoped service and
@@ -77,18 +84,6 @@ const sidn = (v: bigint | null): string | null =>
   v === null ? null : String(v);
 
 // Parse a bigint id arg, mapping a bad value to a uniform error.
-// The pattern, not just the throw. `BigInt("")` is 0n and `BigInt(" 7 ")` is 7n, so an id a caller
-// typed wrong becomes a VALID id for some other row — or, for the empty string, for row zero, which
-// silently answers "nothing found" to a question the caller never meant to ask. An id is a run of
-// digits or it is a mistake worth reporting.
-function asBigInt(raw: string, label: string): bigint | WriteResult {
-  if (!/^\d+$/.test(raw)) return err(`invalid ${label}`);
-  try {
-    return BigInt(raw);
-  } catch {
-    return err(`invalid ${label}`);
-  }
-}
 
 function failOf(e: unknown): WriteResult {
   if (e instanceof AppError) return err(e.message);
@@ -105,7 +100,7 @@ export async function agentGet(
   const base = deps.base ?? basePrisma;
   const ctx = readGate(principal);
   if ("ok" in ctx) return ctx;
-  const id = asBigInt(args.agent_id, "agent_id");
+  const id = parseMcpId(args.agent_id, "agent_id");
   if (typeof id !== "bigint") return id;
   try {
     return ok({ agent: await getAgent(ctx, id, base) });
@@ -122,7 +117,7 @@ export async function agentToolsGet(
   const base = deps.base ?? basePrisma;
   const ctx = readGate(principal);
   if ("ok" in ctx) return ctx;
-  const id = asBigInt(args.agent_id, "agent_id");
+  const id = parseMcpId(args.agent_id, "agent_id");
   if (typeof id !== "bigint") return id;
   try {
     const view = await getAgentToolSelections(ctx, id, base);
@@ -156,7 +151,7 @@ export async function toolGet(
   const base = deps.base ?? basePrisma;
   const ctx = readGate(principal);
   if ("ok" in ctx) return ctx;
-  const id = asBigInt(args.tool_id, "tool_id");
+  const id = parseMcpId(args.tool_id, "tool_id");
   if (typeof id !== "bigint") return id;
   try {
     return ok({ tool: await getToolDefinition(ctx, id, base) });
@@ -207,7 +202,7 @@ export async function documentTemplateGet(
   const base = deps.base ?? basePrisma;
   const ctx = readGate(principal);
   if ("ok" in ctx) return ctx;
-  const id = asBigInt(args.document_template_id, "document_template_id");
+  const id = parseMcpId(args.document_template_id, "document_template_id");
   if (typeof id !== "bigint") return id;
   try {
     return ok({ template: await getDocumentTemplate(ctx, id, base) });
@@ -275,7 +270,7 @@ export async function issuedDocumentList(
   // filter, and treating it as absent answers the tenant's whole recent list — the widest possible
   // answer to the narrowest possible question. Parsed and refused instead.
   if (args.template_id !== undefined) {
-    const parsed = asBigInt(args.template_id, "template_id");
+    const parsed = parseMcpId(args.template_id, "template_id");
     if (typeof parsed !== "bigint") return parsed;
     templateId = parsed;
   }
@@ -364,7 +359,13 @@ export async function knowledgeSearch(
   let kbIds: bigint[] | undefined;
   if (args.knowledge_base_ids?.length) {
     try {
-      kbIds = args.knowledge_base_ids.map((s) => BigInt(s));
+      // Through the same parser as every other id: `BigInt(" 7 ")` is 7n, so a padded entry here
+      // silently narrows to a knowledge base the caller did not name.
+      kbIds = args.knowledge_base_ids.map((raw) => {
+        const parsed = parseMcpId(raw, "knowledge_base_ids");
+        if (typeof parsed !== "bigint") throw new Error("invalid");
+        return parsed;
+      });
     } catch {
       return err("invalid knowledge_base_ids");
     }
@@ -399,7 +400,7 @@ export async function knowledgeDocumentsList(
   const ctx = readGate(principal);
   if ("ok" in ctx) return ctx;
   const tenantId = ctx.tenantId as bigint;
-  const kbId = asBigInt(args.knowledge_base_id, "knowledge_base_id");
+  const kbId = parseMcpId(args.knowledge_base_id, "knowledge_base_id");
   if (typeof kbId !== "bigint") return kbId;
   try {
     const docs = await listDocuments(tenantId, kbId, base);
@@ -448,7 +449,7 @@ export async function instanceGet(
   const base = deps.base ?? basePrisma;
   const ctx = readGate(principal);
   if ("ok" in ctx) return ctx;
-  const id = asBigInt(args.instance_id, "instance_id");
+  const id = parseMcpId(args.instance_id, "instance_id");
   if (typeof id !== "bigint") return id;
   try {
     return ok({ instance: await getChatwootInstance(ctx, id, base) });
@@ -568,7 +569,7 @@ export async function experimentGet(
   const ctx = readGate(principal);
   if ("ok" in ctx) return ctx;
   const tenantId = ctx.tenantId as bigint;
-  const id = asBigInt(args.experiment_id, "experiment_id");
+  const id = parseMcpId(args.experiment_id, "experiment_id");
   if (typeof id !== "bigint") return id;
   try {
     const r = await getExperiment(tenantId, id, base);
@@ -589,7 +590,7 @@ export async function experimentResultsGet(
   const ctx = readGate(principal);
   if ("ok" in ctx) return ctx;
   const tenantId = ctx.tenantId as bigint;
-  const id = asBigInt(args.experiment_id, "experiment_id");
+  const id = parseMcpId(args.experiment_id, "experiment_id");
   if (typeof id !== "bigint") return id;
   try {
     return ok({ results: await experimentResults(tenantId, id, base) });
@@ -651,7 +652,7 @@ export async function vaultReferencesGet(
   const base = deps.base ?? basePrisma;
   const ctx = readGate(principal);
   if ("ok" in ctx) return ctx;
-  const id = asBigInt(args.vault_id, "vault_id");
+  const id = parseMcpId(args.vault_id, "vault_id");
   if (typeof id !== "bigint") return id;
   try {
     return ok({ references: await vaultReferences(ctx, id, base) });
@@ -733,17 +734,17 @@ export async function logsQuery(
   if (args.search) opts.search = args.search;
   if (args.limit !== undefined) opts.limit = args.limit;
   if (args.agent_id) {
-    const v = asBigInt(args.agent_id, "agent_id");
+    const v = parseMcpId(args.agent_id, "agent_id");
     if (typeof v !== "bigint") return v;
     opts.agentId = v;
   }
   if (args.conversation_id) {
-    const v = asBigInt(args.conversation_id, "conversation_id");
+    const v = parseMcpId(args.conversation_id, "conversation_id");
     if (typeof v !== "bigint") return v;
     opts.conversationId = v;
   }
   if (args.cursor) {
-    const v = asBigInt(args.cursor, "cursor");
+    const v = parseMcpId(args.cursor, "cursor");
     if (typeof v !== "bigint") return v;
     opts.cursor = v;
   }
@@ -794,12 +795,12 @@ export async function logsExport(
   if (args.source) opts.source = args.source;
   if (args.search) opts.search = args.search;
   if (args.agent_id) {
-    const v = asBigInt(args.agent_id, "agent_id");
+    const v = parseMcpId(args.agent_id, "agent_id");
     if (typeof v !== "bigint") return v;
     opts.agentId = v;
   }
   if (args.conversation_id) {
-    const v = asBigInt(args.conversation_id, "conversation_id");
+    const v = parseMcpId(args.conversation_id, "conversation_id");
     if (typeof v !== "bigint") return v;
     opts.conversationId = v;
   }
@@ -875,7 +876,7 @@ export async function conversationGet(
   const base = deps.base ?? basePrisma;
   const ctx = readGate(principal);
   if ("ok" in ctx) return ctx;
-  const id = asBigInt(args.conversation_id, "conversation_id");
+  const id = parseMcpId(args.conversation_id, "conversation_id");
   if (typeof id !== "bigint") return id;
   try {
     return ok({ conversation: await getConversationDetail(ctx, id, base) });
@@ -892,7 +893,7 @@ export async function conversationMessages(
   const base = deps.base ?? basePrisma;
   const ctx = readGate(principal);
   if ("ok" in ctx) return ctx;
-  const id = asBigInt(args.conversation_id, "conversation_id");
+  const id = parseMcpId(args.conversation_id, "conversation_id");
   if (typeof id !== "bigint") return id;
   try {
     return ok({ ...(await getConversationMessages(ctx, id, {}, base)) });

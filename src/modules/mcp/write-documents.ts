@@ -17,6 +17,7 @@ import {
   err,
   gate,
   ok,
+  parseMcpId,
   recordMcpAudit,
   truncForAudit,
   type WriteDeps,
@@ -34,14 +35,6 @@ import {
 function failOf(e: unknown): WriteResult {
   if (e instanceof AppError) return err(e.message);
   throw e;
-}
-
-function parseId(raw: string, label: string): bigint | WriteResult {
-  try {
-    return BigInt(raw);
-  } catch {
-    return err(`invalid ${label}`);
-  }
 }
 
 // A projection small enough to read in a terminal: the blocks themselves are the bulk of a template
@@ -196,7 +189,7 @@ export async function documentTemplateUpdate(
   const gated = gate(principal);
   if ("ok" in gated) return gated;
   const ctx = ctxOf(principal);
-  const id = parseId(args.document_template_id, "document_template_id");
+  const id = parseMcpId(args.document_template_id, "document_template_id");
   if (typeof id !== "bigint") return id;
   const patch: Parameters<typeof updateDocumentTemplate>[2] = {};
   if (args.name !== undefined) patch.name = args.name;
@@ -302,7 +295,7 @@ export async function documentTemplateDelete(
   const gated = gate(principal);
   if ("ok" in gated) return gated;
   const ctx = ctxOf(principal);
-  const id = parseId(args.document_template_id, "document_template_id");
+  const id = parseMcpId(args.document_template_id, "document_template_id");
   if (typeof id !== "bigint") return id;
   try {
     const current = await getDocumentTemplate(ctx, id, base);

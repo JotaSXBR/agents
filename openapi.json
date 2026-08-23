@@ -25798,6 +25798,7 @@
                     "type": "string"
                   },
                   "conversationId": {
+                    "pattern": "^[0-9]+$",
                     "description": "Conversation row id (BigInt string).",
                     "type": "string"
                   }
@@ -25835,6 +25836,7 @@
                     "type": "string"
                   },
                   "conversationId": {
+                    "pattern": "^[0-9]+$",
                     "description": "Conversation row id (BigInt string).",
                     "type": "string"
                   }
@@ -25872,6 +25874,7 @@
                     "type": "string"
                   },
                   "conversationId": {
+                    "pattern": "^[0-9]+$",
                     "description": "Conversation row id (BigInt string).",
                     "type": "string"
                   }

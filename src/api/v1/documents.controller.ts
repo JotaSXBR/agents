@@ -139,7 +139,10 @@ export const documentsController = new Elysia({
           }),
         ),
         conversationId: t.Optional(
-          t.String({ description: "Conversation row id (BigInt string)." }),
+          t.String({
+            pattern: "^[0-9]+$",
+            description: "Conversation row id (BigInt string).",
+          }),
         ),
       }),
       detail: doc(

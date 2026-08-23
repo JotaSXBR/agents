@@ -413,6 +413,25 @@ describe.skipIf(!dbUp)("MCP document writes", () => {
     expect(scoped.ok).toBe(true);
   });
 
+  // A padded id is not a rejected id: `BigInt(" 17 ")` is 17n, so a write with dry_run:false would
+  // edit or DELETE a real template the caller never named. The read parser learned this one round
+  // before the writes did — the rule now lives in one place, so there is no "one round before" left.
+  test("refuses a padded or empty id on a write", async () => {
+    const [tpl] = await listDocumentTemplates(ctx(), appDb);
+    for (const bad of [` ${tpl?.id} `, "", "17x"]) {
+      const r = await documentTemplateUpdate(
+        principal({ tenantId }),
+        { document_template_id: bad, name: "x" },
+        { base: appDb },
+      );
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain("document_template_id");
+    }
+    // …and the template is untouched.
+    const after = await listDocumentTemplates(ctx(), appDb);
+    expect(after.find((t) => t.id === tpl?.id)?.name).toBe(tpl?.name);
+  });
+
   // The tenant fence: a template belonging to tenant A is not addressable from tenant B's token,
   // and the answer is the same "not found" either way.
   test("another tenant's template is not addressable", async () => {

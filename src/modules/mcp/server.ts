@@ -71,6 +71,7 @@ import {
   brandingAssetSet,
   brandingSet,
   credentialCreate,
+  parseMcpId,
   promptSet,
   tenantUpdate,
   type WriteResult,
@@ -468,7 +469,18 @@ export function buildMcpServer(principal: VerifiedToken): McpServer {
       ) => {
         try {
           const tenantId = eff.tenantId as bigint;
-          const agentId = BigInt(args.agent_id);
+          // Same parser as every other id: a padded or empty agent_id must not resolve to some
+          // other agent's row.
+          const parsedAgent = parseMcpId(args.agent_id, "agent_id");
+          if (typeof parsedAgent !== "bigint") {
+            return {
+              content: [
+                { type: "text" as const, text: JSON.stringify(parsedAgent) },
+              ],
+              isError: true,
+            };
+          }
+          const agentId = parsedAgent;
           const threadId = args.thread_id;
           const forceAudio = args.reply_with_audio;
           let res: unknown;
@@ -536,10 +548,16 @@ export function buildMcpServer(principal: VerifiedToken): McpServer {
       },
       async (args: { agent_id: string }, eff) => {
         try {
-          const data = await exportAgent(
-            principalCtx(eff),
-            BigInt(args.agent_id),
-          );
+          const parsedAgent = parseMcpId(args.agent_id, "agent_id");
+          if (typeof parsedAgent !== "bigint") {
+            return {
+              content: [
+                { type: "text" as const, text: JSON.stringify(parsedAgent) },
+              ],
+              isError: true,
+            };
+          }
+          const data = await exportAgent(principalCtx(eff), parsedAgent);
           return {
             content: [{ type: "text" as const, text: JSON.stringify(data) }],
           };
@@ -1370,15 +1388,23 @@ export function buildMcpServer(principal: VerifiedToken): McpServer {
       "agent_tools_set",
       {
         description:
-          "REPLACE an agent's entire set of tool grants (it is not additive — pass the full desired set). Discover ids via agent_tools_get. Each grant has a source (NATIVE/RAG/HTTP/MCP/INTEGRATION) and the matching id(s): toolDefinitionId (HTTP), mcpServerConnectionId (MCP), integrationInstanceId (INTEGRATION), knowledgeBaseIds (RAG), enabledTools (names to enable within the source). For a RAG grant, omitting enabledTools defaults to search_knowledge (the knowledge base would otherwise be granted but unreachable). Previews current vs next and applies NOTHING unless dry_run is false.",
+          "REPLACE an agent's entire set of tool grants (it is not additive — pass the full desired set). Discover ids via agent_tools_get. Each grant has a source (NATIVE/RAG/HTTP/MCP/INTEGRATION/DOCUMENT) and the matching id(s): toolDefinitionId (HTTP), mcpServerConnectionId (MCP), integrationInstanceId (INTEGRATION), documentTemplateId (DOCUMENT), knowledgeBaseIds (RAG), enabledTools (names to enable within the source). For a RAG grant, omitting enabledTools defaults to search_knowledge (the knowledge base would otherwise be granted but unreachable). Previews current vs next and applies NOTHING unless dry_run is false.",
         inputSchema: {
           agent_id: z.string(),
           grants: z.array(
             z.object({
-              source: z.enum(["NATIVE", "RAG", "HTTP", "MCP", "INTEGRATION"]),
+              source: z.enum([
+                "NATIVE",
+                "RAG",
+                "HTTP",
+                "MCP",
+                "INTEGRATION",
+                "DOCUMENT",
+              ]),
               toolDefinitionId: z.string().nullable().optional(),
               mcpServerConnectionId: z.string().nullable().optional(),
               integrationInstanceId: z.string().nullable().optional(),
+              documentTemplateId: z.string().nullable().optional(),
               knowledgeBaseIds: z.array(z.string()).optional(),
               enabledTools: z.array(z.string()).optional(),
             }),
@@ -1394,6 +1420,7 @@ export function buildMcpServer(principal: VerifiedToken): McpServer {
             toolDefinitionId?: string | null;
             mcpServerConnectionId?: string | null;
             integrationInstanceId?: string | null;
+            documentTemplateId?: string | null;
             knowledgeBaseIds?: string[];
             enabledTools?: string[];
           }>;

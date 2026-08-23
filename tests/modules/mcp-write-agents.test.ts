@@ -6,6 +6,8 @@ import {
   AGENT_EXPORT_KIND,
   AGENT_EXPORT_VERSION,
 } from "@/modules/agents/transfer";
+import { documentStarter } from "@/modules/documents/starters";
+import { createDocumentTemplate } from "@/modules/documents/templates";
 import type { VerifiedToken } from "@/modules/mcp/oauth/tokens";
 import {
   agentCreate,
@@ -341,6 +343,46 @@ describe.skipIf(!dbUp)("MCP agent-builder tools (DB)", () => {
       where: { tenantId: tenantA, action: "mcp.agent_tools_set" },
     });
     expect(audits).toBe(1);
+  });
+
+  // The step that closed the MCP loop: this surface could CREATE a document template and had no way
+  // to GRANT it, so an operator authoring over MCP ended one move short of a working document tool.
+  test("agent_tools_set can grant a document template", async () => {
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const tpl = await createDocumentTemplate(
+      { tenantId: tenantA, userId: null, role: "TENANT_ADMIN" },
+      {
+        name: "Orçamento MCP",
+        slug: "orcamento_mcp",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+      },
+      appDb,
+    );
+    const p = principal({ tenantId: tenantA });
+    const r = await agentToolsSet(
+      p,
+      {
+        agent_id: String(agentA),
+        grants: [{ source: "DOCUMENT", documentTemplateId: tpl.id }],
+        dry_run: false,
+      },
+      { base: appDb },
+    );
+    expect(r.ok).toBe(true);
+    const grant = await suDb.agentToolSelection.findFirst({
+      where: { agentId: agentA, source: "DOCUMENT" },
+      select: { documentTemplateId: true },
+    });
+    expect(grant?.documentTemplateId).toBe(BigInt(tpl.id));
+    await suDb.$executeRawUnsafe(
+      `DELETE FROM agent_tool_selections WHERE agent_id = ${agentA}`,
+    );
+    await suDb.$executeRawUnsafe(
+      `DELETE FROM document_templates WHERE id = ${BigInt(tpl.id)}`,
+    );
   });
 
   test("agent_update cross-tenant agent_id → not found, no write", async () => {
