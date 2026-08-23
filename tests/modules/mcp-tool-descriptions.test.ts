@@ -203,10 +203,17 @@ describe("MCP tool descriptions", () => {
   // one: 38k characters against 25k of prose, published in full on every tools/list of every
   // session, before a client knows whether any of it will be used.
   //
-  // Measured with the document tools in: 103 tools, 25,641 characters of description and 38,379 of
+  // Measured with the document tools in: 103 tools, 25,738 characters of description and 39,726 of
   // schema. The headroom below is deliberately smaller than one substantial tool, so the next
   // addition is a decision — raising these is a legitimate outcome of that decision, and not
   // noticing is not.
+  //
+  // The schema figure was 38,379 when this test was written and the cap 39,500. It moved because the
+  // `contactAuth` block landed on the base while this branch was open, costing 1,347 characters of
+  // agent_settings_set — the same addition that raised SETTINGS_SCHEMA_CEILING above. Re-measured
+  // rather than trimmed: nothing here grew, the total simply now includes a block that was not in it
+  // when the number was taken, and cutting a document description to fit an unrelated arrival is
+  // cutting what is easiest rather than what is cheapest.
   test("the whole tools/list payload stays under its ceiling", async () => {
     const all = await listed();
     let desc = 0;
@@ -216,7 +223,7 @@ describe("MCP tool descriptions", () => {
       schema += t.schema.length;
     }
     expect(desc).toBeLessThanOrEqual(26_500);
-    expect(schema).toBeLessThanOrEqual(39_500);
+    expect(schema).toBeLessThanOrEqual(40_850);
   });
 
   // Why the document write tools declare `blocks`/`fields` as loose arrays and put the vocabulary in

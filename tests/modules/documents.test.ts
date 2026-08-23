@@ -748,11 +748,12 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     ).rejects.toThrow(/already exists/);
   });
 
-  // The logo key is derived from the tenant id and the file EXTENSION, so replacing a PNG with
-  // another PNG produces the same key. Anything that keys off it — the console's blob, a browser
-  // cache of a response served with max-age — would go on showing the previous letterhead while
-  // freshly issued documents already carry the new one. The version is the half that moves.
-  test("a same-format logo replacement moves the version, though the key does not", async () => {
+  // The version is the cache buster, and it has to move on EVERY write. An upload now writes a file
+  // of its own, but the URL the console reads the letterhead from does not carry the key — it is
+  // `/tenant-settings/company/logo?v=<version>`, resolved server-side — so a version that stood
+  // still would leave the console, and any cache holding that response, showing the previous
+  // letterhead while freshly issued documents already carry the new one.
+  test("every logo write moves the version, including two in the same millisecond", async () => {
     const first = await setCompanyLogoKey(
       ctx(tenantB),
       `${tenantB}-logo.png`,
@@ -1437,7 +1438,7 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       0x44, 0x52, 0, 0, 0, 10, 0, 0, 0, 10, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42,
       0x60, 0x82,
     ];
-    await setCompanyLogo(
+    const uploaded = await setCompanyLogo(
       ctx(tenantB),
       {
         type: "image/png",
@@ -1446,9 +1447,10 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       },
       appDb,
     );
-    // The state a replacement leaves for a heartbeat: the row names the JPEG, the PNG file is gone,
-    // and a reader that took its snapshot a moment earlier still holds the PNG key.
-    const stale = `${tenantB}-logo.jpg`;
+    const live = uploaded.logoKey ?? "";
+    // The state a replacement leaves for a heartbeat: the row names the newer file, the one this
+    // reader is holding is already deleted, and its snapshot was taken a moment before that.
+    const stale = `${tenantB}-logo-gonegonegonegone.jpg`;
     let handedStale = false;
     const racing = appDb.$extends({
       query: {
@@ -1480,9 +1482,9 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     const rendered = await readRenderContext(ctx(tenantB), racing);
     expect(handedStale).toBe(true);
     // The retry found the key that is really stored, and its bytes.
-    expect(rendered.company.logoKey).toBe(`${tenantB}-logo.png`);
+    expect(rendered.company.logoKey).toBe(live);
     expect(rendered.logo).not.toBeNull();
-    expect(await Bun.file(`${dir}/${tenantB}-logo.png`).exists()).toBe(true);
+    expect(await Bun.file(`${dir}/${live}`).exists()).toBe(true);
     await clearCompanyLogo(ctx(tenantB), appDb);
   });
 
@@ -1537,6 +1539,107 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       storageDir: DIR,
     });
     expect(ok.status).toBe("READY");
+    await suDb.issuedDocument.deleteMany({ where: { templateId: id } });
+    await suDb.documentTemplate.delete({ where: { id } });
+  });
+
+  // The gate above answers with the logo that is on disk WHEN IT RUNS, and the render happens later:
+  // a PENDING row recovered by a retry re-reads the letterhead, because bytes do not belong in a
+  // JSON column. Everything else the render uses is frozen in the snapshot, so the logo is the one
+  // input that can change underneath — and for a template whose only content IS the letterhead,
+  // "changed" can mean the document has nothing left to draw. Rendering it anyway publishes a
+  // numbered blank page, permanently.
+  test("refuses to publish a recovered document whose only content was a letterhead that is gone", async () => {
+    // A DECODABLE 1x1 PNG, not just one that passes the upload's structural check: this test's
+    // subject is a document whose only ink is the letterhead, so a logo the renderer refuses would
+    // make the "it draws" half true for no reason and the assertions pass without meaning.
+    const png = [
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48,
+      0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89,
+      0, 0, 0, 10, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0, 1, 0, 0, 5, 0,
+      1, 0x0d, 0x0a, 0x2d, 0xb4, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42,
+      0x60, 0x82,
+    ];
+    const uploadLogo = () =>
+      setCompanyLogo(
+        ctx(tenantB),
+        {
+          type: "image/png",
+          size: png.length,
+          arrayBuffer: async () => new Uint8Array(png).buffer as ArrayBuffer,
+        },
+        appDb,
+      );
+    await uploadLogo();
+    const tpl = await createDocumentTemplate(
+      ctx(tenantB),
+      {
+        name: "Papel timbrado",
+        slug: `papel_timbrado_${process.pid}`,
+        // The letterhead and nothing else: no title, no company block, no meta rows. It draws
+        // because there is a logo, and it draws for no other reason.
+        blocks: [{ id: "h", type: "header", showCompany: false }],
+        fields: [],
+      },
+      appDb,
+    );
+    const id = BigInt(tpl.id);
+    const key = `letterhead-${process.pid}`;
+    const first = await issueDocument({
+      tenantId: tenantB,
+      templateId: id,
+      idempotencyKey: key,
+      values: {},
+      base: appDb,
+      storageDir: DIR,
+    });
+    expect(first.status).toBe("READY");
+
+    // The state a crash between the insert and the publish leaves: numbered, PENDING, no file. This
+    // is the row a retry adopts and re-renders.
+    const rowId = BigInt(first.id);
+    await rm(`${DIR}/${storageKey(tenantB, rowId)}`, { force: true });
+    await suDb.issuedDocument.update({
+      where: { id: rowId },
+      data: { status: "PENDING", pdfStorageKey: null },
+    });
+    await clearCompanyLogo(ctx(tenantB), appDb);
+
+    await expect(
+      issueDocument({
+        tenantId: tenantB,
+        templateId: id,
+        idempotencyKey: key,
+        values: {},
+        base: appDb,
+        storageDir: DIR,
+      }),
+    ).rejects.toThrow(/blank/i);
+    const held = await suDb.issuedDocument.findUnique({
+      where: { id: rowId },
+      select: { status: true, pdfStorageKey: true },
+    });
+    // Still PENDING and still unpublished: nothing claims to be a document, so restoring the
+    // letterhead is all it takes.
+    expect(held?.status).toBe("PENDING");
+    expect(held?.pdfStorageKey).toBeNull();
+    expect(
+      await Bun.file(`${DIR}/${storageKey(tenantB, rowId)}`).exists(),
+    ).toBe(false);
+
+    await uploadLogo();
+    const healed = await issueDocument({
+      tenantId: tenantB,
+      templateId: id,
+      idempotencyKey: key,
+      values: {},
+      base: appDb,
+      storageDir: DIR,
+    });
+    expect(healed.status).toBe("READY");
+    expect(healed.number).toBe(first.number);
+
+    await clearCompanyLogo(ctx(tenantB), appDb);
     await suDb.issuedDocument.deleteMany({ where: { templateId: id } });
     await suDb.documentTemplate.delete({ where: { id } });
   });
@@ -1891,29 +1994,134 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     expect(stored?.pdfStorageKey).not.toBe(`${tenantA}/${id}.pdf`);
   });
 
-  // A same-format replacement reuses the same path, so the bytes change before the row that records
-  // the change does. If that row does not commit, the endpoint reports a failure while every
-  // document already renders the NEW letterhead and every cached client still shows the old one —
-  // the mismatch logoVersion exists to prevent.
+  // A failed upload must leave the letterhead every render is reading exactly as it found it, and
+  // must not leave its own bytes behind either. Both come from the same property: the file it wrote
+  // is a file nothing else can be pointing at, because its name is new.
+  //
+  // This is where a copy-aside and a three-way rollback used to live. What removed them: the
+  // rollback ran after its own transaction ended, so it had to decide from outside the lock whether
+  // the state it meant to undo was still there — and the case it could not answer was two uploads
+  // that both failed, whose compensations ran in the wrong order, leaving an uncommitted image as
+  // the live letterhead while the settings still described the old one.
   test("a failed logo write leaves the previous letterhead in place", async () => {
     // NOTE: setCompanyLogo reads config.documentsStorageDir directly — there is no dir to inject —
     // so this test writes into the configured one. Everything it asserts is therefore scoped to its
-    // OWN tenant's key: the directory is shared with other runs, and a stale file from one of them
+    // OWN tenant's keys: the directory is shared with other runs, and a stale file from one of them
     // is not this test's subject. It cleans up after itself at the end.
     const dir = `${config.documentsStorageDir}/company`;
-    const key = `${tenantB}-logo.png`;
-    await Bun.write(`${dir}/${key}`, "OLD-LOGO");
+    const mine = async () =>
+      (await readdir(dir)).filter((f) => f.startsWith(`${tenantB}-logo`));
+    for (const f of await mine()) await rm(`${dir}/${f}`, { force: true });
     const png = [
       0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48,
       0x44, 0x52, 0, 0, 0, 10, 0, 0, 0, 10, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42,
       0x60, 0x82,
     ];
+    // The marker is the declared WIDTH, not a trailing byte: the signature and the IEND terminator
+    // are what the upload validates, so a difference has to live between them for the file to stay
+    // a valid PNG and still be identifiable from its bytes.
+    const upload = (client: PrismaClient, width = 10) =>
+      setCompanyLogo(
+        ctx(tenantB),
+        {
+          type: "image/png",
+          size: png.length,
+          arrayBuffer: async () =>
+            new Uint8Array(png.map((b, i) => (i === 19 ? width : b)))
+              .buffer as ArrayBuffer,
+        },
+        client,
+      );
     // The settings write fails after the bytes are already on disk.
     const failing = appDb.$extends({
       query: {
         tenant: {
           async update() {
             throw new Error("settings write failed");
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+
+    // A FIRST upload that does not commit leaves NO file: there is no previous letterhead, and
+    // keeping the new one would be an unreferenced image on disk for a row that never existed.
+    await expect(upload(failing)).rejects.toThrow(/settings write failed/);
+    expect(await mine()).toEqual([]);
+
+    const saved = await upload(appDb);
+    const live = saved.logoKey ?? "";
+    expect(await mine()).toEqual([live]);
+    const liveBytes = await Bun.file(`${dir}/${live}`).bytes();
+
+    // …and now a failure with a letterhead in place. The configured file is not written to, moved
+    // or copied, so "unchanged" is the whole assertion — and the failed upload's own bytes are gone.
+    await expect(upload(failing, 11)).rejects.toThrow(/settings write failed/);
+    const settledAfterFailure = await runScopedOn(appDb, ctx(tenantB), (db) =>
+      readCompanySettings(db, tenantB),
+    );
+    expect(settledAfterFailure.logoKey).toBe(live);
+    expect(await Bun.file(`${dir}/${live}`).bytes()).toEqual(liveBytes);
+    expect(await mine()).toEqual([live]);
+
+    // Two overlapping uploads: each writes its own file, one row wins, and the loser's bytes are
+    // dropped rather than accumulating. Whichever committed last is the one the settings name.
+    await Promise.all([upload(appDb, 12), upload(appDb, 13)]);
+    const settled = await runScopedOn(appDb, ctx(tenantB), (db) =>
+      readCompanySettings(db, tenantB),
+    );
+    expect(await mine()).toEqual([settled.logoKey ?? ""]);
+    await clearCompanyLogo(ctx(tenantB), appDb);
+    expect(await mine()).toEqual([]);
+  });
+
+  // The one state where "did this upload's bytes end up referenced?" is a real question: a
+  // connection lost at COMMIT reports a failure for a transaction the server kept. The row then
+  // names the file this request wrote, and treating the failure as proof that nothing points at it
+  // deletes the live letterhead — after which every document renders without one and nothing says
+  // why.
+  //
+  // Forced exactly: the update hook applies the write with a superuser client and THEN throws, so
+  // the settings really do name the new key while the caller really does see a failure.
+  test("keeps its bytes when the row that names them may have committed", async () => {
+    const dir = `${config.documentsStorageDir}/company`;
+    const mine = async () =>
+      (await readdir(dir)).filter((f) => f.startsWith(`${tenantB}-logo`));
+    for (const f of await mine()) await rm(`${dir}/${f}`, { force: true });
+    const png = [
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48,
+      0x44, 0x52, 0, 0, 0, 10, 0, 0, 0, 10, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42,
+      0x60, 0x82,
+    ];
+    // The write the caller never sees succeed, and the row every later read then returns. Doctoring
+    // the read is what makes this deterministic: writing it for real from a second connection would
+    // block on the row lock the failing transaction is still holding.
+    let committedKey: string | null = null;
+    const committing = appDb.$extends({
+      query: {
+        tenant: {
+          update({ args }) {
+            const settings = (args.data as { settings?: unknown }).settings as
+              | { company?: { logoKey?: string | null } }
+              | undefined;
+            committedKey = settings?.company?.logoKey ?? null;
+            throw new Error("connection lost at commit");
+          },
+          async findUnique({ args, query }) {
+            const row = (await query(args)) as {
+              settings?: Record<string, unknown>;
+            } | null;
+            if (!committedKey) return row;
+            const company = (row?.settings?.company ?? {}) as Record<
+              string,
+              unknown
+            >;
+            return {
+              ...row,
+              settings: {
+                ...row?.settings,
+                company: { ...company, logoKey: committedKey },
+              },
+            };
           },
         },
       },
@@ -1927,90 +2135,25 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
           size: png.length,
           arrayBuffer: async () => new Uint8Array(png).buffer as ArrayBuffer,
         },
-        failing,
+        committing,
       ),
-    ).rejects.toThrow(/settings write failed/);
-    expect(await Bun.file(`${dir}/${key}`).text()).toBe("OLD-LOGO");
-    const litter = (await readdir(dir)).filter((f) => f.startsWith(`${key}.`));
-    expect(litter.filter((f) => f.endsWith(".prev"))).toEqual([]);
-    expect(litter.filter((f) => f.endsWith(".part"))).toEqual([]);
+    ).rejects.toThrow(/connection lost/);
 
-    // …and the SUCCESS path leaves nothing behind either: the set-aside copy is only insurance, and
-    // insurance that is never collected is litter that grows with every upload.
-    const saved = await setCompanyLogo(
-      ctx(tenantB),
-      {
-        type: "image/png",
-        size: png.length,
-        arrayBuffer: async () => new Uint8Array(png).buffer as ArrayBuffer,
-      },
-      appDb,
-    );
-    expect(saved.logoKey).toBe(key);
-    expect(
-      (await readdir(dir)).filter(
-        (f) =>
-          f.startsWith(`${key}.`) &&
-          (f.endsWith(".prev") || f.endsWith(".part")),
-      ),
-    ).toEqual([]);
-
-    // A FIRST upload whose row does not commit must leave no file at all: there is no previous
-    // letterhead to go back to, and keeping the new one would be an unreferenced logo on disk for a
-    // row that never existed. (Round 24 folded two restore branches into one and dropped this half.)
-    await rm(`${dir}/${key}`, { force: true });
-    await expect(
-      setCompanyLogo(
-        ctx(tenantB),
-        {
-          type: "image/png",
-          size: png.length,
-          arrayBuffer: async () => new Uint8Array(png).buffer as ArrayBuffer,
-        },
-        failing,
-      ),
-    ).rejects.toThrow(/settings write failed/);
-    expect(await Bun.file(`${dir}/${key}`).exists()).toBe(false);
-
-    // Two overlapping uploads of the SAME format share one path, so they have to serialise: one
-    // moving the file aside while the other sees the path free is how the committed version ends up
-    // describing the other request's image. The swap runs inside the per-tenant settings lock.
-    const upload = (marker: number) =>
-      setCompanyLogo(
-        ctx(tenantB),
-        {
-          type: "image/png",
-          size: png.length,
-          arrayBuffer: async () =>
-            new Uint8Array([...png.slice(0, -1), marker]).buffer as ArrayBuffer,
-        },
-        appDb,
-      );
-    // Both are valid PNGs by structure; only the last byte differs, so whichever committed last is
-    // identifiable from the file itself.
-    await Promise.all([upload(0x82), upload(0x82)]);
-    const settled = await runScopedOn(appDb, ctx(tenantB), (db) =>
-      readCompanySettings(db, tenantB),
-    );
-    expect(settled.logoKey).toBe(key);
-    expect(await Bun.file(`${dir}/${key}`).exists()).toBe(true);
-    expect(
-      (await readdir(dir)).filter(
-        (f) =>
-          f.startsWith(`${key}.`) &&
-          (f.endsWith(".prev") || f.endsWith(".part")),
-      ),
-    ).toEqual([]);
-    await rm(`${dir}/${key}`, { force: true });
+    // The row kept the write, so the file it names has to still be there.
+    expect(committedKey).not.toBeNull();
+    expect(await mine()).toEqual([committedKey ?? ""]);
+    for (const f of await mine()) await rm(`${dir}/${f}`, { force: true });
   });
 
   // An operator asking for the logo to be gone means gone: clearing the key alone left the image on
-  // disk and in every backup taken afterwards. And a PNG replaced by a JPEG writes a NEW path, so
-  // the old extension's file is referenced by nothing and kept forever.
+  // disk and in every backup taken afterwards. And every upload writes a NEW path, so the file the
+  // previous one wrote is referenced by nothing the moment the row commits — kept forever unless
+  // something drops it.
   test("removes the file a logo no longer references", async () => {
     const dir = `${config.documentsStorageDir}/company`;
-    const pngKey = `${tenantB}-logo.png`;
-    const jpgKey = `${tenantB}-logo.jpg`;
+    const mine = async () =>
+      (await readdir(dir)).filter((f) => f.startsWith(`${tenantB}-logo`));
+    for (const f of await mine()) await rm(`${dir}/${f}`, { force: true });
     const png = [
       0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48,
       0x44, 0x52, 0, 0, 0, 10, 0, 0, 0, 10, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42,
@@ -2020,7 +2163,7 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 11, 8, 0, 10, 0, 10, 0,
       0, 0, 0xff, 0xd9,
     ];
-    const upload = (type: string, body: number[]) =>
+    const upload = (type: string, body: number[], client = appDb) =>
       setCompanyLogo(
         ctx(tenantB),
         {
@@ -2028,22 +2171,21 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
           size: body.length,
           arrayBuffer: async () => new Uint8Array(body).buffer as ArrayBuffer,
         },
-        appDb,
+        client,
       );
 
-    await upload("image/png", png);
-    expect(await Bun.file(`${dir}/${pngKey}`).exists()).toBe(true);
-    // Same format: ONE path, rewritten in place. Removing "the previous key" here would delete the
-    // letterhead that was just installed.
-    await upload("image/png", png);
-    expect(await Bun.file(`${dir}/${pngKey}`).exists()).toBe(true);
-    // Format change: the new path is written and the old one must not survive it.
-    await upload("image/jpeg", jpg);
-    expect(await Bun.file(`${dir}/${jpgKey}`).exists()).toBe(true);
-    expect(await Bun.file(`${dir}/${pngKey}`).exists()).toBe(false);
-    // A failure BEFORE anything is published — the lock, or the read that precedes the publish —
-    // has nothing of this request's on disk to undo. The rollback used to remove "the new file"
-    // unconditionally, which over a database hiccup deleted the live letterhead the row still names.
+    const first = await upload("image/png", png);
+    expect(await mine()).toEqual([first.logoKey ?? ""]);
+    // Same format, and still a different file: the one it replaced is gone, and exactly one is left.
+    const second = await upload("image/png", png);
+    expect(second.logoKey).not.toBe(first.logoKey);
+    expect(await mine()).toEqual([second.logoKey ?? ""]);
+    // Format change: same answer, which is the point of asking about references rather than paths.
+    const third = await upload("image/jpeg", jpg);
+    expect(await mine()).toEqual([third.logoKey ?? ""]);
+
+    // A failure BEFORE the settings can even be read — the lock, or that read — with this request's
+    // bytes already on disk. It must drop its own file and leave the live one alone.
     const failsBeforePublish = appDb.$extends({
       query: {
         tenant: {
@@ -2054,17 +2196,9 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       },
     }) as unknown as typeof appDb;
     await expect(
-      setCompanyLogo(
-        ctx(tenantB),
-        {
-          type: "image/jpeg",
-          size: jpg.length,
-          arrayBuffer: async () => new Uint8Array(jpg).buffer as ArrayBuffer,
-        },
-        failsBeforePublish,
-      ),
+      upload("image/jpeg", jpg, failsBeforePublish as typeof appDb),
     ).rejects.toThrow();
-    expect(await Bun.file(`${dir}/${jpgKey}`).exists()).toBe(true);
+    expect(await mine()).toEqual([third.logoKey ?? ""]);
 
     // The ORDER: file after row, never before. A clear whose row write fails must leave the file
     // alone — the settings still name it, and a logo the settings name has to be on disk.
@@ -2078,9 +2212,9 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       },
     }) as unknown as typeof appDb;
     await expect(clearCompanyLogo(ctx(tenantB), failing)).rejects.toThrow();
-    expect(await Bun.file(`${dir}/${jpgKey}`).exists()).toBe(true);
+    expect(await mine()).toEqual([third.logoKey ?? ""]);
     // …and clearing removes what is left.
     await clearCompanyLogo(ctx(tenantB), appDb);
-    expect(await Bun.file(`${dir}/${jpgKey}`).exists()).toBe(false);
+    expect(await mine()).toEqual([]);
   });
 });

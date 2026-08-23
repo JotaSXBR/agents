@@ -598,6 +598,7 @@
       "errorTitle": "Este documento não renderiza",
       "title": "Prévia do documento"
     },
+    "refreshError": "Não foi possível atualizar esta página.",
     "refsError": "Não foi possível verificar quais agentes usam este modelo.",
     "revoke": "Revogar",
     "revoked": "Revogado.",

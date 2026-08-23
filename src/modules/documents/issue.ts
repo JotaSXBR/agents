@@ -423,6 +423,39 @@ async function finish(
   const stored = row.snapshot as DocumentSnapshot;
   const style = parseDocumentStyle(stored.style);
   const { logo } = await readRenderContext(ctx, base);
+  const meta = {
+    number: numberLabel,
+    date: formatDate(printedDate(stored), style.locale),
+    title: row.title,
+  };
+
+  // Asked again, HERE, because the answer expires. The gate before the insert used the logo that
+  // was on disk then, and this is a different moment: a PENDING row can be adopted by a retry long
+  // afterwards. Everything else the render uses is frozen in the snapshot, so the letterhead is the
+  // one input that can have changed — and for a template whose only content IS the letterhead,
+  // changed means there is nothing left to draw.
+  //
+  // Refused instead of published, even though the number is already spent: the row stays PENDING,
+  // so nothing was delivered and restoring the logo is all a retry needs. Publishing would freeze a
+  // numbered blank page, and an issued document is immutable.
+  if (
+    !documentDraws({
+      blocks: stored.blocks,
+      fields: stored.fields,
+      style,
+      values: stored.values,
+      company: stored.company,
+      hasLogo: logo !== null,
+      meta,
+    })
+  ) {
+    throw new AppError(
+      "this document would be blank: with the letterhead now missing, no block prints anything.",
+      409,
+      "errors.documentWouldBeBlank",
+    );
+  }
+
   const buffer = await renderDocumentPdf({
     blocks: stored.blocks,
     fields: stored.fields,
@@ -433,11 +466,7 @@ async function finish(
     // JSON column. It only matters on a retry that re-renders, and a letterhead swapped in that
     // window is the operator's own change taking effect.
     logo,
-    meta: {
-      number: numberLabel,
-      date: formatDate(printedDate(stored), style.locale),
-      title: row.title,
-    },
+    meta,
   });
   const key = storageKey(tenantId, row.id);
   // Written to a temporary name first. Two callers holding the same idempotency key can both find

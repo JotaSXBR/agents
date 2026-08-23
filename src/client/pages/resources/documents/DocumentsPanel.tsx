@@ -66,10 +66,17 @@ export function DocumentsPanel() {
   const deleteModal = useModalController<{ id: string; name: string }>();
   const confirm = useModalController<ConfirmPayload>();
 
-  // `loading` is the FIRST load only. Every handler here reloads on success, and the company card
-  // sits inside a boundary keyed on this flag — so a shared flag made deleting a template unmount
-  // the profile editor and discard whatever the operator had typed into it, over an action that had
-  // nothing to do with it. A refresh replaces the data underneath; it does not take the screen away.
+  // `loading` and `error` are both the FIRST load only, and for one reason: this panel reloads
+  // itself constantly — after a template is saved or deleted, after a starter is used, whenever the
+  // operator switches language — while the company profile below is an open form somebody may be
+  // typing into. The card sits inside a boundary keyed on these flags, so either one taking the
+  // screen away discards the edit and the guard that would have warned about leaving it, over an
+  // action that had nothing to do with it. A refresh replaces the data underneath; it does not take
+  // the screen away, and a refresh that FAILS says so without taking it away either.
+  //
+  // It means "a load has SUCCEEDED", not "a load has finished": set after the setters below, not in
+  // `finally`. A failed first load leaves nothing on screen, and there the retry card IS the answer
+  // — including for its own retry, which must show a skeleton rather than an empty account.
   const loadedOnce = useRef(false);
   // Which load is the CURRENT one. `load` is re-created when the operator switches language, and the
   // starters are the one thing here whose content is locale-specific — so two loads can be in flight
@@ -87,6 +94,19 @@ export function DocumentsPanel() {
     companyWrites.current++;
     setCompany(next);
   }, []);
+  // Where a failed load is reported, which depends entirely on whether there is anything on screen
+  // to lose. With nothing loaded, the retry card is the only thing that can say the panel is empty
+  // because a request failed rather than because the account is.
+  const failed = useCallback(() => {
+    if (loadedOnce.current) {
+      showToast(
+        t("documents.refreshError", "Could not refresh this page."),
+        "error",
+      );
+      return;
+    }
+    setError(true);
+  }, [showToast, t]);
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
     const writes = companyWrites.current;
@@ -110,7 +130,7 @@ export function DocumentsPanel() {
       // be writing an answer to a question nobody is asking any more.
       if (!current()) return;
       if (list.error || !list.data || settings.error) {
-        setError(true);
+        failed();
         return;
       }
       setTemplates([...list.data.templates]);
@@ -123,17 +143,15 @@ export function DocumentsPanel() {
       }
       setIssued(issuedRes.data ? [...issuedRes.data.documents] : []);
       setIssuedError(!!issuedRes.error);
+      loadedOnce.current = true;
     } catch {
-      if (current()) setError(true);
+      if (current()) failed();
     } finally {
-      if (current()) {
-        loadedOnce.current = true;
-        setLoading(false);
-      }
+      if (current()) setLoading(false);
     }
     // Reloads when the operator switches language: the starters are the one thing on this panel
     // whose CONTENT is locale-specific.
-  }, [starterLocale]);
+  }, [starterLocale, failed]);
 
   useEffect(() => {
     void load();

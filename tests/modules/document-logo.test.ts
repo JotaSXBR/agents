@@ -3,11 +3,10 @@ import {
   LOGO_EXT_BY_TYPE,
   LOGO_MAX_BYTES,
   logoBytesLookLike,
+  logoKeyFor,
   logoPixels,
-  logoRollbackAction,
   setCompanyLogo,
 } from "@/modules/documents/company";
-import type { CompanySettings } from "@/modules/tenant-settings/service";
 
 // The letterhead logo is decoded on the SERVER, by @react-pdf/renderer, not by a browser. That is
 // what makes the label on an upload untrustworthy in a way it usually is not: a mislabelled file
@@ -178,47 +177,26 @@ describe("setCompanyLogo", () => {
   });
 });
 
-// The rollback of a failed upload runs AFTER its own transaction ended, so the lock it published
-// under is gone and the state it means to undo may not be the state on disk any more. That makes
-// "should I undo?" a decision with three answers rather than a cleanup with two.
-describe("logoRollbackAction", () => {
-  const block = (over: Partial<CompanySettings> = {}): CompanySettings =>
-    ({
-      name: "",
-      document: "",
-      address: "",
-      phone: "",
-      email: "",
-      website: "",
-      logoKey: "1-logo.png",
-      logoVersion: 100,
-      ...over,
-    }) as CompanySettings;
-
-  test("puts the previous letterhead back when nothing else has written", () => {
-    expect(logoRollbackAction(block(), block(), true)).toBe("restore");
+// The invariant the whole upload path now rests on: a replacement is a NEW FILE, never a write over
+// the one the settings currently name.
+//
+// It is what removed the machinery that used to be here — a copy-aside, a rename over the live
+// path, and a rollback deciding between putting the copy back, deleting what it wrote and doing
+// nothing, from outside the lock it published under. Three review rounds went into that decision,
+// and the third found a state it could not answer: two uploads whose row writes both failed, whose
+// compensations ran in the wrong order, left an uncommitted image live while the settings still
+// described the old one. None of it is reachable from a name nobody else can be holding.
+describe("logoKeyFor", () => {
+  test("never hands out the same name twice", () => {
+    const keys = new Set(
+      Array.from({ length: 50 }, () => logoKeyFor(1n, "png")),
+    );
+    expect(keys.size).toBe(50);
   });
 
-  // No previous file means the bytes we wrote belong to a row that never committed: leaving them
-  // keeps an unreferenced letterhead on disk forever.
-  test("removes its own bytes when there was nothing to put back", () => {
-    expect(logoRollbackAction(block(), block(), false)).toBe("remove");
-  });
-
-  // The case the lock exists for: an upload that was waiting on it published and committed while
-  // this one was failing. Restoring over that leaves the committed logoKey/logoVersion describing
-  // the wrong image, and the remove branch deletes the letterhead that just won.
-  test("does nothing once another upload has committed", () => {
-    const after = block({ logoVersion: 101 });
-    expect(logoRollbackAction(block(), after, true)).toBe("none");
-    expect(logoRollbackAction(block(), after, false)).toBe("none");
-  });
-
-  // And when the publish never ran — a failure in the lock or in the read that precedes it — there
-  // is nothing of ours on disk at all. The remove branch would then delete a live logo this request
-  // never touched, over a database hiccup.
-  test("does nothing when nothing was ever published", () => {
-    expect(logoRollbackAction(null, block(), false)).toBe("none");
-    expect(logoRollbackAction(null, block(), true)).toBe("none");
+  test("still says which format it is, and whose it is", () => {
+    const key = logoKeyFor(7n, "jpg");
+    expect(key.endsWith(".jpg")).toBe(true);
+    expect(key.startsWith("7-logo-")).toBe(true);
   });
 });

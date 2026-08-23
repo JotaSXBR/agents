@@ -595,6 +595,7 @@
       "errorTitle": "This document does not render",
       "title": "Document preview"
     },
+    "refreshError": "Could not refresh this page.",
     "refsError": "Could not check which agents use this template.",
     "revoke": "Revoke",
     "revoked": "Revoked.",
