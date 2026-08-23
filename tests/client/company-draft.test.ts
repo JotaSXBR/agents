@@ -3,6 +3,7 @@ import type { CompanyProfile } from "@/client/pages/resources/documents/CompanyP
 import {
   afterCompanySave,
   blankCompanyDraft,
+  companyChanges,
   companyToDraft,
   emptyCompanyForm,
   nextCompanyDraft,
@@ -122,6 +123,28 @@ describe("nextCompanyDraft", () => {
   });
 });
 
+// A PUT carries what this form CHANGED. The whole draft would carry back everything it was loaded
+// with, so a field another writer updated after this form opened is overwritten with a copy of the
+// value it replaced — by an operator who was editing a different field and never saw theirs.
+describe("companyChanges", () => {
+  test("sends the edited fields and nothing else", () => {
+    const seeded = seedCompanyDraft(stored());
+    const edited = {
+      ...seeded,
+      draft: { ...seeded.draft, name: "ACME Ltda ME", phone: "" },
+    };
+    expect(companyChanges(edited)).toEqual({
+      name: "ACME Ltda ME",
+      // Clearing a field is an edit, and has to survive the filter that drops untouched ones.
+      phone: "",
+    });
+  });
+
+  test("an untouched form sends nothing", () => {
+    expect(companyChanges(seedCompanyDraft(stored()))).toEqual({});
+  });
+});
+
 // A save is the other event that moves the baseline. Without it the form is permanently "typed in"
 // after its FIRST successful save — the text matches what the server stores, the baseline still
 // holds what it stored before — so it stops adopting anything ever again, and the next Save
@@ -145,6 +168,20 @@ describe("afterCompanySave", () => {
     });
     expect(nextCompanyDraft(saved, elsewhere).draft.phone).toBe(
       "+55 11 3333-3333",
+    );
+  });
+
+  // The baseline moves by MERGE, not by adopting the server's echo. The echo carries a field
+  // another writer changed while this request was in flight; adopting it as the baseline would mark
+  // that field as this operator's unsaved edit, freeze their stale copy in the form, and send it
+  // back on the next save — the overwrite the partial payload exists to avoid.
+  test("a field someone else changed meanwhile is not frozen into the form", () => {
+    const seeded = seedCompanyDraft(stored());
+    const edited = { ...seeded, draft: { ...seeded.draft, name: "ACME ME" } };
+    const saved = afterCompanySave(edited, { name: "ACME ME" });
+    const elsewhere = stored({ name: "ACME ME", phone: "+55 11 4444-4444" });
+    expect(nextCompanyDraft(saved, elsewhere).draft.phone).toBe(
+      "+55 11 4444-4444",
     );
   });
 

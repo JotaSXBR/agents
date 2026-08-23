@@ -304,8 +304,6 @@ export async function updateCompanySettings(
   );
 }
 
-// Written only by the logo upload/clear path, after the bytes are on disk (or gone from it). The
-// version moves with every write, including a replacement that lands on the same key.
 // Run work under the same per-tenant lock the writers take, with the current company block in hand.
 //
 // For COMPENSATIONS. A rollback runs after its own transaction is over, so by the time it executes
@@ -325,6 +323,8 @@ export async function withCompanyLock<T>(
   });
 }
 
+// Written only by the logo upload/clear path, after the bytes are on disk (or gone from it). The
+// version moves with every write, including a replacement that lands on the same key.
 export async function setCompanyLogoKey(
   ctx: TenantContext,
   logoKey: string | null,

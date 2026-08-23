@@ -653,6 +653,7 @@
       "agent": "Agent",
       "allTools": "(all tools)",
       "count": "{{n}} tools",
+      "documents": "Documents",
       "empty": "No tools granted yet — the agent can only chat.",
       "graphError": "Couldn't render the graph here. Use \"Copy as Mermaid\" and paste it into a Mermaid viewer.",
       "graphLegend": "The agent's LangGraph runtime: START → agent ⇄ tools (ToolNode) → END, with each granted tool and knowledge base hanging off the ToolNode.",

@@ -3,10 +3,9 @@ import type { PrismaClient } from "@/../generated/prisma/client";
 import basePrisma from "@/api/lib/prisma";
 import config from "@/config";
 import { AppError } from "@/lib/errors";
-import { runScopedOn, type TenantContext } from "@/lib/tenancy";
+import type { TenantContext } from "@/lib/tenancy";
 import {
   type CompanySettings,
-  readCompanySettings,
   setCompanyLogoKey,
   withCompanyLock,
 } from "@/modules/tenant-settings/service";
@@ -233,12 +232,10 @@ export async function setCompanyLogo(
         await rename(temp, path);
       },
     );
-    // AFTER the row commits: the old key is no longer referenced, so its file is disk nobody will
-    // ever read again. Only when the FORMAT changed — a same-format replacement wrote over the one
-    // path, and removing it here would delete the letterhead that was just installed. Read from
-    // under the lock, so it names the file this write actually superseded.
-    const previousKey = published.before?.logoKey;
-    if (previousKey && previousKey !== key) await removeLogoFile(previousKey);
+    // AFTER the row commits: the key this write superseded is referenced by nothing, so its file is
+    // disk nobody will ever read again. Read from under the lock, so it names the file this write
+    // actually replaced.
+    await dropUnreferencedLogo(ctx, base, published.before?.logoKey ?? null);
     return saved;
   } catch (e) {
     // The transaction rolled back (the publish itself failed, or the row write did), so the file
@@ -279,17 +276,21 @@ export async function clearCompanyLogo(
   ctx: TenantContext,
   base: PrismaClient = basePrisma,
 ): Promise<CompanySettings> {
-  if (ctx.tenantId === null) throw new AppError("tenant required", 400);
-  const tenantId = ctx.tenantId;
-  const before = await runScopedOn(base, ctx, (db) =>
-    readCompanySettings(db, tenantId),
+  const removed: { key: string | null } = { key: null };
+  const cleared = await setCompanyLogoKey(
+    ctx,
+    null,
+    base,
+    Date.now(),
+    async (current) => {
+      removed.key = current.logoKey;
+    },
   );
-  const cleared = await setCompanyLogoKey(ctx, null, base);
   // AFTER the row commits, never before: removing first and failing the write would leave the
   // settings pointing at a file that is gone, which is the one state every render has to handle and
   // none of them should have to. Clearing the key alone left the image on disk and in every backup
   // taken after it — an operator asking for it to be gone means gone.
-  await removeLogoFile(before.logoKey);
+  await dropUnreferencedLogo(ctx, base, removed.key);
   return cleared;
 }
 
@@ -319,6 +320,29 @@ export function logoRollbackAction(
 ): "restore" | "remove" | "none" {
   if (current.logoVersion !== before?.logoVersion) return "none";
   return hadPrevious ? "restore" : "remove";
+}
+
+// Delete the file a key names, once nothing refers to it any more.
+//
+// Both callers reach here AFTER their own transaction committed, so the lock they held is gone and
+// the key they are about to delete may have been re-published by someone else in between: two
+// cross-format uploads racing (A commits png→jpg, B commits jpg→png, A then deletes B's live png),
+// or a clear followed immediately by an upload. The committed state is the only authority on what
+// is still referenced, and reading it under the lock is what stops a delete from landing between
+// the read and the write that re-adopts the key.
+//
+// Best-effort past that point: the row no longer refers to the file, so a failure here costs disk
+// and nothing else — refusing the operation over it would be worse.
+async function dropUnreferencedLogo(
+  ctx: TenantContext,
+  base: PrismaClient,
+  key: string | null,
+): Promise<void> {
+  if (!key) return;
+  await withCompanyLock(ctx, base, async (current) => {
+    if (current.logoKey === key) return;
+    await removeLogoFile(key);
+  }).catch(() => undefined);
 }
 
 // The file a key names, if it names one. Best-effort by design: the row no longer references it, so

@@ -118,6 +118,25 @@ export function buildGroups(
     });
   }
 
+  // Document templates: one item per granted template, named by the TOOL the agent will call. A
+  // grant whose template was deleted, or which is disabled, still resolves to nothing here for the
+  // same reason a stale MCP or integration grant does — the map shows what the agent can call.
+  const documentNames = grants
+    .filter((g) => g.source === "DOCUMENT")
+    .map(
+      (g) =>
+        catalog.documentTemplates.find((d) => d.id === g.documentTemplateId)
+          ?.toolName,
+    )
+    .filter((n): n is string => !!n);
+  if (documentNames.length > 0) {
+    groups.push({
+      key: "document",
+      label: t("editor.capabilities.documents", "Documents"),
+      items: documentNames,
+    });
+  }
+
   return groups;
 }
 

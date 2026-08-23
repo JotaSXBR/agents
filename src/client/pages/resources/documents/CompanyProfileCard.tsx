@@ -6,6 +6,7 @@ import { api } from "@/client/lib/api";
 import { mediaFetch } from "@/client/lib/media";
 import {
   afterCompanySave,
+  companyChanges,
   emptyCompanyForm,
   COMPANY_FIELDS as FIELDS,
   nextCompanyDraft,
@@ -86,8 +87,9 @@ export function CompanyProfileCard({
 
   async function save() {
     setSaving(true);
-    // What this request carries, captured before the await: the operator can type during it.
-    const sent = draft;
+    // Only what this form changed, captured before the await: the operator can type during it, and
+    // a field they never touched is not this request's to write.
+    const sent = companyChanges(form);
     try {
       const { data, error } =
         await api.api.v1["tenant-settings"].company.put(sent);

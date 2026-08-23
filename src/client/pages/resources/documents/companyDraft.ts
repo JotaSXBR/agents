@@ -51,6 +51,21 @@ export function emptyCompanyForm(): CompanyDraftState {
   return { draft: blankCompanyDraft(), seededFrom: blankCompanyDraft() };
 }
 
+// What a save should SEND: the fields this form actually changed, and no others.
+//
+// The whole draft would carry back everything it was loaded with, including a field another writer
+// updated after this form was opened — a PUT that overwrites their value with a copy of the one it
+// replaced, while the operator was editing something else entirely. Every field on the endpoint is
+// optional and the service merges, so sending only what changed is what makes two people editing
+// different halves of the profile a non-event.
+export function companyChanges(form: CompanyDraftState): Partial<CompanyDraft> {
+  return Object.fromEntries(
+    COMPANY_FIELDS.filter((f) => form.draft[f] !== form.seededFrom[f]).map(
+      (f) => [f, form.draft[f]],
+    ),
+  );
+}
+
 // What the form holds once a save succeeds: the same text, now baselined on what was SENT.
 //
 // Without this the form is permanently "typed in" after its first save — the text matches what the
@@ -62,9 +77,14 @@ export function emptyCompanyForm(): CompanyDraftState {
 // during the request stay, and stay marked as unsaved.
 export function afterCompanySave(
   current: CompanyDraftState,
-  sent: CompanyDraft,
+  sent: Partial<CompanyDraft>,
 ): CompanyDraftState {
-  return { ...current, seededFrom: sent };
+  // MERGED over the previous baseline, not taken from the server's echo. The echo carries fields
+  // another writer changed in the meantime, and adopting those as the baseline would mark them as
+  // this operator's unsaved edits — freezing their stale copy in the form and sending it back on
+  // the next save. What this request knows is what it changed; the rest stays where it was, so the
+  // next arrival is free to land.
+  return { ...current, seededFrom: { ...current.seededFrom, ...sent } };
 }
 
 // What the form becomes when a `company` arrives: the operator's unsaved text if there is any,

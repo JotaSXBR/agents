@@ -656,6 +656,7 @@
       "agent": "Agente",
       "allTools": "(todas as ferramentas)",
       "count": "{{n}} ferramentas",
+      "documents": "Documentos",
       "empty": "Nenhuma ferramenta concedida ainda — o agente só conversa.",
       "graphError": "Não foi possível renderizar o grafo aqui. Tente abrir de novo.",
       "graphLegend": "O runtime LangGraph do agente: START → agente ⇄ ferramentas (ToolNode) → END, com cada ferramenta e base de conhecimento concedida saindo do ToolNode.",
