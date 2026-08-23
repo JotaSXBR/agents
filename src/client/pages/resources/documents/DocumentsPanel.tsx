@@ -71,7 +71,15 @@ export function DocumentsPanel() {
   // the profile editor and discard whatever the operator had typed into it, over an action that had
   // nothing to do with it. A refresh replaces the data underneath; it does not take the screen away.
   const loadedOnce = useRef(false);
+  // Which load is the CURRENT one. `load` is re-created when the operator switches language, and the
+  // starters are the one thing here whose content is locale-specific — so two loads can be in flight
+  // with different answers to the same question, and the one that resolves LAST wins the screen. An
+  // older list landing after a newer one leaves the operator creating a template in the language
+  // they just switched away from, permanently and with no sign anything went wrong.
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    const current = () => seq === loadSeq.current;
     if (!loadedOnce.current) setLoading(true);
     setError(false);
     try {
@@ -87,6 +95,9 @@ export function DocumentsPanel() {
       // rather than rejecting, so an unchecked call reads as empty data: a settings failure rendered
       // a blank editable profile over settings that may well have values, and a starters or
       // documents failure showed "none" for a list that failed to load.
+      // Superseded: a newer load started while this one was in flight, so every setter below would
+      // be writing an answer to a question nobody is asking any more.
+      if (!current()) return;
       if (list.error || !list.data || settings.error) {
         setError(true);
         return;
@@ -98,10 +109,12 @@ export function DocumentsPanel() {
       setIssued(issuedRes.data ? [...issuedRes.data.documents] : []);
       setIssuedError(!!issuedRes.error);
     } catch {
-      setError(true);
+      if (current()) setError(true);
     } finally {
-      loadedOnce.current = true;
-      setLoading(false);
+      if (current()) {
+        loadedOnce.current = true;
+        setLoading(false);
+      }
     }
     // Reloads when the operator switches language: the starters are the one thing on this panel
     // whose CONTENT is locale-specific.

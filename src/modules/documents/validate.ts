@@ -178,9 +178,21 @@ export function authoredStyleProblem(rawStyle: unknown): string | null {
   const parsed = documentStyleSchema.partial().safeParse(styleIn);
   if (!parsed.success) return `style: ${issues(parsed.error)}`;
   const dropped = droppedKey(styleIn, parsed.data, "");
-  return dropped
-    ? `style: "${dropped}" is not a style property, so it would be stored and never take effect. Check the spelling against document_template_schema, or remove it.`
-    : null;
+  if (dropped) {
+    return `style: "${dropped}" is not a style property, so it would be stored and never take effect. Check the spelling against document_template_schema, or remove it.`;
+  }
+  // The style the CALLER sent, checked for printability here rather than through the authored-halves
+  // pass: a partial style patch is never marked as an authored half (the value validated there is
+  // the patch merged over the STORED style, which the caller did not write), so this is the only
+  // place that sees `footerText` as something a caller just typed.
+  for (const [key, value] of Object.entries(
+    (styleIn ?? {}) as Record<string, unknown>,
+  )) {
+    if (typeof value !== "string") continue;
+    const problem = unprintableProblem(value, `style.${key}`);
+    if (problem) return problem;
+  }
+  return null;
 }
 
 export interface ParsedAuthoredTemplate {

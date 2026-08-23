@@ -5,6 +5,7 @@ import { encryptJson } from "@/api/lib/crypto";
 import {
   AGENT_EXPORT_KIND,
   AGENT_EXPORT_VERSION,
+  EXPORTED_COMPONENT_KEYS,
 } from "@/modules/agents/transfer";
 import { documentStarter } from "@/modules/documents/starters";
 import { createDocumentTemplate } from "@/modules/documents/templates";
@@ -97,6 +98,53 @@ describe("MCP agent-builder gate (no DB)", () => {
         { name: "OpenAI", kind: "openai" },
       ]);
     }
+  });
+
+  // The preview has to disclose EVERY component array the apply can create — the apply reuses or
+  // creates each of them before it assigns the grants, so an omitted one is the dry run standing in
+  // for a different operation than the one that will run.
+  //
+  // Compared against the export schema's own keys rather than a list written here: the way this
+  // broke was a component array being added to the bundle and not to the preview, and a hand-written
+  // list in the test would have been the same omission a second time.
+  test("the preview counts every component array a bundle can carry", async () => {
+    const exp = {
+      version: AGENT_EXPORT_VERSION,
+      kind: AGENT_EXPORT_KIND,
+      agent: {
+        name: "Com componentes",
+        systemPrompt: "hi",
+        modelConfig: {},
+        settings: {},
+        transferWithSummary: false,
+        businessHours: null,
+        followUpHours: null,
+        tools: [],
+        credentials: [],
+      },
+      components: {
+        httpTools: [],
+        mcpServers: [],
+        integrations: [],
+        knowledgeBases: [],
+        documentTemplates: [
+          {
+            name: "Orçamento",
+            slug: "orcamento_importado",
+            blocks: [{ id: "t", type: "text", text: "Olá." }],
+            fields: [],
+          },
+        ],
+      },
+    };
+    const r = await agentImport(principal({}), { export: exp });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const components = r.data.components as Record<string, number>;
+    expect(Object.keys(components).sort()).toEqual(
+      [...EXPORTED_COMPONENT_KEYS].sort(),
+    );
+    expect(components.documentTemplates).toBe(1);
   });
 });
 

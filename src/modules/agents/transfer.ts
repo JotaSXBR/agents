@@ -231,6 +231,14 @@ const exportedComponentsSchema = z.object({
   businessHours: z.array(exportedBusinessHoursSchema).optional(),
 });
 
+// Every component array a bundle can carry, named once. A dry run has to disclose all of them — the
+// apply creates or reuses each before it assigns the grants — and "the preview forgot the array that
+// was just added" is a hole nobody sees, because a preview that omits something looks like a preview
+// of a smaller change. Read from the schema so the list cannot drift from the bundle.
+export const EXPORTED_COMPONENT_KEYS = Object.keys(
+  exportedComponentsSchema.shape,
+) as (keyof z.infer<typeof exportedComponentsSchema>)[];
+
 export const agentExportSchema = z.object({
   version: z.literal(AGENT_EXPORT_VERSION),
   kind: z.literal(AGENT_EXPORT_KIND),

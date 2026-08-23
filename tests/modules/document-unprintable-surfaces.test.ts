@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { DOCUMENT_STYLE_DEFAULTS } from "@/modules/documents/blocks";
 import { formatMoney } from "@/modules/documents/format";
 import { unprintableCharacters } from "@/modules/documents/printable";
-import { templateMetadataProblem } from "@/modules/documents/templates";
+import {
+  patchedContent,
+  templateMetadataProblem,
+} from "@/modules/documents/templates";
 import {
   parseAuthoredTemplate,
   parseDocumentValues,
@@ -95,6 +98,48 @@ describe("every surface that prints refuses what cannot be printed", () => {
       });
     }
   }
+});
+
+// …and the WRITE PATHS that reach those surfaces, which is a different question from whether the
+// validator has the rule. A decision table over `parseAuthoredTemplate` proves the FUNCTION; it does
+// not prove that the paths a caller actually uses ask it. Both holes found in review were exactly
+// that: `blockText` (the console's ordinary save) and a partial `style` patch each leave their
+// authored-half flag FALSE, so the rule they pass through never looked at what the caller typed.
+describe("the write paths ask, not just the validator", () => {
+  const bad = "😀";
+
+  test("a blockText patch is caller text, whatever the blocks flag says", () => {
+    expect(() =>
+      patchedContent(
+        { blocks: [{ id: "t", type: "text", text: "ok" }], fields: [] },
+        { blockText: { t: `Olá ${bad}` } },
+      ),
+    ).toThrow(/blockText/);
+  });
+
+  test("a partial style patch is caller text too", () => {
+    expect(() =>
+      patchedContent(
+        { blocks: [{ id: "t", type: "text", text: "ok" }], fields: [] },
+        { style: { footerText: `Obrigado ${bad}` } },
+      ),
+    ).toThrow(/footerText/);
+  });
+
+  // …and neither refuses what the caller did NOT write: a stored value from a newer build has to
+  // stay editable, which is the reason those flags exist in the first place.
+  test("the same patch over stored text a newer build wrote still saves", () => {
+    expect(() =>
+      patchedContent(
+        {
+          blocks: [{ id: "t", type: "text", text: `de outro build ${bad}` }],
+          fields: [],
+          style: { footerText: `rodapé ${bad}` },
+        },
+        { blockText: { t: "texto novo" } },
+      ),
+    ).not.toThrow();
+  });
 });
 
 // The surfaces nobody authors, which is why they cannot be gated at a write.

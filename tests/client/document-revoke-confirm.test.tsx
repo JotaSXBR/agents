@@ -29,6 +29,8 @@ import { DocumentsPanel } from "@/client/pages/resources/documents/DocumentsPane
 
 const realFetch = globalThis.fetch;
 let posted: string[] = [];
+// Per-locale gates, so a test can make the OLD request resolve last.
+const holdStarters: Record<string, Promise<void> | undefined> = {};
 
 const json = (body: unknown) =>
   new Response(JSON.stringify(body), {
@@ -51,7 +53,12 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return json({ success: true });
   }
   if (url.pathname.endsWith("/document-templates/starters")) {
-    return json({ starters: [] });
+    const locale = url.searchParams.get("locale") ?? "";
+    const held = holdStarters[locale];
+    if (held) await held;
+    return json({
+      starters: [{ key: "quote", name: `starter-${locale}`, description: "" }],
+    });
   }
   if (url.pathname.endsWith("/document-templates"))
     return json({ templates: [] });

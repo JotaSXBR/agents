@@ -535,6 +535,14 @@ export function patchedContent(
   const blocks = patch.blockText
     ? applyBlockText(rawBlocks, patch.blockText)
     : rawBlocks;
+  // `blockText` is caller-written TEXT that does not make the blocks caller-authored (see below), so
+  // the authored-halves check below never sees it — and the console's ordinary save is exactly a
+  // blockText patch. Checked here, on the values as they arrived, which is the only place that knows
+  // they came from a caller at all.
+  for (const [id, text] of Object.entries(patch.blockText ?? {})) {
+    const problem = unprintableProblem(text, `blockText."${id}"`);
+    if (problem) throw invalidDocumentTemplate(problem);
+  }
   const rawFields = (patch.fields ?? stored?.fields ?? []) as unknown[];
   // `blockText` does NOT make the blocks caller-authored: it writes strings into blocks that were
   // already there and can introduce no property of its own. Counting it here is what would make a

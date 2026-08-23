@@ -303,11 +303,16 @@ export async function agentImport(
         name: c.name,
         kind: c.kind,
       })),
+      // Every component array the apply can CREATE, counted. A preview that omits one approves a
+      // write the operator was never shown: the apply reuses or creates the templates before it
+      // assigns the grants, so leaving them out here is the dry run answering about a different
+      // operation than the one it is standing in for.
       components: {
         httpTools: comps?.httpTools.length ?? 0,
         mcpServers: comps?.mcpServers.length ?? 0,
         integrations: comps?.integrations.length ?? 0,
         knowledgeBases: comps?.knowledgeBases.length ?? 0,
+        documentTemplates: comps?.documentTemplates?.length ?? 0,
         businessHours: comps?.businessHours?.length ?? 0,
       },
     });
