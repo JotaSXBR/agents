@@ -6,6 +6,13 @@
 -- migration that moves DATA across a tenant-scoped table, which this one does not.
 
 -- DropTable (the type goes after the column that still references it)
+--
+-- DROPPED, not archived, and that is a decision rather than an oversight: `quotes` had no UI, no
+-- agent-side generation and no way to deliver what it rendered, so nothing in the product was
+-- operating on those rows. An installation that scripted `POST /v1/quotes` itself is the case this
+-- destroys, and it is announced as a breaking change in the PR rather than smuggled through —
+-- keeping the table alive would mean carrying its RLS policy, its FK and the QuoteStatus enum
+-- through a deprecation nobody is consuming.
 DROP TABLE "quotes";
 DROP TYPE "QuoteStatus";
 

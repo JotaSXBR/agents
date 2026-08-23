@@ -126,6 +126,20 @@ const CASES: {
     company: FILLED_COMPANY,
   },
   {
+    // A company field holding only whitespace. Both the API and the console accept it, and
+    // `filter(Boolean)` used to count it as content — so a header-only document passed the gate,
+    // took a number, and reached the customer as a blank page. The renderer draws no glyph for a
+    // space, which is what makes this case a disagreement rather than a preference.
+    name: "a header whose only company field is whitespace",
+    blocks: [{ id: "h", type: "header" }],
+    company: { ...EMPTY_COMPANY, name: "   " } as CompanySettings,
+  },
+  {
+    name: "…and the same header once that field has a character in it",
+    blocks: [{ id: "h", type: "header" }],
+    company: { ...EMPTY_COMPANY, name: " A " } as CompanySettings,
+  },
+  {
     name: "a header with a title",
     blocks: [{ id: "h", type: "header", title: "Orçamento" }],
   },

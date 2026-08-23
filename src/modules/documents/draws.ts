@@ -72,20 +72,26 @@ export function documentDraws(input: DrawsInput): boolean {
         // After tokens: a block that is only `{{notes}}` draws nothing when notes was omitted.
         return text(block.text) !== "";
       case "header": {
-        const companyLine = [
+        // TRIMMED before it counts. `filter(Boolean)` keeps " ", and a company field holding one
+        // space is accepted by the API and by the console — so a document whose only visible block
+        // is a header would pass this gate on a value that prints nothing, take a number, and reach
+        // the customer as a blank page. The renderer joins these with a separator and draws no glyph
+        // for whitespace, so "has content" has to mean the same thing here as it does there.
+        const printable = (values: (string | null | undefined)[]) =>
+          values
+            .map((v) => v?.trim() ?? "")
+            .filter(Boolean)
+            .join("");
+        const companyLine = printable([
           input.company.name,
           input.company.document,
           input.company.address,
-        ]
-          .filter(Boolean)
-          .join("");
-        const contactLine = [
+        ]);
+        const contactLine = printable([
           input.company.phone,
           input.company.email,
           input.company.website,
-        ]
-          .filter(Boolean)
-          .join("");
+        ]);
         // `!== false` for both flags, because that is how the renderer reads them: a header that
         // says nothing about the logo still shows one.
         return Boolean(
