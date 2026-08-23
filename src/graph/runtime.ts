@@ -330,11 +330,25 @@ export async function runLoadedTurn(
     makeClient: params.deps?.makeClient,
     botToken: loaded.agentBotToken ?? undefined,
   });
-  // The two gates that stand between this turn and a post, asked as ONE question so neither post
-  // site can carry only half of them. `stillWanted` first: a run the command called off should not
-  // spend a Chatwoot round trip finding out whether it was also superseded.
+  // The question, and it is asked AT each outward write rather than somewhere upstream of it. Four
+  // review rounds found the same defect in four different places, and every one of them was an ask
+  // that sat next to its effect when it was written and then had a round trip grow between the two:
+  // the output guardrail, the supersede re-fetch, the speech normalizer, the synthesis call.
+  // Adjacency is not something a call site can be trusted to keep — it has to be where the question
+  // is asked.
+  const writeCalledOff = async (): Promise<boolean> =>
+    params.stillWanted !== null && !(await params.stillWanted());
+
+  // The two gates that stand between this turn and a post, and neither is the fence — the fences are
+  // the asks at the sends themselves. This is where a run that is already called off stops before
+  // spending the rest of the turn on nobody.
+  //
+  // `stillWanted` first, and that is not the cheap-question-first reflex: `shouldPost` CLAIMS the
+  // burst, advancing the handled watermark as its CAS. Asked the other way round, a retired run
+  // would declare a burst handled on its way to standing down — messages nothing ever answered,
+  // marked as if something had.
   const postBlocked = async (): Promise<"stale" | "superseded" | null> => {
-    if (params.stillWanted && !(await params.stillWanted())) return "stale";
+    if (await writeCalledOff()) return "stale";
     if (params.shouldPost && !(await params.shouldPost())) return "superseded";
     return null;
   };
@@ -467,7 +481,7 @@ export async function runLoadedTurn(
   const deliverText = async (
     text: string,
     voiceReply: boolean | null,
-  ): Promise<number> => {
+  ): Promise<number | "stale"> => {
     const wantAudio = shouldReplyWithAudio(
       loaded.ttsConfig.mode,
       params.userSentAudio ?? false,
@@ -500,6 +514,9 @@ export async function runLoadedTurn(
           deps: { fetchImpl: params.deps?.ttsFetch, normalizeSpeech },
           flow,
         });
+        // Synthesis is a network call of its own, and the speech normalizer above it is a MODEL
+        // call, so an answer taken before them is an answer about a different moment.
+        if (await writeCalledOff()) return "stale";
         if (tts) {
           await client.sendAudioMessage(
             conversationId,
@@ -524,6 +541,9 @@ export async function runLoadedTurn(
         );
       }
     }
+    // And again for the text path, which is reached either directly or after the whole TTS attempt
+    // above has failed and fallen through — the longest wait of the two.
+    if (await writeCalledOff()) return "stale";
     const balloons = await deliverReply(
       client,
       conversationId,
@@ -593,10 +613,13 @@ export async function runLoadedTurn(
       if (guardrailTripped(guarded)) turnState.pendingImages.length = 0;
       const screened = screenedText(guarded, line);
       if (screened === null) return;
-      deliveredBalloons = await deliverText(
-        screened,
-        await currentVoiceReply(),
-      );
+      const delivered = await deliverText(screened, await currentVoiceReply());
+      // The closing line the transfer already promised, and the one send this turn makes that no
+      // later gate can catch — it leaves before them. A run called off during the model call reaches
+      // exactly here, so this is where it stops. The transfer itself stays done: the tool ran, the
+      // conversation is the human queue's, and withholding the sentence is the part still ours.
+      if (delivered === "stale") return;
+      deliveredBalloons = delivered;
     } catch (e) {
       // Best-effort, the semantics the line had while the tool sent it. The transfer succeeded, so
       // branding the turn as errored would stamp lastError and announce "a human has to take over"
@@ -1002,6 +1025,8 @@ export async function runLoadedTurn(
     // callers key the error-cleared/answered bookkeeping off that word, and an image-only turn that
     // reported "empty" would leave a stale turn error on a conversation that was just answered.
     if (!reply) {
+      // Nothing has left this turn yet on this branch, so the whole thing stands down.
+      if (await writeCalledOff()) return "stale";
       const queued = turnState.pendingImages.length;
       const sent = await deliverPendingImages(
         client,
@@ -1021,20 +1046,30 @@ export async function runLoadedTurn(
           "send_image: nenhuma imagem foi entregue e o turno não tinha resposta em texto",
         );
       }
-      await applyDeferredResolve(client, conversationId, turnState, flow, {
-        tenantId,
-        instanceId,
-        base,
-        observed: recheck.observed,
-      });
+      // Skipped, not returned on: closing a conversation the operator has just cleared is a write
+      // of its own, and by here something may already have reached the customer — the outcome still
+      // has to describe that.
+      if (!(await writeCalledOff())) {
+        await applyDeferredResolve(client, conversationId, turnState, flow, {
+          tenantId,
+          instanceId,
+          base,
+          observed: recheck.observed,
+        });
+      }
       return sent || handedOff ? "posted" : "empty";
     }
 
     // The image lands before the text that talks about it, and before the TTS branch: an audio
     // reply must not swallow the attachment.
+    if (await writeCalledOff()) return "stale";
     await deliverPendingImages(client, conversationId, turnState, flow);
 
-    deliveredBalloons = await deliverText(reply, recheck.voiceReply);
+    const delivered = await deliverText(reply, recheck.voiceReply);
+    if (delivered === "stale") return "stale";
+    deliveredBalloons = delivered;
+    // Same rule as the branch above: the reply is out, the resolve is a separate write.
+    if (await writeCalledOff()) return "posted";
     await applyDeferredResolve(client, conversationId, turnState, flow, {
       tenantId,
       instanceId,

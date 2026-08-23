@@ -756,6 +756,70 @@ describe.skipIf(!dbUp)("debounce", () => {
     expect(await watermarkOf(811)).toBeNull();
   });
 
+  // The write AFTER the send, and the one the outcome must not follow. /reset landing while the
+  // reply is going out cannot un-send it — but the deferred resolve is a separate write, and closing
+  // a conversation the operator has just cleared and handed back to the agent is the attendance
+  // ended. So the resolve is skipped and the turn still reports what it delivered: a "stale" here
+  // would leave the watermark behind and hand the burst to a flush that answers it twice.
+  test("a reset landing on the reply keeps the reply and drops the resolve", async () => {
+    await seedConversation(849);
+    const thread = threadOf(849);
+    const row = await suDb.schedulerJob.create({
+      data: {
+        tenantId,
+        kind: "DEBOUNCE",
+        dedupeKey: debounceDedupeKey(thread),
+        status: "CLAIMED",
+        runAt: new Date(),
+        payload: { threadId: thread, agentBotId: 9, burstStartedAt: 1 },
+      },
+      select: { id: true, claimSeq: true },
+    });
+    const sent: Array<[number, string]> = [];
+    const toggles: Array<[number, string]> = [];
+    const calls = { getMessages: 0 };
+    const makeClient = makeResolveStub({
+      pages: [page([{ id: 1, content: "oi" }])],
+      sent,
+      calls,
+      toggles,
+    });
+    // The command lands ON the send: everything before it answered truthfully, and the resolve is
+    // the only write still ahead.
+    const client = await makeClient();
+    const holder = client as unknown as Record<
+      string,
+      (...a: never[]) => unknown
+    >;
+    const innerSend = holder.sendMessage?.bind(client);
+    holder.sendMessage = (async (...args: never[]) => {
+      await retireJobsByDedupeKey(
+        tenantId,
+        "DEBOUNCE",
+        debounceDedupeKey(thread),
+        suDb,
+      );
+      return innerSend?.(...args);
+    }) as (...a: never[]) => unknown;
+
+    const out = await flushDebounceJob({
+      job: { ...jobFor(849), id: row.id, claimSeq: row.claimSeq },
+      base: appDb,
+      deps: {
+        makeModel: () =>
+          new ResolveThenReplyModel("Fechado!") as unknown as BaseChatModel,
+        makeClient: async () => client,
+        checkpointer: new MemorySaver(),
+      },
+    });
+
+    expect(out).toEqual({ outcome: "done" });
+    // The reply reached the customer — it was already leaving when the command landed.
+    expect(sent).toEqual([[849, "Fechado!"]]);
+    // The close did not.
+    expect(toggles).toEqual([]);
+  });
+
   test("a human assignee closes the gate before any Chatwoot fetch", async () => {
     await seedConversation(802, { assigneeType: "User" });
     const sent: Array<[number, string]> = [];

@@ -1283,6 +1283,14 @@ export async function handoffConversation(
 // speak, which is nobody's conversation. Failing the other way leaves the human holding it exactly
 // as before, one status apart. The caller reports the partial either way; only one of the two
 // partials is recoverable by doing nothing.
+//
+// What the ordering costs is paid back by the read between them. Whoever is holding the conversation
+// is read LIVE and the unassign only fires for that same holder, because putting the status call
+// first opens a window the other order did not have: a human claiming the conversation while it runs
+// would be removed by an unconditional unassign that was aimed at somebody else. Chatwoot has no
+// conditional unassign, so this is the compare done here — it narrows the window to one request
+// instead of two, and the direction it fails in is leaving a human in place, which is the direction
+// a takeover should always win.
 export async function returnConversationToAgent(
   ctx: TenantContext,
   id: bigint,
@@ -1299,13 +1307,37 @@ export async function returnConversationToAgent(
   await client.toggleStatus(conv.chatwootConversationId, "pending", {
     asAdmin: true,
   });
-  await client.unassignConversation(conv.chatwootConversationId, {
-    asAdmin: true,
-  });
+  // Unreadable is NOT "nobody took it": a degraded payload with the holder unchanged is the common
+  // case, and refusing to hand back on it would leave the conversation with a human who has already
+  // walked away. The live read is the improvement over an unconditional unassign, not a new gate.
+  const live = parseLiveConversation(
+    await client.getConversation(conv.chatwootConversationId).catch(() => null),
+  );
+  // The id, not a boolean: the mirror write below has to name whoever is still holding it, and a
+  // boolean would leave that branch reading the row it just declined to change.
+  const newHolder =
+    live !== null &&
+    live.assigneeType === "User" &&
+    live.assigneeId !== null &&
+    live.assigneeId !== conv.assigneeId
+      ? live.assigneeId
+      : null;
+  if (newHolder === null) {
+    await client.unassignConversation(conv.chatwootConversationId, {
+      asAdmin: true,
+    });
+  } else {
+    logger.info(
+      "conversations: hand-back left the conversation with its new holder (conv=%d, agent=%d)",
+      conv.chatwootConversationId,
+      newHolder,
+    );
+  }
   const state = await mirrorConsoleWrite(ctx, base, id, conv, client, {
     status: "pending",
-    assigneeId: null,
-    assigneeType: null,
+    ...(newHolder !== null
+      ? { assigneeId: newHolder, assigneeType: "User" }
+      : { assigneeId: null, assigneeType: null }),
   });
   broadcastConversationEvent(tenantId, {
     conversationId: String(id),

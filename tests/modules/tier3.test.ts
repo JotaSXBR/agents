@@ -58,7 +58,12 @@ function ctx(t: bigint): TenantContext {
 }
 
 // Stub ChatwootClient recording the calls the ops make (no network).
-function makeStub() {
+// `live` is what GET /conversations/:id answers — the hand-back reads it before unassigning, so a
+// stub without it is a Chatwoot that cannot be asked who is holding the conversation. Defaults to
+// nobody, which is the shape that lets the unassign proceed.
+function makeStub(
+  live: { assigneeType?: string | null; assigneeId?: number | null } = {},
+) {
   const calls = {
     getMessages: 0,
     sendMessage: [] as { content: string; isPrivate: boolean }[],
@@ -123,6 +128,15 @@ function makeStub() {
       calls.toggleStatus.push(status);
       return {};
     },
+    getConversation: async (cid: number) => ({
+      id: cid,
+      status: "pending",
+      meta: {
+        assignee_type: live.assigneeType ?? null,
+        assignee:
+          live.assigneeId != null ? { id: live.assigneeId, name: "Ana" } : null,
+      },
+    }),
   };
   return {
     calls,
@@ -669,6 +683,32 @@ describe.skipIf(!dbUp)("tier-3 conversation ops (stub client)", () => {
     });
     expect(row?.status).toBe("pending");
     expect(row?.assigneeType).toBeNull();
+  });
+
+  // Putting the status call first opened a window the other order did not have: a human claiming the
+  // conversation while the hand-back runs would be removed by an unassign aimed at somebody else.
+  // The live read closes it, and it fails toward LEAVING the human in place — a takeover always wins.
+  test("a human who claimed it mid-hand-back is not unassigned", async () => {
+    await suDb.conversation.update({
+      where: { id: convId },
+      data: { assigneeType: "User", assigneeId: 7 },
+    });
+    // Chatwoot now says somebody ELSE is holding it.
+    const stub = makeStub({ assigneeType: "User", assigneeId: 42 });
+    await returnConversationToAgent(
+      ctx(tenant),
+      convId,
+      { makeClient: stub.makeClient },
+      appDb,
+    );
+    expect(stub.calls.toggleStatus).toEqual(["pending"]);
+    expect(stub.calls.unassignConversation).toBe(0);
+    const row = await suDb.conversation.findUnique({
+      where: { id: convId },
+      select: { assigneeType: true, assigneeId: true },
+    });
+    expect(row?.assigneeType).toBe("User");
+    expect(row?.assigneeId).toBe(42);
   });
 });
 
