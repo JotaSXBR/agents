@@ -40,6 +40,12 @@ import {
 // exposure to a model is another.
 
 // The slug becomes the agent's tool name, so it lives in the same character set a tool name does.
+//
+// It is DERIVED, never typed: the operator names the template and this produces the identifier. So
+// every derivation that cannot pass `slugProblem` is a wall in front of an ordinary name, about
+// something the operator did not choose and does not see. A leading digit was one — "2026 Orçamento"
+// derived "2026_orcamento", which a tool name may not start with — and it is prefixed rather than
+// stripped, because dropping the digits makes "2026" and "2027" the same slug.
 export function slugifyTemplateName(name: string): string {
   const slug = name
     .normalize("NFD")
@@ -47,8 +53,9 @@ export function slugifyTemplateName(name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "")
-    .slice(0, 40);
-  return slug || "documento";
+    .slice(0, SLUG_MAX);
+  if (!slug) return "documento";
+  return (/^[a-z]/.test(slug) ? slug : `doc_${slug}`).slice(0, SLUG_MAX);
 }
 
 export function documentToolName(slug: string): string {
@@ -77,6 +84,64 @@ export function slugProblem(slug: string): string | null {
     return `the slug would produce the tool name "${documentToolName(slug)}", which is already a built-in tool`;
   }
   return null;
+}
+
+// How far the search below goes before giving up. A tenant whose names all derive to the same slug
+// this many times over is not being helped by another number on the end, and a conflict they can
+// read beats a tool name nobody chose.
+const SLUG_SEARCH_LIMIT = 50;
+
+// How many times a DERIVED slug re-reads and retries after losing the unique index to a concurrent
+// create. Small on purpose: each attempt only loses if another create of the same name landed in
+// between, so more than a couple means something other than a race.
+const SLUG_RETRY_LIMIT = 3;
+
+function slugWithCounter(base: string, n: number): string {
+  const suffix = `_${n}`;
+  // Truncated so the SUFFIX fits, not the base: the bound exists because the slug becomes a tool
+  // name, and a provider rejects the whole request over a name past its cap.
+  return `${base.slice(0, SLUG_MAX - suffix.length).replace(/_+$/, "")}${suffix}`;
+}
+
+// The first slug near `base` that this tenant can actually use, or null if there is none.
+//
+// Only ever applied to a DERIVED slug. When the caller wrote the slug themselves it stays a
+// conflict, because they asked for that tool name and quietly giving them a different one is worse
+// than being told they cannot have it.
+//
+// `slugProblem` is consulted as well as `taken`, and it has to be: the built-in tool names are not
+// rows in this table, so a candidate colliding with `send_image` is absent from `taken` and would be
+// handed back only for the create to refuse it — which is the wall this function exists to remove.
+export function availableSlug(
+  base: string,
+  taken: ReadonlySet<string>,
+): string | null {
+  for (let n = 1; n <= SLUG_SEARCH_LIMIT; n++) {
+    const candidate = n === 1 ? base : slugWithCounter(base, n);
+    if (taken.has(candidate)) continue;
+    if (slugProblem(candidate)) continue;
+    return candidate;
+  }
+  return null;
+}
+
+// Every slug this tenant has, for the search above. All of them rather than the ones sharing a
+// prefix: `slugWithCounter` truncates the base to make room for the counter, so a prefix query built
+// from the base can MISS the very candidates it is meant to find, and the two would have to be kept
+// in step forever. Templates are authored one at a time by a person, so the row count is tens.
+//
+// No `excludeId`. It looks like it belongs — the update dry run has one — but only a CREATE derives
+// a slug, so the one caller that carries an id also passes `deriveSlugFromName: false` and returns
+// before reaching here. Written as a parameter first, and removed when a mutation that ignored it
+// broke no test: a row this can exclude does not exist.
+async function takenSlugs(
+  ctx: TenantContext,
+  base: PrismaClient,
+): Promise<Set<string>> {
+  const rows = await runScopedOn(base, ctx, (db) =>
+    db.documentTemplate.findMany({ select: { slug: true } }),
+  );
+  return new Set(rows.map((r) => r.slug));
 }
 
 // A slug is unique per tenant in the database, and both writes can hit that index — the create with
@@ -124,12 +189,19 @@ export async function documentTemplateWriteProblem(
   // slug is a tool name an agent may already be granted. Deriving here on an update would refuse a
   // perfectly good rename over a slug the write was never going to use — and only on the dry run,
   // which is the worst place to disagree with the apply.
-  const slug =
-    input.slug ??
-    (deriveSlugFromName && name !== undefined
-      ? slugifyTemplateName(name)
-      : undefined);
-  if (slug === undefined) return null;
+  // A DERIVED slug is not reported as taken, because the apply does not refuse it: it looks for the
+  // next free one. Reporting the collision here would make the dry run the only place that says no,
+  // which is the disagreement this whole function exists to prevent — and it would say no about an
+  // identifier the caller never wrote.
+  if (input.slug === undefined) {
+    if (!deriveSlugFromName || name === undefined) return null;
+    const base_ = slugifyTemplateName(name);
+    const free = availableSlug(base_, await takenSlugs(ctx, base));
+    return free === null
+      ? `every slug derived from "${name}" is already taken in this account; name the template differently`
+      : null;
+  }
+  const slug = input.slug;
   const problem = slugProblem(slug);
   if (problem) return `slug: ${problem}.`;
   const taken = await runScopedOn(base, ctx, (db) =>
@@ -393,10 +465,16 @@ export async function createDocumentTemplate(
   // caller wrote, and a truthiness fallback silently replaced it with one derived from the name —
   // while the dry run, which uses `?? `, refused exactly that input. A preview that says no to what
   // the apply says yes to is the same contract break as the reverse.
-  const slug = input.slug ?? slugifyTemplateName(name);
-  const problem = slugProblem(slug);
-  if (problem) {
-    throw new AppError(`slug: ${problem}.`, 400, "errors.invalidDocumentSlug");
+  const derived = input.slug === undefined;
+  if (!derived) {
+    const problem = slugProblem(input.slug as string);
+    if (problem) {
+      throw new AppError(
+        `slug: ${problem}.`,
+        400,
+        "errors.invalidDocumentSlug",
+      );
+    }
   }
   if (input.blockText !== undefined) {
     // Accepted by the shared body schema because the PATCH needs it, and meaningless here: there is
@@ -415,25 +493,48 @@ export async function createDocumentTemplate(
   const style = content.style;
   if (ctx.tenantId === null) throw new AppError("tenant required", 400);
   const tenantId = ctx.tenantId;
-  const row = await runScopedOn(base, ctx, (db) =>
-    db.documentTemplate
-      .create({
-        data: {
-          tenantId,
-          name,
-          slug,
-          description: parseTemplateDescription(input.description ?? null),
-          blocks: content.blocks as unknown as Prisma.InputJsonValue,
-          fields: content.fields as unknown as Prisma.InputJsonValue,
-          style: style as unknown as Prisma.InputJsonValue,
-          numberPrefix: parseNumberPrefix(input.numberPrefix ?? null),
-          enabled: input.enabled ?? true,
-        },
-        select: SELECT,
-      })
-      .catch(slugConflict(slug)),
-  );
-  return toDto(row);
+  const data = {
+    tenantId,
+    name,
+    description: parseTemplateDescription(input.description ?? null),
+    blocks: content.blocks as unknown as Prisma.InputJsonValue,
+    fields: content.fields as unknown as Prisma.InputJsonValue,
+    style: style as unknown as Prisma.InputJsonValue,
+    numberPrefix: parseNumberPrefix(input.numberPrefix ?? null),
+    enabled: input.enabled ?? true,
+  };
+  // Retried, and only for a derived slug: the search reads the slugs this tenant has and the unique
+  // index is what actually decides, so two creates of the same name racing both pick the same
+  // candidate and one of them loses. Without the retry that operator sees a conflict over an
+  // identifier they never chose — the exact wall the derivation is here to remove — for no reason
+  // other than timing. An EXPLICIT slug is not retried: a second attempt would pick the same name
+  // and lose again, and the caller is owed the conflict.
+  for (let attempt = 0; ; attempt++) {
+    const slug = derived
+      ? availableSlug(slugifyTemplateName(name), await takenSlugs(ctx, base))
+      : (input.slug as string);
+    if (slug === null) {
+      throw new ConflictError(
+        `every slug derived from "${name}" is already taken in this account; name the template differently`,
+        "errors.documentTemplateSlugTaken",
+      );
+    }
+    try {
+      const row = await runScopedOn(base, ctx, (db) =>
+        db.documentTemplate.create({
+          data: { ...data, slug },
+          select: SELECT,
+        }),
+      );
+      return toDto(row);
+    } catch (e) {
+      const conflict =
+        e instanceof Error && (e as { code?: string }).code === "P2002";
+      if (!conflict || !derived || attempt >= SLUG_RETRY_LIMIT) {
+        slugConflict(slug)(e);
+      }
+    }
+  }
 }
 
 export async function updateDocumentTemplate(

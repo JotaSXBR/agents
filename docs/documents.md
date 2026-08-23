@@ -221,8 +221,17 @@ call arrives in the same turn, by which point the queue carries the claim instea
 HTTP/MCP/integration/RAG and unlike NATIVE: an agent with no grant has no document tool, so no
 existing agent gains one on upgrade.
 
-The tool's name is `send_<slug>`, and a slug whose name would collide with a built-in is refused when
-it is written. That check cannot be complete on its own: an MCP server names its own tools when it is
+The tool's name is `send_<slug>`, and the slug is **derived from the template's name, never typed**.
+That makes every derivation that cannot produce a usable identifier a wall in front of an ordinary
+name, about something the operator did not choose and cannot see — three of which were reachable by
+typing a normal one: a second "Orçamento" (the slug was taken), "2026 Orçamento" (a tool name may not
+start with a digit) and "Image" (`send_image` is a built-in). So a derived slug is the system's
+problem: `availableSlug` walks `orcamento`, `orcamento_2`, … until it finds one that is both free in
+this tenant and valid, and the create retries the search if it loses the unique index to a concurrent
+write. An **explicit** slug is still refused on a collision, because there the caller asked for that
+tool name and quietly handing them another one is worse than saying no.
+
+A slug whose name would collide with a built-in is refused when it is written. That check cannot be complete on its own: an MCP server names its own tools when it is
 contacted, so "is this name still free?" is a question no write can finish answering. The assembly is
 the one place that sees every name at once, so `dropDuplicateToolNames` decides it there — earlier
 wins, which puts the built-ins first, the loser is dropped rather than fatal (one bad name must not
@@ -232,7 +241,9 @@ take a whole agent down), and the names that lost are logged for the operator wh
 
 - **Console** — Components → Document templates. Create from a ready-made starter (quote, proposal,
   receipt), edit the letterhead, edit the **wording** of `text` blocks, and watch a live PDF preview.
-  Adding, removing and reordering blocks is API/MCP only, and the panel says so.
+  Adding, removing and reordering blocks is API/MCP only, and the panel says so. The same modal opens
+  from the **agent's Tools tab**, on the document card being granted: it is the one grant whose target
+  has a picture, and "what does this print?" is the question being answered at that moment.
 - **REST** — `/v1/document-templates` (CRUD, `POST /preview`, `/starters`), `/v1/documents` (issue,
   list, PDF, revoke), `/v1/tenant-settings/company` (+ `/logo`).
 - **MCP** — `document_template_list/get/create/update/delete`, `document_template_schema`,

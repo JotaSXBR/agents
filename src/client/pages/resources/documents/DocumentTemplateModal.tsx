@@ -449,10 +449,16 @@ export function DocumentTemplateModal({
         {/* NOTE: `self-start` is what makes the sticky actually stick. A grid item stretches to the
             row height by default, so `sticky` has nothing to travel within and the preview scrolls
             away as soon as the form below it is longer than the viewport — which is exactly when it
-            is being used. */}
+            is being used.
+
+            And `h-`, not `max-h-`, for the other half of the same fact: `self-start` also removes
+            the stretch that WAS giving this column a height, so a ceiling leaves the box sitting at
+            `min-h-96` and the iframe's `h-full` resolving against nothing. The document then
+            rendered into 384px of a modal twice that tall. A definite height is what both `sticky`
+            and the iframe need. */}
         <DocumentPreview
           state={preview}
-          className="min-h-96 lg:sticky lg:top-0 lg:max-h-[70vh] lg:self-start"
+          className="min-h-96 lg:sticky lg:top-0 lg:h-[70vh] lg:self-start"
         />
       </fieldset>
     </Modal>
