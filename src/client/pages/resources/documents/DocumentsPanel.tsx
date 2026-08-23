@@ -44,6 +44,11 @@ export function DocumentsPanel() {
   const [company, setCompany] = useState<CompanyProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  // The two secondary lists get their own flags rather than taking the whole page down: an operator
+  // can still edit templates when the starter list or the recent-documents list failed — they just
+  // must not be told those are empty.
+  const [startersError, setStartersError] = useState(false);
+  const [issuedError, setIssuedError] = useState(false);
   const [creating, setCreating] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   // null = still loading, "error" = the lookup failed. Two states, because collapsing them leaves a
@@ -70,14 +75,20 @@ export function DocumentsPanel() {
         api.api.v1["tenant-settings"].get(),
         api.api.v1.documents.get({ query: { limit: "20" } }),
       ]);
-      if (list.error || !list.data) {
+      // Every request's error, not just the list's. Eden RESOLVES an HTTP failure as `{ error }`
+      // rather than rejecting, so an unchecked call reads as empty data: a settings failure rendered
+      // a blank editable profile over settings that may well have values, and a starters or
+      // documents failure showed "none" for a list that failed to load.
+      if (list.error || !list.data || settings.error) {
         setError(true);
         return;
       }
       setTemplates([...list.data.templates]);
       setStarters(startersRes.data ? [...startersRes.data.starters] : []);
+      setStartersError(!!startersRes.error);
       setCompany(settings.data?.company ?? null);
       setIssued(issuedRes.data ? [...issuedRes.data.documents] : []);
+      setIssuedError(!!issuedRes.error);
     } catch {
       setError(true);
     } finally {
@@ -330,6 +341,14 @@ export function DocumentsPanel() {
         </div>
       </DataBoundary>
 
+      {issuedError && (
+        <p className="text-sm text-warning">
+          {t(
+            "documents.issuedError",
+            "Could not load the recently issued documents.",
+          )}
+        </p>
+      )}
       {issued.length > 0 && (
         <div className="flex flex-col gap-2">
           <h2 className="font-medium text-sm text-text-primary">
@@ -350,6 +369,11 @@ export function DocumentsPanel() {
                       {t("documents.revokedBadge", "Revoked")}
                     </Badge>
                   )}
+                  {!doc.revoked && doc.status !== "READY" && (
+                    <Badge variant="secondary">
+                      {t("documents.pendingBadge", "Not rendered")}
+                    </Badge>
+                  )}
                   <p className="text-text-muted text-xs">
                     {new Date(doc.createdAt).toLocaleString()}
                   </p>
@@ -359,7 +383,10 @@ export function DocumentsPanel() {
                     variant="secondary"
                     size="sm"
                     onClick={() => openPdf(doc)}
-                    disabled={doc.revoked}
+                    // A row exists before its PDF does: the render happens after the insert, and a
+                    // failure there leaves a PENDING row with no storage key. Enabled, the button
+                    // could only ever fetch a 404 and say nothing about why.
+                    disabled={doc.revoked || doc.status !== "READY"}
                   >
                     {t("documents.openPdf", "Open PDF")}
                   </Button>
@@ -392,6 +419,14 @@ export function DocumentsPanel() {
               "Pick one to copy into your account, then edit its wording. Building a template block by block is done through the API or MCP.",
             )}
           </p>
+          {startersError && (
+            <p className="text-sm text-warning">
+              {t(
+                "documents.startersError",
+                "Could not load the ready-made templates.",
+              )}
+            </p>
+          )}
           {starters.map((s) => (
             <Card
               key={s.key}

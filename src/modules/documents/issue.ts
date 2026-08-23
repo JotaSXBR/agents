@@ -447,13 +447,15 @@ async function finish(
       throw e;
     }
   } else {
-    // Lost, so this render does NOT publish: the winner's file stands. Two ways to get here and
-    // only one is a problem — another caller finished the same render, or it was revoked.
+    // Lost, so this render does NOT publish: the winner's file stands. And it must not RETURN its
+    // own bytes either — the logo is read live, so the loser's PDF can look different from the one
+    // the winner persisted, and `withBytes: true` would attach that to a customer's reply while the
+    // download link served the other. The winner's row is the answer.
     await rm(tempPath, { force: true });
     const now = await runScopedOn(base, ctx, (db) =>
       db.issuedDocument.findUnique({
         where: { id: row.id },
-        select: { revoked: true },
+        select: { revoked: true, status: true, pdfStorageKey: true },
       }),
     );
     if (now?.revoked) {
@@ -463,6 +465,26 @@ async function finish(
         "errors.documentRevoked",
       );
     }
+    if (now?.status !== "READY" || !now.pdfStorageKey) {
+      // Neither published: the winner's rename failed and rolled its row back. Refusing is the
+      // honest answer — reporting READY over bytes nobody stored would put a document in front of a
+      // customer that the download link cannot produce.
+      throw new AppError(
+        "this document could not be stored",
+        409,
+        "errors.documentNotStored",
+      );
+    }
+    return {
+      id: String(row.id),
+      number: numberLabel,
+      title: row.title,
+      status: "READY",
+      fileName,
+      ...(deps.withBytes
+        ? { bytes: await readStoredBytes(dir, now.pdfStorageKey) }
+        : {}),
+    };
   }
   return {
     id: String(row.id),

@@ -580,6 +580,7 @@
     "emptyTitle": "No document templates yet",
     "enabled": "Agents may issue this document",
     "fields": "Fields the agent fills",
+    "issuedError": "Could not load the recently issued documents.",
     "issuedTitle": "Recently issued",
     "name": "Name",
     "noTextBlocks": "This template has no text block.",
@@ -587,6 +588,7 @@
     "numberPrefixHint": "e.g. \"ORC-\" → ORC-0001",
     "openPdf": "Open PDF",
     "openPdfError": "Could not open the PDF.",
+    "pendingBadge": "Not rendered",
     "preview": {
       "errorTitle": "This document does not render",
       "title": "Document preview"
@@ -598,6 +600,7 @@
     "revokeError": "Could not revoke.",
     "saveError": "Could not save this template.",
     "starterHint": "Pick one to copy into your account, then edit its wording. Building a template block by block is done through the API or MCP.",
+    "startersError": "Could not load the ready-made templates.",
     "starterTitle": "Start from a template",
     "style": {
       "accent": "Accent color",

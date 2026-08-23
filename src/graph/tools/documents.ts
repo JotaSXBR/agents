@@ -141,6 +141,7 @@ function idempotencyKey(
 const TERMINAL_ERROR_KEYS = new Set([
   "errors.documentRevoked",
   "errors.documentNotNumbered",
+  "errors.documentNotStored",
   "errors.documentTemplateDisabled",
   "errors.documentTemplateNotFound",
 ]);

@@ -14,6 +14,7 @@
     "currentPasswordIncorrect": "Current password is incorrect",
     "documentNotFound": "Document not found",
     "documentNotNumbered": "This document could not be numbered because its template no longer exists",
+    "documentNotStored": "This document could not be stored",
     "documentRevoked": "This document was revoked and cannot be issued again",
     "documentTemplateDisabled": "This document template is disabled",
     "documentTemplateNotFound": "Document template not found",

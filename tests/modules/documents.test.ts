@@ -1467,17 +1467,89 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       },
     }) as unknown as PrismaClient;
 
-    await issueDocument({
+    // …and the loser returns the WINNER's bytes, not its own: the logo is read live, so its render
+    // can differ from the published one, and withBytes would have attached that to a reply while
+    // the download link served the other.
+    const loser = await issueDocument({
       tenantId: tenantA,
       templateId,
       idempotencyKey: key,
       values: VALUES,
+      withBytes: true,
       base: racing,
       storageDir: DIR,
     });
+    expect(new TextDecoder().decode(loser.bytes)).toBe("WINNER");
     expect(claimed).toBe(true);
     expect(await Bun.file(path).text()).toBe("WINNER");
     const litter = await readdir(`${DIR}/${tenantA}`);
     expect(litter.filter((f) => f.endsWith(".part"))).toEqual([]);
+  });
+
+  // The other end of the same claim: the winner took it and then its rename FAILED, rolling the row
+  // back to PENDING. Nobody published, so the loser must not report READY over bytes no download can
+  // produce — the customer would be told a document exists that its own link cannot serve.
+  test("refuses when the claim was lost and nothing was published", async () => {
+    const key = `claim-rollback-${process.pid}`;
+    const seed = await issueDocument({
+      tenantId: tenantA,
+      templateId,
+      idempotencyKey: key,
+      values: VALUES,
+      base: appDb,
+      storageDir: DIR,
+    });
+    const id = BigInt(seed.id);
+    await suDb.issuedDocument.update({
+      where: { id },
+      data: { status: "PENDING", pdfStorageKey: null },
+    });
+
+    let claimed = false;
+    let rolledBack = false;
+    const racing = appDb.$extends({
+      query: {
+        issuedDocument: {
+          // Before this render's CAS: someone else takes the claim, so ours fails.
+          async updateMany({ args, query }) {
+            if (!claimed) {
+              claimed = true;
+              await suDb.issuedDocument.update({
+                where: { id },
+                data: {
+                  status: "READY",
+                  pdfStorageKey: `${tenantA}/${id}.pdf`,
+                },
+              });
+            }
+            return query(args);
+          },
+          // Before this render re-reads: the winner's rename failed and it rolled its row back.
+          async findUnique({ args, query }) {
+            if (claimed && !rolledBack) {
+              rolledBack = true;
+              await suDb.issuedDocument.update({
+                where: { id },
+                data: { status: "PENDING", pdfStorageKey: null },
+              });
+            }
+            return query(args);
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+
+    await expect(
+      issueDocument({
+        tenantId: tenantA,
+        templateId,
+        idempotencyKey: key,
+        values: VALUES,
+        withBytes: true,
+        base: racing,
+        storageDir: DIR,
+      }),
+    ).rejects.toThrow(/stored/);
+    expect(rolledBack).toBe(true);
   });
 });

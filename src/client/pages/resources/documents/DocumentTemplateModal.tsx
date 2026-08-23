@@ -142,7 +142,12 @@ export function DocumentTemplateModal({
         : null,
     [template, name, blockText, style, numberPrefix],
   );
-  const preview = useDocumentPreview(draft as Record<string, unknown> | null);
+  const preview = useDocumentPreview(
+    draft as Record<string, unknown> | null,
+    // The template this modal is open on. Changing it drops the previous PDF at once, instead of
+    // leaving it under the new form for the length of the debounce.
+    template?.id,
+  );
 
   async function save() {
     if (!template || !style) return;

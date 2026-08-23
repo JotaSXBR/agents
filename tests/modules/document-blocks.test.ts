@@ -620,6 +620,26 @@ describe("parseDocumentValues", () => {
     expect(r.ok).toBe(false);
   });
 
+  // The renderer prints an item's description DIRECTLY — unlike a field value, which goes through
+  // the token resolver's sanitiser — so a tab or a control character in it reaches the PDF and
+  // rearranges the table. What survives sanitising is what gets stored.
+  test("stores line-item descriptions as they will be printed", () => {
+    const r = parseDocumentValues(FIELDS as never, {
+      cliente: "Ana",
+      itens: [
+        {
+          description: "Consultoria\tavançada\u0007",
+          quantity: 1,
+          unitPrice: 2,
+        },
+      ],
+    });
+    expect(r.ok).toBe(true);
+    const items = r.ok ? (r.values.itens as { description: string }[]) : [];
+    expect(items[0]?.description).not.toContain("\u0007");
+    expect(items[0]?.description).toContain("Consultoria");
+  });
+
   test("refuses a line item whose description renders blank", () => {
     const r = parseDocumentValues(FIELDS as never, {
       cliente: "Ana",

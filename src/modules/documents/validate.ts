@@ -463,6 +463,11 @@ function valueProblem(field: DocumentField, value: unknown): string | null {
       // A description is PRINTED on a priced row, so it has to survive sanitising like any other
       // required text: `min(1)` counts whitespace, which would put a blank line carrying a price on
       // a numbered financial document.
+      //
+      // And what survives sanitising is what gets STORED (below), not just what gets tested. The
+      // renderer prints an item's description directly — unlike a field value, which passes through
+      // the token resolver's sanitiser — so a tab or a control character in it reaches the PDF and
+      // rearranges the table it sits in.
       for (const item of parsed.data) {
         if (sanitizeDocumentValue(item.description).trim() === "") {
           return "line items: every item needs a description that is not blank once whitespace and control characters are removed";
@@ -549,7 +554,18 @@ export function parseDocumentValues(
     if (problem) {
       return { ok: false, reason: `values: "${field.name}" ${problem}.` };
     }
-    values[field.name] = value as DocumentValue;
+    // Line items are stored PARSED and sanitised: the snapshot then holds exactly what the renderer
+    // will print, which is the whole point of freezing it.
+    values[field.name] =
+      field.type === "lineItems"
+        ? (z
+            .array(lineItemValueSchema)
+            .parse(value)
+            .map((item) => ({
+              ...item,
+              description: sanitizeDocumentValue(item.description),
+            })) as DocumentValue)
+        : (value as DocumentValue);
   }
   return { ok: true, values };
 }

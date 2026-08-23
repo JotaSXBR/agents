@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { mediaFetch } from "@/client/lib/media";
 
 // Debounced PDF preview of a template draft, as a blob URL.
@@ -20,6 +26,11 @@ const DEBOUNCE_MS = 600;
 
 export function useDocumentPreview(
   draft: Record<string, unknown> | null,
+  // Identifies WHICH template is being previewed. When it changes the previous PDF is dropped
+  // synchronously: the request is debounced by 600 ms, so without this the modal shows template A's
+  // document under template B's form for at least that long — the operator reading a preview of
+  // something they are not editing.
+  session?: string | number,
 ): DocumentPreviewState {
   const [state, setState] = useState<DocumentPreviewState>({
     url: null,
@@ -33,6 +44,17 @@ export function useDocumentPreview(
     if (urlRef.current) URL.revokeObjectURL(urlRef.current);
     urlRef.current = next;
   }, []);
+
+  // useLayoutEffect, not useEffect: the reset has to land before the paint that would otherwise show
+  // the previous session's document (docs/modals.md).
+  useLayoutEffect(() => {
+    // `session` is read here so the effect is keyed on it: the reset belongs to the template
+    // CHANGING, and the linter counts a dependency it cannot see used as unnecessary.
+    void session;
+    swap(null);
+    abortRef.current?.abort();
+    setState({ url: null, loading: false, error: null });
+  }, [session, swap]);
 
   const body = draft ? JSON.stringify(draft) : null;
 
