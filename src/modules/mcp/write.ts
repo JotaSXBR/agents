@@ -364,12 +364,8 @@ export async function promptSet(
   const ctx = gate(principal);
   if ("ok" in ctx) return ctx;
 
-  let agentId: bigint;
-  try {
-    agentId = BigInt(args.agent_id);
-  } catch {
-    return err("invalid agent_id");
-  }
+  const agentId = parseMcpId(args.agent_id, "agent_id");
+  if (typeof agentId !== "bigint") return agentId;
 
   try {
     // NOTE: checked here (not only inside updateAgent) so the DRY-RUN path enforces the cap too —
@@ -449,12 +445,8 @@ export async function agentSettingsGet(
   const ctx = readGate(principal);
   if ("ok" in ctx) return ctx;
 
-  let agentId: bigint;
-  try {
-    agentId = BigInt(args.agent_id);
-  } catch {
-    return err("invalid agent_id");
-  }
+  const agentId = parseMcpId(args.agent_id, "agent_id");
+  if (typeof agentId !== "bigint") return agentId;
 
   try {
     const agent = await getAgent(ctx, agentId, base);
@@ -498,12 +490,8 @@ export async function agentSettingsSet(
   const ctx = gate(principal);
   if ("ok" in ctx) return ctx;
 
-  let agentId: bigint;
-  try {
-    agentId = BigInt(args.agent_id);
-  } catch {
-    return err("invalid agent_id");
-  }
+  const agentId = parseMcpId(args.agent_id, "agent_id");
+  if (typeof agentId !== "bigint") return agentId;
 
   const patch: BehaviorSettingsPatch = {};
   if (args.debounce !== undefined) patch.debounce = args.debounce;

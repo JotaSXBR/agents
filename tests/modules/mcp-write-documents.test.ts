@@ -138,6 +138,53 @@ describe.skipIf(!dbUp)("MCP document writes", () => {
     expect(await listDocumentTemplates(ctx(), appDb)).toHaveLength(0);
   });
 
+  // The dry run has to report the value the APPLY will keep. `templateNameSchema` trims, so a padded
+  // name is accepted and stored shorter than it arrived — and a caller shown the raw one was told
+  // the write keeps something it does not. The same drift, on a different surface, was found in the
+  // bundle import a round earlier.
+  test("a padded name is reported and applied in the form it will be stored", async () => {
+    const dry = await documentTemplateCreate(
+      principal({ tenantId }),
+      { starter: "quote", name: "  Orçamento Padrão  " },
+      { base: appDb },
+    );
+    expect(dry.ok).toBe(true);
+    if (dry.ok) {
+      const data = dry.data as { preview: { name: string } };
+      expect(data.preview.name).toBe("Orçamento Padrão");
+    }
+    const applied = await documentTemplateCreate(
+      principal({ tenantId }),
+      { starter: "quote", name: "  Orçamento Padrão  ", dry_run: false },
+      { base: appDb },
+    );
+    expect(applied.ok).toBe(true);
+    const templates = await listDocumentTemplates(ctx(), appDb);
+    expect(templates.map((t) => t.name)).toEqual(["Orçamento Padrão"]);
+
+    // …and the update dry run's diff answers with the same value it would write.
+    const id = templates[0]?.id as string;
+    const upd = await documentTemplateUpdate(
+      principal({ tenantId }),
+      { document_template_id: id, name: "   Recibo   " },
+      { base: appDb },
+    );
+    expect(upd.ok).toBe(true);
+    if (upd.ok) {
+      const data = upd.data as { diff: Record<string, unknown> };
+      expect(JSON.stringify(data.diff)).toContain("Recibo");
+      expect(JSON.stringify(data.diff)).not.toContain("   Recibo   ");
+    }
+    // The file has no per-test cleanup and its tests count what is in the table, so a test that
+    // leaves a row behind fails the NEXT one.
+    await suDb.$executeRawUnsafe(
+      `DELETE FROM document_templates WHERE tenant_id = ${tenantId}`,
+    );
+    await suDb.$executeRawUnsafe(
+      `DELETE FROM audit_logs WHERE tenant_id = ${tenantId}`,
+    );
+  });
+
   test("applies with dry_run:false, and records an audit entry", async () => {
     const r = await documentTemplateCreate(
       principal({ tenantId }),

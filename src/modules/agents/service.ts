@@ -5,6 +5,7 @@ import basePrisma from "@/api/lib/prisma";
 import config from "@/config";
 import { DEFAULT_MODEL_CONFIG, modelConfigSchema } from "@/graph/model-config";
 import { NATIVE_TOOL_NAMES, RAG_TOOL_NAMES } from "@/graph/tools/catalog";
+import { parseDbId } from "@/lib/db-id";
 import {
   AppError,
   NotFoundError,
@@ -795,19 +796,24 @@ interface NormalizedGrant {
   enabledTools: string[];
 }
 
+// Every grant's id, from REST and from MCP alike, and both halves of "is this an id?" matter here.
+// `BigInt` accepts spellings a column does not (`0x11` is 17n), so a request that never named the
+// template it got could be handed one — and it accepts values past 2^63-1, which reach the database
+// as a bind error and answer 500 on a path that advertises a validation error. `parseDbId` holds
+// both; see lib/db-id.ts.
 function bigOrThrow(v: string | null | undefined, field: string): bigint {
   if (v == null) {
     throw new AppError(`${field} is required`, 400, "errors.invalidToolGrant");
   }
-  try {
-    return BigInt(v);
-  } catch {
+  const id = parseDbId(v);
+  if (id === null) {
     throw new AppError(
       `${field} must be a numeric id`,
       400,
       "errors.invalidToolGrant",
     );
   }
+  return id;
 }
 
 // Shape + enum-membership validation (no DB). Ownership of referenced ids and the integration

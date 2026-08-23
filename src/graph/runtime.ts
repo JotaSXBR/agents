@@ -297,16 +297,31 @@ async function deliverPendingAttachments(
         return null;
       });
       if (live?.revoked !== false) {
-        // A lookup that could not be made is not a decision: it held the file back without anyone
-        // choosing to, so it counts as a failure to deliver. Only an answer saying `revoked` is the
-        // operator's own click arriving.
-        if (live === null) failed = true;
+        // Two events wearing one shape. From here they look identical — nothing was delivered — and
+        // they are not the same thing: `revoked` is the operator's own click arriving, and anything
+        // else is this check being unable to answer (the lookup failed, or the row is gone). Only
+        // the first is a decision.
+        //
+        // The bit the caller reads and the line the operator reads are decided HERE, together. They
+        // were written as two statements once, and drifted: the turn counted the failure while the
+        // trail reported an intentional revocation, so the one place an operator would look to find
+        // out why the file never arrived told them somebody meant it.
+        const revoked = live?.revoked === true;
+        if (!revoked) failed = true;
         emitFlowEvent(flow, {
           stage: "tool",
-          // Skipped, not an error: the operator revoked it, and the trail should read as the
-          // decision it was.
-          status: "skipped",
-          detail: { tool: file.tool, outcome: "revoked_before_delivery" },
+          ...(revoked
+            ? {
+                status: "skipped" as const,
+                detail: { tool: file.tool, outcome: "revoked_before_delivery" },
+              }
+            : {
+                level: "warn" as const,
+                status: "error" as const,
+                detail: { tool: file.tool, outcome: "revocation_unknown" },
+                errorMessage:
+                  "could not confirm whether this document was revoked; it was not sent",
+              }),
         });
         continue;
       }

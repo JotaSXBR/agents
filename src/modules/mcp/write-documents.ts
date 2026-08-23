@@ -7,6 +7,7 @@ import {
   deleteDocumentTemplate,
   documentTemplateWriteProblem,
   getDocumentTemplate,
+  normalizeTemplateName,
   previewDocumentTemplate,
   updateDocumentTemplate,
 } from "@/modules/documents/templates";
@@ -100,7 +101,10 @@ export async function documentTemplateCreate(
   // caller asking for a template with no description or no number prefix would get the starter's,
   // with nothing saying their argument was ignored.
   const input = {
-    name: args.name ?? starter?.name ?? "",
+    // Normalized HERE, once, because every use below is downstream of it: the gate, the rendered
+    // preview's title and the reported name. The apply trims, so anything shown untrimmed is a
+    // value the write does not keep.
+    name: normalizeTemplateName(args.name ?? starter?.name ?? ""),
     slug: args.slug,
     description:
       args.description !== undefined
@@ -192,7 +196,7 @@ export async function documentTemplateUpdate(
   const id = parseMcpId(args.document_template_id, "document_template_id");
   if (typeof id !== "bigint") return id;
   const patch: Parameters<typeof updateDocumentTemplate>[2] = {};
-  if (args.name !== undefined) patch.name = args.name;
+  if (args.name !== undefined) patch.name = normalizeTemplateName(args.name);
   if (args.slug !== undefined) patch.slug = args.slug;
   if (args.description !== undefined) patch.description = args.description;
   if (args.blocks !== undefined) patch.blocks = args.blocks;

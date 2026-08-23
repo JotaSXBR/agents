@@ -2180,6 +2180,29 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
       expect(outcome).toBe("posted");
       // The reply still goes out; the voided document does not ride along with it.
       expect(calls).toEqual([["sendMessage", 944, "Segue o orçamento!"]]);
+      // …and the trail reads as the DECISION it was. Scoped to THIS conversation: the file's other
+      // document tests write tool rows for the same tenant, and an unscoped read would let one of
+      // them satisfy the assertion.
+      // Polled, because emitFlowEvent is fire-and-forget: asserting on the first read passes or
+      // fails on timing, which is a test that reports the wrong thing.
+      let skipLogged = false;
+      for (let i = 0; i < 30 && !skipLogged; i++) {
+        const flow = await suDb.executionLog.findMany({
+          where: {
+            tenantId,
+            stage: "tool",
+            threadId: `${tenantId}:${instanceId}:944`,
+          },
+          select: { detail: true, status: true },
+        });
+        skipLogged = flow.some(
+          (f) =>
+            JSON.stringify(f.detail).includes("revoked_before_delivery") &&
+            f.status === "skipped",
+        );
+        if (!skipLogged) await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(skipLogged).toBe(true);
     } finally {
       await suDb.$executeRawUnsafe(
         `DELETE FROM agent_tool_selections WHERE tenant_id = ${tenantId}`,
@@ -2437,6 +2460,32 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
       });
       expect(outcome).toBe("posted");
       expect(calls).toEqual([["sendMessage", 945, "Segue o orçamento!"]]);
+      // And the trail says so. A lookup that could not be made is not the operator revoking
+      // anything: logging it as an intentional skip makes the one place they would look to find out
+      // why the file never arrived tell them somebody meant it.
+      let flow: { detail: unknown; status: string | null }[] = [];
+      let unknown: typeof flow = [];
+      for (let i = 0; i < 30 && unknown.length === 0; i++) {
+        flow = await suDb.executionLog.findMany({
+          where: {
+            tenantId,
+            stage: "tool",
+            threadId: `${tenantId}:${instanceId}:945`,
+          },
+          select: { detail: true, status: true },
+        });
+        unknown = flow.filter((f) =>
+          JSON.stringify(f.detail).includes("revocation_unknown"),
+        );
+        if (unknown.length === 0) await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(unknown.length).toBeGreaterThan(0);
+      expect(unknown.every((f) => f.status === "error")).toBe(true);
+      expect(
+        flow.some((f) =>
+          JSON.stringify(f.detail).includes("revoked_before_delivery"),
+        ),
+      ).toBe(false);
     } finally {
       await suDb.$executeRawUnsafe(
         `DELETE FROM agent_tool_selections WHERE tenant_id = ${tenantId}`,

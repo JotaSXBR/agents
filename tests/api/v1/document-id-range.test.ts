@@ -45,18 +45,26 @@ describe("parseMcpId", () => {
 // Every caller-supplied id in the document surfaces goes through the bounded parse. Written as a
 // read of the source because that is where the mistake is visible: a `BigInt(...)` wrapped around a
 // request field is the defect, whatever the route around it does.
-describe("no document route converts a caller's id with bare BigInt", () => {
+describe("no document surface converts a caller's id with bare BigInt", () => {
+  // Every FILE that turns a caller-supplied id into a bigint on the way to a document. The list grew
+  // by one entry per review round — the routes, then the MCP write parser, then the grant parser —
+  // because each round fixed the site it was shown and left the next one. It is the list, not the
+  // sites, that is the guard: an entry here is what makes the NEXT surface fail loudly instead of
+  // being found by a reviewer.
   const FILES = [
     "src/api/v1/documents.controller.ts",
     "src/api/v1/document-templates.controller.ts",
+    "src/modules/mcp/write.ts",
+    "src/modules/mcp/write-documents.ts",
+    "src/modules/agents/service.ts",
   ];
 
-  test("params, body and query ids use the bounded parse", async () => {
+  test("params, body, query and args ids use the bounded parse", async () => {
     const offenders: string[] = [];
     for (const file of FILES) {
       const src = await Bun.file(file).text();
       for (const m of src.matchAll(
-        /BigInt\(\s*(?:params|body|query)\.[A-Za-z0-9_.]+/g,
+        /BigInt\(\s*(?:params|body|query|args|patch|input|g)\.[A-Za-z0-9_.]+/g,
       )) {
         offenders.push(`${file}:${src.slice(0, m.index).split("\n").length}`);
       }
@@ -64,13 +72,23 @@ describe("no document route converts a caller's id with bare BigInt", () => {
     expect(offenders).toEqual([]);
   });
 
-  // …and the sweep is looking at something: the pattern it hunts is one it can find.
-  test("the sweep would catch the spelling it exists for", () => {
-    const sample = "const id = BigInt(params.id);";
-    expect(
-      [...sample.matchAll(/BigInt\(\s*(?:params|body|query)\.[A-Za-z0-9_.]+/g)]
-        .length,
-    ).toBe(1);
+  // …and the sweep is looking at something: every prefix it hunts is one it can find.
+  test("the sweep would catch the spellings it exists for", () => {
+    const samples = [
+      "const id = BigInt(params.id);",
+      "BigInt( args.tenant_id )",
+      "BigInt(patch.name)",
+      "const x = BigInt(g.documentTemplateId);",
+    ];
+    for (const sample of samples) {
+      expect(
+        [
+          ...sample.matchAll(
+            /BigInt\(\s*(?:params|body|query|args|patch|input|g)\.[A-Za-z0-9_.]+/g,
+          ),
+        ].length,
+      ).toBe(1);
+    }
   });
 });
 

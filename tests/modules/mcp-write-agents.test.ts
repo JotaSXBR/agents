@@ -393,6 +393,31 @@ describe.skipIf(!dbUp)("MCP agent-builder tools (DB)", () => {
     expect(audits).toBe(1);
   });
 
+  // A grant's id is caller-supplied, and `BigInt` accepts more than a column does. `0x11` is 17n, so
+  // a request that never named a template could be handed one; a value past 2^63-1 converts here and
+  // is refused by POSTGRES when the query binds it, answering 500 on a path that advertises a
+  // validation error. Both spellings, for the grant path the document tool introduced.
+  test("a grant id that is not a plain in-range number is refused, not converted", async () => {
+    const p = principal({ tenantId: tenantA });
+    for (const bad of ["0x11", "9223372036854775808", " 7 ", "1e3"]) {
+      const r = await agentToolsSet(
+        p,
+        {
+          agent_id: String(agentA),
+          grants: [{ source: "DOCUMENT", documentTemplateId: bad }],
+          dry_run: false,
+        },
+        { base: appDb },
+      );
+      expect(r.ok).toBe(false);
+    }
+    expect(
+      await suDb.agentToolSelection.count({
+        where: { agentId: agentA, source: "DOCUMENT" },
+      }),
+    ).toBe(0);
+  });
+
   // The step that closed the MCP loop: this surface could CREATE a document template and had no way
   // to GRANT it, so an operator authoring over MCP ended one move short of a working document tool.
   test("agent_tools_set can grant a document template", async () => {

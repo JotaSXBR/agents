@@ -218,6 +218,16 @@ export interface DocumentTemplateInput {
 }
 
 export const templateNameSchema = z.string().trim().min(1).max(120);
+
+// The name as it will be STORED, for callers that have to show one BEFORE the write happens: a dry
+// run's preview, its diff, the title rendered into the previewed PDF. The schema trims, so a padded
+// name is accepted and kept in a shorter form than it arrived — and a caller shown the raw one was
+// told the apply would keep something it will not. It lives beside the schema because that is the
+// only thing that decides it; two rounds of review found two different surfaces reporting the
+// unnormalized value, and both had copied the check without the transform.
+export function normalizeTemplateName(value: string): string {
+  return templateNameSchema.safeParse(value).success ? value.trim() : value;
+}
 // Appended VERBATIM to the model-facing tool description, on every turn of every agent granted the
 // template. Unbounded, one accidental paste makes every one of those turns carry it — the same
 // ceiling HTTP tool descriptions are already held to, and for the same reason.
