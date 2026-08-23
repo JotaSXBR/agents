@@ -253,6 +253,10 @@ async function deliverPendingImages(
   conversationId: number,
   turnState: TurnState,
   flow: FlowContext,
+  // Asked before EACH attachment, not once before the batch: every send here is a separate write
+  // separated from the last by a Chatwoot round trip, so a run called off after the second picture
+  // would go on posting the third into a conversation the operator was told had been cleared.
+  calledOff: () => Promise<boolean> = async () => false,
 ): Promise<boolean> {
   // NOTE: Sorted by the model's tool-call order, not by the order the downloads finished in — the
   // batch runs concurrently, and a caption only makes sense next to the picture it was written for.
@@ -261,6 +265,7 @@ async function deliverPendingImages(
     .sort((a, b) => a.order - b.order);
   let sent = false;
   for (const img of queued) {
+    if (await calledOff()) break;
     try {
       await client.sendFileAttachment(
         conversationId,
@@ -551,6 +556,7 @@ export async function runLoadedTurn(
       loaded.splitConfig,
       params.deps?.sleep,
       flow,
+      writeCalledOff,
     );
     logger.info(
       "chatwoot agent replied: conv=%s thread=%s len=%d balloons=%d",
@@ -1033,6 +1039,7 @@ export async function runLoadedTurn(
         conversationId,
         turnState,
         flow,
+        writeCalledOff,
       );
       // NOTE: The images WERE the turn and none of them reached the customer. That is a failed turn,
       // not a silent one: returning "empty" here would let the deferred resolve close a conversation
@@ -1063,7 +1070,13 @@ export async function runLoadedTurn(
     // The image lands before the text that talks about it, and before the TTS branch: an audio
     // reply must not swallow the attachment.
     if (await writeCalledOff()) return "stale";
-    await deliverPendingImages(client, conversationId, turnState, flow);
+    await deliverPendingImages(
+      client,
+      conversationId,
+      turnState,
+      flow,
+      writeCalledOff,
+    );
 
     const delivered = await deliverText(reply, recheck.voiceReply);
     if (delivered === "stale") return "stale";

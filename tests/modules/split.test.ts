@@ -105,4 +105,29 @@ describe("deliverReply", () => {
     // typing on before each balloon + a final off
     expect(rec.typing).toEqual([true, true, false]);
   });
+
+  // A split reply is several sends with a typing pause between them, so /reset landing after the
+  // first balloon finds a run that already answered its only fence. Asked per balloon, the rest of
+  // the message stays unsent — and the count reports what actually landed, not what was planned,
+  // because the caller keys "the customer was answered" off that number.
+  test("a run called off mid-split stops at the balloon it was on", async () => {
+    const rec = { sent: [] as string[], typing: [] as boolean[] };
+    let wanted = true;
+    const n = await deliverReply(
+      stub(rec),
+      1,
+      "Olá!\n\nComo vai?\n\nPosso ajudar?",
+      { ...SPLIT_DEFAULTS, enabled: true },
+      noSleep,
+      undefined,
+      async () => {
+        // Called off from the SECOND balloon on: the first is already out.
+        const off = !wanted;
+        wanted = false;
+        return off;
+      },
+    );
+    expect(n).toBe(1);
+    expect(rec.sent).toEqual(["Olá!"]);
+  });
 });

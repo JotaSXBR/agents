@@ -113,6 +113,11 @@ export async function deliverReply(
   cfg: SplitConfig,
   sleep: (ms: number) => Promise<void> = realSleep,
   flow?: FlowContext,
+  // Asked before EACH balloon. A split reply is several sends with a typing pause between them, so
+  // one answer taken before the loop covers only the first: a run called off after balloon two would
+  // keep typing the rest into a conversation the operator was told had been cleared. Returns how
+  // many actually landed, so the caller still reports what the customer received.
+  calledOff: () => Promise<boolean> = async () => false,
 ): Promise<number> {
   return withFlowStage(
     flow,
@@ -124,13 +129,16 @@ export async function deliverReply(
         return 1;
       }
       const chunks = splitReply(reply, cfg);
+      let delivered = 0;
       for (const chunk of chunks) {
         await client.toggleTyping(conversationId, true).catch(() => undefined);
         await sleep(typingDelayMs(chunk, cfg));
+        if (await calledOff()) break;
         await client.sendMessage(conversationId, chunk);
+        delivered += 1;
       }
       await client.toggleTyping(conversationId, false).catch(() => undefined);
-      return chunks.length;
+      return delivered;
     },
   );
 }

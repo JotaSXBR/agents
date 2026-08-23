@@ -1313,14 +1313,19 @@ export async function returnConversationToAgent(
   const live = parseLiveConversation(
     await client.getConversation(conv.chatwootConversationId).catch(() => null),
   );
-  // The id, not a boolean: the mirror write below has to name whoever is still holding it, and a
-  // boolean would leave that branch reading the row it just declined to change.
+  // The whole identity, not the id: "User" and "AgentBot" are separate id namespaces in Chatwoot, so
+  // comparing numbers alone reads User 7 claiming a conversation held by AgentBot 7 as nobody having
+  // moved — and unassigns the human. Any change of holder counts, in either field.
+  //
+  // An EMPTY live assignee is not a competing holder: it means whoever was there has already gone,
+  // and unassigning is then the no-op that also corrects the mirror. Only somebody actually holding
+  // the conversation stops the hand-back.
   const newHolder =
     live !== null &&
-    live.assigneeType === "User" &&
     live.assigneeId !== null &&
-    live.assigneeId !== conv.assigneeId
-      ? live.assigneeId
+    (live.assigneeType !== conv.assigneeType ||
+      live.assigneeId !== conv.assigneeId)
+      ? { assigneeType: live.assigneeType, assigneeId: live.assigneeId }
       : null;
   if (newHolder === null) {
     await client.unassignConversation(conv.chatwootConversationId, {
@@ -1328,16 +1333,15 @@ export async function returnConversationToAgent(
     });
   } else {
     logger.info(
-      "conversations: hand-back left the conversation with its new holder (conv=%d, agent=%d)",
+      "conversations: hand-back left the conversation with its new holder (conv=%d, %s=%s)",
       conv.chatwootConversationId,
-      newHolder,
+      newHolder.assigneeType ?? "none",
+      String(newHolder.assigneeId ?? "none"),
     );
   }
   const state = await mirrorConsoleWrite(ctx, base, id, conv, client, {
     status: "pending",
-    ...(newHolder !== null
-      ? { assigneeId: newHolder, assigneeType: "User" }
-      : { assigneeId: null, assigneeType: null }),
+    ...(newHolder ?? { assigneeId: null, assigneeType: null }),
   });
   broadcastConversationEvent(tenantId, {
     conversationId: String(id),

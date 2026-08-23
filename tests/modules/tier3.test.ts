@@ -710,6 +710,30 @@ describe.skipIf(!dbUp)("tier-3 conversation ops (stub client)", () => {
     expect(row?.assigneeType).toBe("User");
     expect(row?.assigneeId).toBe(42);
   });
+
+  // "User" and "AgentBot" are separate id namespaces in Chatwoot, so the comparison is the whole
+  // identity and not the number. Against the number alone, a human claiming a conversation a BOT of
+  // the same id was holding reads as nobody having moved — and the hand-back removes them.
+  test("a human with the same id as the bot that held it is not unassigned", async () => {
+    await suDb.conversation.update({
+      where: { id: convId },
+      data: { assigneeType: "AgentBot", assigneeId: 7 },
+    });
+    const stub = makeStub({ assigneeType: "User", assigneeId: 7 });
+    await returnConversationToAgent(
+      ctx(tenant),
+      convId,
+      { makeClient: stub.makeClient },
+      appDb,
+    );
+    expect(stub.calls.unassignConversation).toBe(0);
+    const row = await suDb.conversation.findUnique({
+      where: { id: convId },
+      select: { assigneeType: true, assigneeId: true },
+    });
+    expect(row?.assigneeType).toBe("User");
+    expect(row?.assigneeId).toBe(7);
+  });
 });
 
 describe.skipIf(!dbUp)(
