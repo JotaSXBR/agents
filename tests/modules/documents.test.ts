@@ -2,8 +2,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readdir, rm } from "node:fs/promises";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/../generated/prisma/client";
+import config from "@/config";
 import { AppError } from "@/lib/errors";
 import { runScopedOn, type TenantContext } from "@/lib/tenancy";
+import { setCompanyLogo } from "@/modules/documents/company";
 import {
   getIssuedDocumentPdf,
   issueDocument,
@@ -1468,9 +1470,10 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       },
     }) as unknown as PrismaClient;
 
-    // …and the loser returns the WINNER's bytes, not its own: the logo is read live, so its render
-    // can differ from the published one, and withBytes would have attached that to a reply while
-    // the download link served the other.
+    // …and the caller returns the PUBLISHED bytes, not its own render: the logo is read live, so the
+    // two can differ, and withBytes would have attached one PDF to a reply while the download link
+    // served another. This holds whether the claim was won or lost — what is on disk is the
+    // document.
     const loser = await issueDocument({
       tenantId: tenantA,
       templateId,
@@ -1552,5 +1555,106 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       }),
     ).rejects.toThrow(/stored/);
     expect(rolledBack).toBe(true);
+  });
+
+  // The same rule when the claim is WON but the file was already there: this call adopts the
+  // published file (link answered EEXIST) and must hand back those bytes, not the render it happens
+  // to hold. Won and lost end in the same place — what is on disk is the document.
+  test("adopting an existing file returns that file, even when the claim is won", async () => {
+    const key = `adopt-${process.pid}`;
+    const seed = await issueDocument({
+      tenantId: tenantA,
+      templateId,
+      idempotencyKey: key,
+      values: VALUES,
+      base: appDb,
+      storageDir: DIR,
+    });
+    const id = BigInt(seed.id);
+    // The row goes back to PENDING (so this render proceeds and wins the claim) while the FILE
+    // stays where it is — the state a crash between publishing and the claim leaves behind.
+    await suDb.issuedDocument.update({
+      where: { id },
+      data: { status: "PENDING", pdfStorageKey: null },
+    });
+    await Bun.write(`${DIR}/${tenantA}/${id}.pdf`, "PUBLISHED-FIRST");
+
+    const again = await issueDocument({
+      tenantId: tenantA,
+      templateId,
+      idempotencyKey: key,
+      values: VALUES,
+      withBytes: true,
+      base: appDb,
+      storageDir: DIR,
+    });
+    expect(again.status).toBe("READY");
+    expect(new TextDecoder().decode(again.bytes)).toBe("PUBLISHED-FIRST");
+  });
+
+  // A same-format replacement reuses the same path, so the bytes change before the row that records
+  // the change does. If that row does not commit, the endpoint reports a failure while every
+  // document already renders the NEW letterhead and every cached client still shows the old one —
+  // the mismatch logoVersion exists to prevent.
+  test("a failed logo write leaves the previous letterhead in place", async () => {
+    // NOTE: setCompanyLogo reads config.documentsStorageDir directly — there is no dir to inject —
+    // so this test writes into the configured one. Everything it asserts is therefore scoped to its
+    // OWN tenant's key: the directory is shared with other runs, and a stale file from one of them
+    // is not this test's subject. It cleans up after itself at the end.
+    const dir = `${config.documentsStorageDir}/company`;
+    const key = `${tenantB}-logo.png`;
+    await Bun.write(`${dir}/${key}`, "OLD-LOGO");
+    const png = [
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48,
+      0x44, 0x52, 0, 0, 0, 10, 0, 0, 0, 10, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42,
+      0x60, 0x82,
+    ];
+    // The settings write fails after the bytes are already on disk.
+    const failing = appDb.$extends({
+      query: {
+        tenant: {
+          async update() {
+            throw new Error("settings write failed");
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+
+    await expect(
+      setCompanyLogo(
+        ctx(tenantB),
+        {
+          type: "image/png",
+          size: png.length,
+          arrayBuffer: async () => new Uint8Array(png).buffer as ArrayBuffer,
+        },
+        failing,
+      ),
+    ).rejects.toThrow(/settings write failed/);
+    expect(await Bun.file(`${dir}/${key}`).text()).toBe("OLD-LOGO");
+    const litter = (await readdir(dir)).filter((f) => f.startsWith(`${key}.`));
+    expect(litter.filter((f) => f.endsWith(".prev"))).toEqual([]);
+    expect(litter.filter((f) => f.endsWith(".part"))).toEqual([]);
+
+    // …and the SUCCESS path leaves nothing behind either: the set-aside copy is only insurance, and
+    // insurance that is never collected is litter that grows with every upload.
+    const saved = await setCompanyLogo(
+      ctx(tenantB),
+      {
+        type: "image/png",
+        size: png.length,
+        arrayBuffer: async () => new Uint8Array(png).buffer as ArrayBuffer,
+      },
+      appDb,
+    );
+    expect(saved.logoKey).toBe(key);
+    expect(
+      (await readdir(dir)).filter(
+        (f) =>
+          f.startsWith(`${key}.`) &&
+          (f.endsWith(".prev") || f.endsWith(".part")),
+      ),
+    ).toEqual([]);
+    await rm(`${dir}/${key}`, { force: true });
   });
 });

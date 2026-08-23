@@ -492,14 +492,12 @@ async function finish(
     title: row.title,
     status: "READY",
     fileName,
-    ...(deps.withBytes
-      ? {
-          bytes: buffer.buffer.slice(
-            buffer.byteOffset,
-            buffer.byteOffset + buffer.byteLength,
-          ) as ArrayBuffer,
-        }
-      : {}),
+    // Read back from disk, never handed out from the local render. This call may have ADOPTED
+    // another publisher's file (EEXIST above) and still won the claim, and the logo is read live —
+    // so returning `buffer` could attach one PDF to the customer's reply while the download link
+    // served a different one. Issuing and sending are one act; they cannot disagree about which
+    // document it was.
+    ...(deps.withBytes ? { bytes: await readStoredBytes(dir, key) } : {}),
   };
 }
 

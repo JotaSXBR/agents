@@ -186,15 +186,37 @@ export async function setCompanyLogo(
   // preview or an issuance may be reading at that moment — the reader gets empty or partial bytes
   // and the render fails.
   const path = logoPath(key);
-  const temp = `${path}.${process.pid}-${Math.random().toString(36).slice(2, 10)}.part`;
+  const suffix = `${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+  const temp = `${path}.${suffix}.part`;
+  const previous = `${path}.${suffix}.prev`;
   await Bun.write(temp, bytes);
+
+  // A same-format replacement reuses the SAME path (that is what logoVersion exists for), so the
+  // bytes on disk change before the row that records the change does. If that write then fails, the
+  // endpoint reports a failure while every document already renders the new letterhead and every
+  // cached client still shows the old one — the exact mismatch the version was added to prevent.
+  //
+  // So the old file is set aside first and put back if the row does not commit. The reader-facing
+  // swap is still a rename, so nobody ever sees a partial file.
+  const hadPrevious = await Bun.file(path).exists();
+  if (hadPrevious) await rename(path, previous);
   try {
     await rename(temp, path);
   } catch (e) {
+    if (hadPrevious) await rename(previous, path).catch(() => undefined);
     await rm(temp, { force: true });
     throw e;
   }
-  return setCompanyLogoKey(ctx, key, base);
+  try {
+    const saved = await setCompanyLogoKey(ctx, key, base);
+    if (hadPrevious) await rm(previous, { force: true });
+    return saved;
+  } catch (e) {
+    // The row did not commit, so the letterhead has to go back to the one it still describes.
+    if (hadPrevious) await rename(previous, path).catch(() => undefined);
+    else await rm(path, { force: true });
+    throw e;
+  }
 }
 
 export async function clearCompanyLogo(
