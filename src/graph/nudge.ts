@@ -605,7 +605,7 @@ export async function runAgentNudge(
   // unreachable after it. Anything that adds a third owns the at-most-once question, because a
   // promise delivered twice is the duplicate #158 was about.
   const deliverPromisedLine = async (): Promise<
-    "messaged" | "noted-window" | "silent" | null
+    "messaged" | "noted-window" | "silent" | "stale" | null
   > => {
     if (!handoffAnsweredTheTurn(handoffState)) return null;
     const line = handoffState.customerMessage;
@@ -625,23 +625,17 @@ export async function runAgentNudge(
       return "noted-window" as const;
     };
     try {
-      // NOTE: The handoff line is a customer-visible send like any other, and it is the one that
-      // returns BEFORE the terminal deliveries below — so a job retired while the turn ran would
-      // reach the customer through this path alone. What the check cannot undo is the transfer
-      // itself: the tool already ran inside the graph, and a conversation handed to a human stays
-      // handed over. Withholding the sentence is the part that is still ours to decide.
-      if (!(await stillWanted())) return "silent";
-      // The same question at two instants, and only the second one governs the send. Asked before
-      // the screening so a line that cannot go out anyway costs no model call, and asked again
-      // after it because that call is precisely where the window closes: 15 seconds is nothing
-      // against 24 hours except at the boundary, and the boundary is exactly where a follow-up
-      // chasing a customer who has gone quiet tends to land.
+      // NOTE: Asked ONCE here, after the screening and not before it. The handoff path skips the
+      // ownership probe entirely (`handedOff` short-circuits it), so between the check above this
+      // function and the top of it nothing happens that could change the answer — an earlier ask was
+      // a second reading of one instant, and a mutation removing it broke no test because it decided
+      // nothing. The screening below is a model call, which is a stretch of time worth re-reading.
       if (sendModeNow() !== "freeform") return await noteOutsideWindow();
       const line2 = screenedText(await screenOutput(line), line);
       if (line2 === null) return "silent";
       // NOTE: Asked again for the same reason the window below is: the screening is a model call, and
       // both answers above it are spent by the time it returns. The reply branch does exactly this.
-      if (!(await stillWanted())) return "silent";
+      if (!(await stillWanted())) return "stale";
       if (sendModeNow() !== "freeform") return await noteOutsideWindow();
       await client.sendMessage(conversationId, line2);
       logger.info(
@@ -948,6 +942,13 @@ export async function runAgentNudge(
   // ownership left to protect (we are the ones who just handed the conversation over). It does
   // respect the 24h service window, which the tool's own send used to walk straight past.
   const promised = await deliverPromisedLine();
+  // "stale" leaves through its own door, and that is the whole difference between ending the episode
+  // and continuing it. `followUpHandler` stamps `lastFollowUpAt` on a silent turn AND arms the next
+  // step, so a retired run that reported silence wrote its watermark onto the conversation /reset had
+  // just cleared and re-armed the sequence the command ended — and the post-actions below would have
+  // relabelled and resolved it on the way out. The transfer itself still stands: the tool ran inside
+  // the graph and this fence was never able to reverse it.
+  if (promised === "stale") return "stale";
   if (promised) {
     if (promised !== "silent") markFollowUp(promised);
     await applyPostActions();

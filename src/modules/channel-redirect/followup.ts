@@ -727,6 +727,34 @@ export async function deliverRedirectClosing(
     return "already-closed";
   }
 
+  // And the fence for the caller that has no job to ask about. The resolve trigger reaches here
+  // straight from a webhook, so `stillWanted` is undefined for it and every check above is one this
+  // path skips — while /reset CLEARS this very anchor, deliberately, so the funnel can be tested
+  // again. The two together let a closing that claimed before the command send its goodbye and
+  // resolve the sibling after the reset had finished, on an episode the operator was told was erased.
+  //
+  // The claim is the token, and this re-reads it the way a claimed job re-reads `claim_seq`: the
+  // anchor still holding the exact instant written above means nobody took it. Cleared, or won by
+  // someone else, means this run is not the one delivering. No release here — the anchor is already
+  // not ours to give back.
+  const stillHoldsClaim = await runScopedOn(base, sysCtx(p.tenantId), (db) =>
+    db.conversation.count({
+      where: {
+        tenantId: p.tenantId,
+        chatwootInstanceId: p.instanceId,
+        chatwootConversationId: p.widgetConversationId,
+        redirectClosedAt: now,
+      },
+    }),
+  ).catch(() => 1);
+  if (stillHoldsClaim !== 1) {
+    logger.info(
+      "channel-redirect: the closing claim was taken while this run read (widget conv=%d)",
+      p.widgetConversationId,
+    );
+    return "already-closed";
+  }
+
   // Chat (website widget): post the goodbye + resolve. Skipped on the resolve-path, where the chat is
   // already being resolved by the trigger. A web widget has no 24h window → proactiveSendMode → freeform.
   if (p.closeChat) {

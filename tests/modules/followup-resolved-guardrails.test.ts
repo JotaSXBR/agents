@@ -456,6 +456,63 @@ describe.skipIf(!dbUp)("follow-up em conversa resolvida — guardrails", () => {
     expect(after.lastFollowUpAt).toBeNull();
   });
 
+  // (7) O reset que chega DEPOIS da última checagem do nudge. O handler ainda escreve na conversa por
+  // conta própria — `lastFollowUpAt` é exatamente a coluna que o comando limpa —, e essa escrita
+  // também arma o passo seguinte, ressuscitando a sequência que o comando encerrou. O encontro é o
+  // envio ao cliente: nada dentro do runAgentNudge pergunta de novo depois dele.
+  test("(7) um reset depois do envio não recarimba o watermark nem arma o próximo passo", async () => {
+    const CONV = 4341;
+    // O Agente B, porque ele tem DOIS passos: com um só, "encerrou" e "seguiu" terminam iguais e o
+    // teste não distingue pular o carimbo de parar a sequência.
+    await seedConversation(CONV, inboxBId, {
+      lastEventAt: new Date(Date.now() - 2 * HOUR),
+      lastInboundAt: new Date(Date.now() - 2 * HOUR),
+    });
+    const dedupeKey = `followup:${threadOf(CONV)}`;
+    const row = await suDb.schedulerJob.create({
+      data: {
+        tenantId,
+        kind: "FOLLOWUP",
+        dedupeKey,
+        runAt: new Date(),
+        status: "CLAIMED",
+        payload: { threadId: threadOf(CONV) },
+      },
+      select: { id: true, claimSeq: true },
+    });
+    const s = stubClient(() => ({ id: CONV, status: "pending", meta: {} }));
+    const inner = s.makeClient;
+    let retired = false;
+    const client = await inner();
+    const sendMessage = client.sendMessage.bind(client);
+    (client as { sendMessage: unknown }).sendMessage = async (
+      c: number,
+      t: string,
+    ) => {
+      const out = await sendMessage(c, t);
+      // O comando chega com a mensagem já entregue: tarde demais para segurá-la, e cedo demais para
+      // o carimbo.
+      if (!retired) {
+        retired = true;
+        await retireJobsByDedupeKey(tenantId, "FOLLOWUP", dedupeKey, suDb);
+      }
+      return out;
+    };
+
+    const result = await followUpHandler(
+      { ...jobFor(CONV), id: row.id, claimSeq: row.claimSeq },
+      appDb,
+      { ...handlerDeps(s), makeClient: async () => client },
+    );
+
+    expect(retired).toBe(true);
+    // A mensagem saiu — o fecho não a desfaz, e não é isso que ele guarda.
+    expect(s.sent.length).toBe(1);
+    // O episódio termina aqui: sem carimbo e sem próximo passo.
+    expect(result).toEqual({ outcome: "done" });
+    expect((await mirroredConv(CONV)).lastFollowUpAt).toBeNull();
+  });
+
   // (6) O portão ao vivo pergunta POSSE, e /reset devolve a posse. Um follow-up já reivindicado
   // passou pela primeira sondagem e está dentro da chamada do modelo; o operador reseta, a conversa
   // volta para a IA, e a segunda sondagem encontra tudo em ordem — postando um nudge do episódio que

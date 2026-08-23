@@ -1015,7 +1015,7 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
         await seedConv(9984, null);
         const s = stub();
         let wanted = true;
-        await runAgentNudge({
+        const outcome = await runAgentNudge({
           tenantId,
           threadId: `${tenantId}:${instanceId}:9984`,
           nudge: { source: "followup", kind: "inactivity", step: 1 },
@@ -1049,6 +1049,14 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
         });
         expect(wanted).toBe(false);
         expect(s.messages).toEqual([]);
+        // "stale", and it leaves through its own door in the caller: reporting silence here made
+        // followUpHandler stamp the watermark and arm the next step, and ran the post-actions on the
+        // way out — relabelling and resolving a conversation the command had just cleared.
+        expect(outcome).toBe("stale");
+        expect(s.labelSets).toEqual([]);
+        // The transfer's own toggle to `open`, and nothing after it: the post-action resolve would
+        // be a SECOND entry on this same conversation.
+        expect(s.resolved).toEqual([9984]);
       },
     );
   });

@@ -7,6 +7,7 @@ import { encryptJson } from "@/api/lib/crypto";
 import {
   armRedirectChatFollowUp,
   chatFollowupNudge,
+  deliverRedirectClosing,
   minutesFromNow,
   parseRedirectFollowUpPayload,
   redirectFollowUpHandler,
@@ -440,6 +441,108 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
     globalThis.fetch = originalFetch;
     if (!dbUp) return;
     await suDb.tenant.delete({ where: { id: tenantId } }).catch(() => {});
+  });
+
+  // The caller with no job to ask about. A widget resolve reaches the closing straight from a webhook,
+  // so every `stillWanted` fence inside is one this path skips — while /reset CLEARS the at-most-once
+  // anchor on purpose, so the funnel can be tested again. Between this run's claim and its sends, that
+  // clear used to leave it free to post the goodbye and resolve the sibling on an episode the operator
+  // had just been told was erased.
+  //
+  // The reset lands in exactly that window. The rendezvous is the claim re-read itself, because the
+  // claim's own write holds the row until it commits: a second connection writing there first blocks
+  // on the lock instead of simulating anything.
+  const restoreAnchor = async () => {
+    await suDb.conversation.updateMany({
+      where: { tenantId, chatwootConversationId: WIDGET_CONV },
+      data: { redirectClosedAt: null },
+    });
+  };
+
+  test("a closing whose anchor was cleared mid-run sends nothing", async () => {
+    await restoreAnchor();
+    const s = stubClient();
+    let claimed = false;
+    let cleared = false;
+    // The reset commits at the first read this run makes AFTER its claim — whichever read that is.
+    // Landing it on a read rather than on the claim's own write matters: a second connection writing
+    // that row while the claim holds it blocks on the lock instead of simulating anything.
+    const landReset = async () => {
+      if (!claimed || cleared) return;
+      cleared = true;
+      await restoreAnchor();
+    };
+    const resetMidRun = suDb.$extends({
+      query: {
+        conversation: {
+          async updateMany({ args, query }) {
+            const res = await query(args);
+            const data = args.data as
+              | { redirectClosedAt?: unknown }
+              | undefined;
+            // The CLAIM writes an instant; the release writes null.
+            if (data?.redirectClosedAt instanceof Date) claimed = true;
+            return res;
+          },
+          async count({ args, query }) {
+            await landReset();
+            return query(args);
+          },
+          async findUnique({ args, query }) {
+            await landReset();
+            return query(args);
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+
+    try {
+      const outcome = await deliverRedirectClosing({
+        tenantId,
+        instanceId,
+        widgetConversationId: WIDGET_CONV,
+        entryInboxId: 110,
+        closingMessage: "Vamos encerrar por aqui.",
+        // The resolve path's own shape: Chatwoot is already resolving the widget, so only the
+        // WhatsApp sibling is still owed a goodbye — and the sibling lookup is a read, which is what
+        // gives the unfenced version somewhere to be caught.
+        closeChat: false,
+        base: resetMidRun,
+        deps: { makeClient: s.makeClient },
+      });
+
+      expect(claimed).toBe(true);
+      expect(cleared).toBe(true);
+      expect(outcome).toBe("already-closed");
+      expect(s.sent).toEqual([]);
+      expect(s.resolved).toEqual([]);
+    } finally {
+      await restoreAnchor();
+    }
+  });
+
+  // The control: the same call with nobody clearing the anchor still delivers. Without it, "sent
+  // nothing" would also be satisfied by a check that refuses every closing.
+  test("the same closing delivers when the anchor stays put", async () => {
+    await restoreAnchor();
+    const s = stubClient();
+    try {
+      const outcome = await deliverRedirectClosing({
+        tenantId,
+        instanceId,
+        widgetConversationId: WIDGET_CONV,
+        entryInboxId: 110,
+        closingMessage: "Vamos encerrar por aqui.",
+        closeChat: false,
+        base: suDb,
+        deps: { makeClient: s.makeClient },
+      });
+
+      expect(outcome).toBe("delivered");
+      expect(s.sent.length).toBeGreaterThan(0);
+    } finally {
+      await restoreAnchor();
+    }
   });
 
   const claimed = async (

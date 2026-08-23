@@ -368,6 +368,26 @@ export async function followUpHandler(
     }
   }
 
+  // The tombstone question, asked in this handler and not only inside runAgentNudge. Three writes
+  // below touch the CONVERSATION directly — the never-opening schedule, the retry exhaustion, and the
+  // watermark after the nudge — and `lastFollowUpAt` is exactly the column /reset clears. A stamp
+  // landing after the command puts the sweep's anchor back on a conversation the operator was told
+  // was cleared, and the third one also arms the next step, reviving the sequence the command ended.
+  //
+  // Read immediately before each write rather than once at the top: the command arrives whenever it
+  // arrives, and the interesting moment is precisely while the nudge's model call runs. Returns
+  // whether the stamp landed, so a caller that would continue the sequence can stop instead.
+  const stampUnlessRetired = async (): Promise<boolean> => {
+    if (await jobRetired(job, base)) return false;
+    await runScopedOn(base, sysCtx(tenantId), (db) =>
+      db.conversation.update({
+        where: { id: ctx.conv.id },
+        data: { lastFollowUpAt: new Date() },
+      }),
+    );
+    return true;
+  };
+
   // Business hours: reschedule into the next open window rather than messaging out of hours (same
   // payload — the step index is preserved).
   if (ctx.hours) {
@@ -388,12 +408,7 @@ export async function followUpHandler(
         stepIndex,
         threadId,
       );
-      await runScopedOn(base, sysCtx(tenantId), (db) =>
-        db.conversation.update({
-          where: { id: ctx.conv.id },
-          data: { lastFollowUpAt: new Date() },
-        }),
-      );
+      await stampUnlessRetired();
       return { outcome: "done" };
     }
   }
@@ -465,12 +480,7 @@ export async function followUpHandler(
         nudgeOutcome,
         threadId,
       );
-      await runScopedOn(base, sysCtx(tenantId), (db) =>
-        db.conversation.update({
-          where: { id: ctx.conv.id },
-          data: { lastFollowUpAt: new Date() },
-        }),
-      );
+      await stampUnlessRetired();
       return { outcome: "done" };
     }
     return {
@@ -481,13 +491,9 @@ export async function followUpHandler(
   }
 
   // Watermark: stamp regardless of whether the nudge sent or stayed silent, so the next step's
-  // cadence anchors here and the episode-interruption check works.
-  await runScopedOn(base, sysCtx(tenantId), (db) =>
-    db.conversation.update({
-      where: { id: ctx.conv.id },
-      data: { lastFollowUpAt: new Date() },
-    }),
-  );
+  // cadence anchors here and the episode-interruption check works. A retire that landed while the
+  // nudge ran ends the episode here instead — no stamp, and no next step.
+  if (!(await stampUnlessRetired())) return { outcome: "done" };
 
   // NOTE: The outside-window fallback note ENDS the sequence: with no usable template, every further step
   // would be equally undeliverable (only a customer reply reopens the 24h window, and that reply
