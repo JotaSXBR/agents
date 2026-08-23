@@ -413,6 +413,15 @@ function blankDocumentContent(data: AgentExport): AgentExport {
     tpl.blocks = [];
     tpl.style = {};
     tpl.description = null;
+    // A field's LABEL and DESCRIPTION are prose too — the description is what the operator writes to
+    // tell the model what to put in the field ("o CNPJ do cliente, ex: 12.345.678/0001-90"), which
+    // is exactly the shape a secret regex reads as a credential. The `name` and `type` stay
+    // scanned: they are the tool contract, identifiers, and no place to hide anything.
+    tpl.fields = (tpl.fields as Record<string, unknown>[]).map((f) => ({
+      ...f,
+      label: "",
+      description: null,
+    }));
   }
   return clone;
 }

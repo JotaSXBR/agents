@@ -751,7 +751,18 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
             text: "Configure o webhook com api_key=abcdef0123456789abcdef e avise o time.",
           },
         ],
-        fields: [],
+        // A field's DESCRIPTION is prose for the same reason: it is what the operator writes to tell
+        // the model what belongs in the field, and an example is exactly where a credential-shaped
+        // string appears. Its `name` and `type` are the tool contract and stay scanned.
+        fields: [
+          {
+            name: "chave",
+            label: "Chave",
+            type: "text",
+            description:
+              "a chave do cliente, ex: api_key=abcdef0123456789abcdef",
+          },
+        ],
         style: starter.style,
       },
       appDb,
@@ -775,8 +786,10 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
       const exported = exp.components?.documentTemplates?.find(
         (t) => t.slug === "termos_tecnicos",
       );
-      // …and the prose is still THERE: blanking happens on the scan clone, not on the bundle.
+      // …and the prose is still THERE, in both halves: blanking happens on the scan clone, not on
+      // the bundle a destination has to be able to import.
       expect(JSON.stringify(exported?.blocks)).toContain("api_key=");
+      expect(JSON.stringify(exported?.fields)).toContain("api_key=");
     } finally {
       await suDb.$executeRawUnsafe(
         `DELETE FROM agent_tool_selections WHERE document_template_id = ${BigInt(tpl.id)}`,

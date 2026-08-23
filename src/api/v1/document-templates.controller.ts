@@ -214,7 +214,11 @@ export const documentTemplatesController = new Elysia({
         "Preview document template",
         "Renders a saved template or an unsaved draft to PDF, without issuing anything.",
       ),
-      response: errors(400, 401, 403),
+      // 404 included: previewing by `id` LOOKS the template up, and a well-formed id that names
+      // nothing in this tenant answers the same way a GET does. Leaving it out publishes a union
+      // the endpoint does not honour, and an Eden caller narrowing on the declared statuses is
+      // handed a status its types say cannot happen.
+      response: errors(400, 401, 403, 404),
     },
   )
   .get(
