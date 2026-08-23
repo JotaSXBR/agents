@@ -389,11 +389,17 @@ function tokenFaultReason(where: string, fault: TokenFault): string {
 
 // ── values (what one issuance supplies) ──
 
-export const lineItemValueSchema = z.object({
-  description: z.string().min(1).max(500),
-  quantity: z.number().finite().nonnegative(),
-  unitPrice: z.number().finite().nonnegative(),
-});
+// STRICT, like the tool schema the model sees: a key this shape does not know is refused, not
+// stripped. Stripped, a caller that put a discount inside a line item got a 200 and a document
+// without it — and the value it wrote was even kept in the snapshot, ignored by the renderer, which
+// is the most confusing version of that outcome.
+export const lineItemValueSchema = z
+  .object({
+    description: z.string().min(1).max(500),
+    quantity: z.number().finite().nonnegative(),
+    unitPrice: z.number().finite().nonnegative(),
+  })
+  .strict();
 export type LineItemValue = z.infer<typeof lineItemValueSchema>;
 
 export type DocumentValue = string | number | LineItemValue[];

@@ -41,6 +41,7 @@ import { AppError, NotFoundError } from "@/lib/errors";
 import { runScopedOn, type TenantContext } from "@/lib/tenancy";
 import type { ChatwootClient } from "@/modules/chatwoot/client";
 import { renderInboundMessage } from "@/modules/chatwoot/render";
+import { documentToolName } from "@/modules/documents/templates";
 import {
   emitFlowEvent,
   type FlowContext,
@@ -214,6 +215,11 @@ function buildPlaygroundToolset(
       // (calculator, get_current_time) run for real. `allowed` is the agent's own native set.
       buildNativeTools: (ctx, allowed) =>
         buildSimulatedNativeTools(ctx, allowed),
+      // A document tool is conversation-scoped for the same reason handoff/resolve are: it needs a
+      // turn to attach the file to. Run for real here it would refuse every call with the message
+      // meant for proactive nudges, so the playground would show behaviour production never
+      // produces. Simulated, the operator sees the agent choose it — which is what they came to see.
+      simulateDocuments: true,
       mcp: params.deps?.mcp,
     },
   );
@@ -261,9 +267,12 @@ async function buildPlaygroundGraph(params: {
   const mockedNames = new Set(Object.keys(toolMocks ?? {}));
   const toolNames = new Set(tools.map((tl) => tl.name));
   const simulatedNames = new Set(
-    CONVERSATION_NATIVE_TOOL_NAMES.filter(
-      (n) => toolNames.has(n) && !mockedNames.has(n),
-    ),
+    [
+      ...CONVERSATION_NATIVE_TOOL_NAMES,
+      // The document tools the agent was granted, by the name each template produces: they are
+      // simulated here too, and a trace that did not say so would read as a document really issued.
+      ...loaded.documentSelections.map((d) => documentToolName(d.slug)),
+    ].filter((n) => toolNames.has(n) && !mockedNames.has(n)),
   );
   const traceLabels: TraceLabelOpts = { mockedNames, simulatedNames };
   const graph = await buildModelAndGraph(loaded, tools, {

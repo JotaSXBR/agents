@@ -832,6 +832,9 @@ export interface ToolBuildDeps {
     allowed?: Iterable<string>,
   ) => StructuredToolInterface[];
   mcp?: McpLoadDeps;
+  // The playground simulates conversation tools rather than running them; a document tool belongs to
+  // that set, because it needs a turn to attach to. See DocumentToolDeps.simulate.
+  simulateDocuments?: boolean;
   // Flow telemetry context for THIS turn. When present, an MCP discovery failure is surfaced as a
   // flowlog warn (visible in the Logs page; paged on inbox traffic) instead of only a stdout log.
   flow?: FlowContext;
@@ -1141,6 +1144,7 @@ export async function buildToolset(
       // The same zone the agent tells the time in, so a document's date and a message saying "hoje"
       // cannot disagree by a day.
       timezone: cfg.timezone,
+      simulate: deps.simulateDocuments,
       toolInstructions,
     }),
     ...buildHttpTools(cfg.httpToolDefs, {

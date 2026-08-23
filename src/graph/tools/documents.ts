@@ -39,6 +39,12 @@ export interface DocumentToolDeps {
   // DATED — a document issued at 22:00 in São Paulo is 01:00 UTC the next day, and the customer must
   // not receive a quote dated tomorrow.
   timezone?: string;
+  // The playground SIMULATES conversation tools rather than running them, and a document tool is
+  // conversation-scoped in the same way — it needs a turn to attach to. Without this it was listed
+  // as a live tool and refused every call with the proactive-message message, so the operator saw
+  // behaviour the production path never produces. Simulated, they see the agent CHOOSE it, which is
+  // the thing the playground is for, and no number is consumed and no row is written.
+  simulate?: boolean;
   toolInstructions?: Record<string, string>;
 }
 
@@ -164,6 +170,9 @@ export function buildDocumentTools(
         // Queued, not sent, for the same reason as send_image: delivery happens after the turn's
         // gates, so a superseded, taken-over or blocked turn must not have already put a priced
         // document in front of the customer.
+        if (deps.simulate) {
+          return `[simulado] Documento "${selection.name}" seria emitido e anexado à sua resposta deste turno. Nada foi emitido: no playground não há conversa para receber o arquivo.`;
+        }
         const turnState = deps.turnState;
         if (!turnState) {
           return "Não é possível anexar um documento neste momento (mensagem proativa). Diga ao cliente que ele será enviado na conversa.";

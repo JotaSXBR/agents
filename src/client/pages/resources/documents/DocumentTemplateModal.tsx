@@ -152,16 +152,37 @@ export function DocumentTemplateModal({
     const session = sessionRef.current;
     setSaving(true);
     try {
+      // Only what CHANGED. The modal holds a snapshot from when the list was loaded, and sending
+      // every field back makes a wording-only edit overwrite a name, prefix or style an API or MCP
+      // client set in the meantime — the same multi-transport overwrite `blockText` exists to avoid
+      // for the blocks. The server's row lock serialises the writes; it cannot know that a field
+      // this request restated was never edited here.
+      const patch: Record<string, unknown> = {};
+      if (name !== template.name) patch.name = name;
+      if (description !== (template.description ?? "")) {
+        patch.description = description || null;
+      }
+      if (numberPrefix !== (template.numberPrefix ?? "")) {
+        patch.numberPrefix = numberPrefix || null;
+      }
+      if (enabled !== template.enabled) patch.enabled = enabled;
+      if (Object.keys(blockText).length > 0) patch.blockText = blockText;
+      const changedStyle = Object.fromEntries(
+        Object.entries(style as unknown as Record<string, unknown>).filter(
+          ([k, v]) =>
+            v !== (template.style as unknown as Record<string, unknown>)[k],
+        ),
+      );
+      if (Object.keys(changedStyle).length > 0) patch.style = changedStyle;
+      if (Object.keys(patch).length === 0) {
+        showToast(t("common.saved", "Saved."), "success");
+        baselineRef.current = null;
+        modal.close();
+        return;
+      }
       const { error } = await api.api.v1["document-templates"]({
         id: template.id,
-      }).patch({
-        name,
-        description: description || null,
-        numberPrefix: numberPrefix || null,
-        enabled,
-        blockText,
-        style: style as unknown as Record<string, unknown>,
-      });
+      }).patch(patch);
       if (session !== sessionRef.current) return;
       if (error) {
         showToast(

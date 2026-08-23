@@ -353,6 +353,32 @@ describe.skipIf(!dbUp)("buildDocumentTools", () => {
     expect(after).toBe(mid);
   });
 
+  // The playground has no conversation to attach a file to, so a document tool is simulated there
+  // the way handoff and resolve are. Run for real it refused every call with the message written for
+  // proactive nudges — the operator would see behaviour production never produces, on the screen
+  // whose whole job is showing what the agent does.
+  test("is simulated in the playground: chosen, described, and never issued", async () => {
+    const before = await suDb.issuedDocument.count({ where: { tenantId } });
+    const [built] = buildDocumentTools(
+      [
+        {
+          templateId,
+          name: "Orçamento",
+          slug: "orcamento",
+          description: null,
+          fields: FIELDS,
+        },
+      ],
+      { tenantId, base: appDb, storageDir: DIR, simulate: true },
+    );
+    const out = String(await built?.invoke(ARGS));
+    expect(out).toMatch(/simulado/);
+    expect(out).toContain("Orçamento");
+    expect(await suDb.issuedDocument.count({ where: { tenantId } })).toBe(
+      before,
+    );
+  });
+
   // A proactive nudge has no turn to queue into, and its own gate (the 24h service window) decides
   // whether anything may be sent at all. Declining is the only safe answer there.
   test("declines when there is no turn to queue into", async () => {

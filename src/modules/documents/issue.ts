@@ -404,6 +404,12 @@ async function finish(
   // Bun.write creates parent directories, which is why the temporary lives beside the target rather
   // than in a system temp dir — and why the rename cannot cross a filesystem. The suffix keeps two
   // concurrent renders from sharing the temporary as well.
+  //
+  // NOT COVERED BY A TEST, and measured as such: observing the truncation needs two renders of one
+  // key overlapping AND a reader landing inside the window, which no single-process test reaches
+  // with any reliability — the last attempt at a race like this one (the template patch, round 4)
+  // passed with the fix removed three times out of three and was deleted rather than kept. What IS
+  // asserted is the visible half: a successful issuance leaves no `.part` behind.
   const finalPath = `${dir}/${key}`;
   const tempPath = `${finalPath}.${process.pid}-${Math.random().toString(36).slice(2, 10)}.part`;
   await Bun.write(tempPath, buffer);

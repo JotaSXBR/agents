@@ -609,6 +609,17 @@ describe("parseDocumentValues", () => {
 
   // A description is printed on a PRICED row, so whitespace is the same defect as a blank required
   // field: a numbered financial document with an empty line carrying a price.
+  // Strict, like the tool schema the model sees. Stripped, a caller that put a discount inside a
+  // line item got a 200 and a document without it — and the value stayed in the snapshot, ignored
+  // by the renderer, which is the most confusing version of that outcome.
+  test("refuses an undeclared key inside a line item", () => {
+    const r = parseDocumentValues(FIELDS as never, {
+      cliente: "Ana",
+      itens: [{ description: "x", quantity: 1, unitPrice: 2, desconto: 10 }],
+    });
+    expect(r.ok).toBe(false);
+  });
+
   test("refuses a line item whose description renders blank", () => {
     const r = parseDocumentValues(FIELDS as never, {
       cliente: "Ana",

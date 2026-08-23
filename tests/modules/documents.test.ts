@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { rm } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/../generated/prisma/client";
 import { AppError } from "@/lib/errors";
@@ -459,6 +459,11 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       select: { templateId: true },
     });
     expect(row?.templateId).toBeNull();
+    // The PDF is published by renaming a temporary into place, so a reader never sees a half-written
+    // file. The window itself is not reachable from a single-process test (see issue.ts), but the
+    // residue is: a successful issuance leaves no `.part` behind.
+    const litter = await readdir(`${DIR}/${tenantA}`).catch(() => []);
+    expect(litter.filter((f) => f.endsWith(".part"))).toEqual([]);
   });
 
   // ── the losing side of an idempotency race ──
