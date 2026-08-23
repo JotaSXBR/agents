@@ -257,15 +257,22 @@ async function deliverPendingImages(
   // separated from the last by a Chatwoot round trip, so a run called off after the second picture
   // would go on posting the third into a conversation the operator was told had been cleared.
   calledOff: () => Promise<boolean> = async () => false,
-): Promise<boolean> {
+): Promise<{ sent: boolean; calledOff: boolean }> {
   // NOTE: Sorted by the model's tool-call order, not by the order the downloads finished in — the
   // batch runs concurrently, and a caption only makes sense next to the picture it was written for.
   const queued = turnState.pendingImages
     .splice(0)
     .sort((a, b) => a.order - b.order);
   let sent = false;
+  let stopped = false;
   for (const img of queued) {
-    if (await calledOff()) break;
+    // Reported back, not folded into `sent`. "Nothing was delivered" answers two different questions
+    // — every attachment failed, or the run was called off — and the image-only branch throws on the
+    // first, which would put `lastError` back on a conversation /reset had just cleared.
+    if (await calledOff()) {
+      stopped = true;
+      break;
+    }
     try {
       await client.sendFileAttachment(
         conversationId,
@@ -296,7 +303,7 @@ async function deliverPendingImages(
       });
     }
   }
-  return sent;
+  return { sent, calledOff: stopped };
 }
 
 // Builds the client + tools + graph from an already-loaded AgentConfig, invokes the thread, re-checks
@@ -1034,13 +1041,15 @@ export async function runLoadedTurn(
       // Nothing has left this turn yet on this branch, so the whole thing stands down.
       if (await writeCalledOff()) return "stale";
       const queued = turnState.pendingImages.length;
-      const sent = await deliverPendingImages(
+      const images = await deliverPendingImages(
         client,
         conversationId,
         turnState,
         flow,
         writeCalledOff,
       );
+      if (images.calledOff) return "stale";
+      const sent = images.sent;
       // NOTE: The images WERE the turn and none of them reached the customer. That is a failed turn,
       // not a silent one: returning "empty" here would let the deferred resolve close a conversation
       // nobody answered, and the callers only record a turn error (private note, lastError, alert)

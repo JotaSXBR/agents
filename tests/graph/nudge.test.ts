@@ -395,6 +395,74 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
     expect(isTurnInFlight(graphThreadId)).toBe(false);
   });
 
+  // The window between the thread claim and the invoke, which is not empty on a conversation that
+  // has a contact-inbox: the state read, the divider write, the marker move and armCompaction all
+  // sit in it, and the last opens a transaction of its own OUTSIDE the lock. The invoke persists the
+  // channel /reset is clearing, so an answer taken at the claim is an answer about the wrong moment.
+  test("a reset landing between the thread claim and the invoke stops the turn", async () => {
+    const contactInboxId = 8803;
+    await seedConv(9979, null, new Date(), contactInboxId);
+    const graphThreadId = contactInboxThreadId(
+      tenantId,
+      instanceId,
+      contactInboxId,
+    );
+    let wanted = true;
+    // The command commits at the thread write inside the lock — after the ask there, before the
+    // invoke. A boolean and not a job row: this path takes `stillWanted` as a closure.
+    const claimWatcher = appDb.$extends({
+      query: {
+        agentThread: {
+          async upsert({ args, query }) {
+            const res = await query(args);
+            wanted = false;
+            return res;
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+    const s = stub();
+    // Counted at the GENERATION, not at the factory: the graph is built before any of this and a
+    // build counter would read 1 on a turn that never invoked.
+    let generated = 0;
+    class CountingModel extends BaseChatModel {
+      constructor() {
+        super({});
+      }
+      _llmType() {
+        return "fake-counting";
+      }
+      async _generate(): Promise<ChatResult> {
+        generated += 1;
+        return {
+          generations: [
+            { text: "Tudo certo?", message: new AIMessage("Tudo certo?") },
+          ],
+        };
+      }
+    }
+
+    const outcome = await runAgentNudge({
+      tenantId,
+      threadId: `${tenantId}:${instanceId}:9979`,
+      nudge: { source: "followup", kind: "inactivity", step: 1 },
+      stillWanted: async () => wanted,
+      base: claimWatcher,
+      deps: {
+        makeModel: () => new CountingModel(),
+        makeClient: s.makeClient,
+        checkpointer: new MemorySaver(),
+        persistUsage: async () => {},
+      },
+    });
+
+    expect(outcome).toBe("stale");
+    expect(s.messages).toEqual([]);
+    // The thread was neither written to nor left claimed.
+    expect(isTurnInFlight(graphThreadId)).toBe(false);
+    expect(generated).toBe(0);
+  });
+
   // THE BARRIER (issue #194), at the third reader of the memory thread. A nudge is a model call on
   // this thread like any other, so a message the agent stayed silent on that is still a queued row
   // is a message the nudge writes without — and the nudge is the writer most likely to ask about

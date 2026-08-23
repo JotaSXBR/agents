@@ -1041,6 +1041,13 @@ export async function runAgentNudge(
       });
     }
 
+    // The ask for the INVOKE, and it is not the one inside the lock repeated. That one guards the
+    // divider and the claim; between it and here sit the state read, the divider write, the marker
+    // move and `armCompaction` — the last of which opens a transaction of its own, outside the lock.
+    // The invoke persists the channel, which is the write /reset is clearing, so it gets its own.
+    // Same placement `runLoadedTurn` uses, for the same reason.
+    if (!(await stillWanted())) return "stale";
+
     // 4. Invoke with the normalized event as a HUMAN turn. It must NOT be a SystemMessage: the agent
     // node already prepends the one-and-only system prompt, and a second system message in the thread
     // makes strict providers (Google) reject the call ("System messages are only permitted as the
