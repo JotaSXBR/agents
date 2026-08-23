@@ -29,6 +29,15 @@ SET app.is_super_admin = 'on';
 -- generation the widget actually opened from, and it is a different question from "the entry
 -- conversation that has been active most recently", which is what the code being replaced asked.
 --
+-- With one correction the column itself forces: `redirect_sent_at` is OVERWRITTEN by a resend (the
+-- gate stamps the delivery, it does not append), so an entry conversation that redirected again
+-- after its chat was linked now carries a timestamp AFTER the link and the rule above cannot see it.
+-- The fallback covers that, and only where it cannot be wrong: when the contact has exactly ONE
+-- conversation that ever redirected on this instance, that conversation is the entry whatever its
+-- timestamp says. With several, the answer is genuinely unknown from the row alone and the column
+-- stays null — which is the fail-closed direction (a funnel stage that does not fire) rather than
+-- the open one (a goodbye and a RESOLVE landing on somebody else's conversation).
+--
 -- Only same tenant, same Chatwoot instance and same contact, which is the whole reach one episode
 -- can have. It does NOT check the inbox pair, because a migration does not have the agent's config:
 -- a tenant running two redirect funnels for one contact could be given the other funnel's entry.
@@ -39,17 +48,31 @@ SET app.is_super_admin = 'on';
 -- A correlated subquery in SET, not a LATERAL join: the UPDATE target is not a FROM item, so
 -- Postgres refuses to let a LATERAL reference it (42P10).
 UPDATE "conversations" w
-SET "redirect_entry_conversation_id" = (
-  SELECT c."chatwoot_conversation_id"
-  FROM "conversations" c
-  WHERE c."tenant_id" = w."tenant_id"
-    AND c."chatwoot_instance_id" = w."chatwoot_instance_id"
-    AND c."contact_id" = w."contact_id"
-    AND c."id" <> w."id"
-    AND c."redirect_sent_at" IS NOT NULL
-    AND c."redirect_sent_at" <= w."redirect_linked_at"
-  ORDER BY c."redirect_sent_at" DESC
-  LIMIT 1
+SET "redirect_entry_conversation_id" = COALESCE(
+  (
+    SELECT c."chatwoot_conversation_id"
+    FROM "conversations" c
+    WHERE c."tenant_id" = w."tenant_id"
+      AND c."chatwoot_instance_id" = w."chatwoot_instance_id"
+      AND c."contact_id" = w."contact_id"
+      AND c."id" <> w."id"
+      AND c."redirect_sent_at" IS NOT NULL
+      AND c."redirect_sent_at" <= w."redirect_linked_at"
+    ORDER BY c."redirect_sent_at" DESC
+    LIMIT 1
+  ),
+  -- The resend case. HAVING with no GROUP BY yields one row when the condition holds and none when
+  -- it does not, so this returns the id only where a single candidate exists.
+  (
+    SELECT MAX(c."chatwoot_conversation_id")
+    FROM "conversations" c
+    WHERE c."tenant_id" = w."tenant_id"
+      AND c."chatwoot_instance_id" = w."chatwoot_instance_id"
+      AND c."contact_id" = w."contact_id"
+      AND c."id" <> w."id"
+      AND c."redirect_sent_at" IS NOT NULL
+    HAVING COUNT(*) = 1
+  )
 )
 WHERE w."redirect_linked_at" IS NOT NULL
   AND w."contact_id" IS NOT NULL;

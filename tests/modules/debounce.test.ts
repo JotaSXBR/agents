@@ -88,6 +88,9 @@ function makeStub(opts: {
       opts.sent.push([conversationId, content]);
       return {};
     },
+    // A split reply toggles the typing indicator around each balloon; without it here the stub is a
+    // Chatwoot that cannot be told the agent is typing, and the call throws before its own catch.
+    toggleTyping: async () => ({}),
   } as unknown as ChatwootClient;
   return async () => client;
 }
@@ -818,6 +821,87 @@ describe.skipIf(!dbUp)("debounce", () => {
     expect(sent).toEqual([[849, "Fechado!"]]);
     // The close did not.
     expect(toggles).toEqual([]);
+  });
+
+  // The typing pause, which is the wait NO other fence covers: it sits between the per-balloon ask
+  // and the send it guards, inside `deliverReply`. A reset landing there leaves the loop with zero
+  // balloons delivered, and zero is not a delivery.
+  //
+  // The watermark is NOT what separates the two readings here — `shouldPost` claims the burst as its
+  // CAS well before this, so it has already moved either way. What separates them is the word: a
+  // turn reported as "posted" clears the conversation's error, announcing to the operator that the
+  // agent answered, when nothing left.
+  test("a reset landing in the typing pause leaves the burst unanswered", async () => {
+    const before = await suDb.agent.findUniqueOrThrow({
+      where: { id: agentDbId },
+      select: { settings: true },
+    });
+    await suDb.agent.update({
+      where: { id: agentDbId },
+      data: {
+        settings: { ...(before.settings as object), split: { enabled: true } },
+      },
+    });
+    try {
+      await seedConversation(850);
+      // A failure the operator is looking at. Only a delivered turn is allowed to take it away.
+      await suDb.conversation.updateMany({
+        where: { tenantId, chatwootConversationId: 850 },
+        data: { lastError: "boom", lastErrorAt: new Date() },
+      });
+      const thread = threadOf(850);
+      const row = await suDb.schedulerJob.create({
+        data: {
+          tenantId,
+          kind: "DEBOUNCE",
+          dedupeKey: debounceDedupeKey(thread),
+          status: "CLAIMED",
+          runAt: new Date(),
+          payload: { threadId: thread, agentBotId: 9, burstStartedAt: 1 },
+        },
+        select: { id: true, claimSeq: true },
+      });
+      const sent: Array<[number, string]> = [];
+
+      const out = await flushDebounceJob({
+        job: { ...jobFor(850), id: row.id, claimSeq: row.claimSeq },
+        base: appDb,
+        deps: {
+          makeModel: () =>
+            new FakeListChatModel({
+              responses: ["Olá!\n\nComo vai?"],
+            }) as unknown as BaseChatModel,
+          makeClient: makeStub({
+            pages: [page([{ id: 1, content: "oi" }])],
+            sent,
+            calls: { getMessages: 0 },
+          }),
+          checkpointer: new MemorySaver(),
+          // The command commits during the pause before the FIRST balloon.
+          sleep: async () => {
+            await retireJobsByDedupeKey(
+              tenantId,
+              "DEBOUNCE",
+              debounceDedupeKey(thread),
+              suDb,
+            );
+          },
+        },
+      });
+
+      expect(out).toEqual({ outcome: "done" });
+      expect(sent).toEqual([]);
+      const conv = await suDb.conversation.findFirstOrThrow({
+        where: { tenantId, chatwootConversationId: 850 },
+        select: { lastError: true },
+      });
+      expect(conv.lastError).toBe("boom");
+    } finally {
+      await suDb.agent.update({
+        where: { id: agentDbId },
+        data: { settings: before.settings as object },
+      });
+    }
   });
 
   test("a human assignee closes the gate before any Chatwoot fetch", async () => {

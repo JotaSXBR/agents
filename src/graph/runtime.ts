@@ -631,7 +631,7 @@ export async function runLoadedTurn(
       // later gate can catch — it leaves before them. A run called off during the model call reaches
       // exactly here, so this is where it stops. The transfer itself stays done: the tool ran, the
       // conversation is the human queue's, and withholding the sentence is the part still ours.
-      if (delivered === "stale") return;
+      if (delivered === "stale" || delivered === 0) return;
       deliveredBalloons = delivered;
     } catch (e) {
       // Best-effort, the semantics the line had while the tool sent it. The transfer succeeded, so
@@ -1104,7 +1104,10 @@ export async function runLoadedTurn(
     if (images.calledOff) return images.sent ? "posted" : "stale";
 
     const delivered = await deliverText(reply, recheck.voiceReply);
-    if (delivered === "stale") return "stale";
+    // Zero is the split loop standing down on its FIRST balloon: nothing reached the customer, so
+    // this is a stale turn and not a delivered one. Treating every number as posted would advance
+    // the handled watermark over a burst nobody answered, and the next flush starts after it.
+    if (delivered === "stale" || delivered === 0) return "stale";
     deliveredBalloons = delivered;
     // Same rule as the branch above: the reply is out, the resolve is a separate write.
     if (await writeCalledOff()) return "posted";
