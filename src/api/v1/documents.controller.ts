@@ -59,11 +59,20 @@ export const documentsController = new Elysia({
     {
       requireRole: "TENANT_ADMIN",
       query: t.Object({
+        // Constrained at the TRANSPORT, because the handler coerces both: `Number("abc")` is NaN and
+        // reaches Prisma's `take`, and `BigInt("abc")` throws — a 500 for a malformed query string,
+        // where the route advertises a validation response.
         limit: t.Optional(
-          t.String({ description: "Max rows to return (positive integer)." }),
+          t.String({
+            pattern: "^[1-9][0-9]*$",
+            description: "Max rows to return (positive integer).",
+          }),
         ),
         templateId: t.Optional(
-          t.String({ description: "Only documents from this template." }),
+          t.String({
+            pattern: "^[0-9]+$",
+            description: "Only documents from this template.",
+          }),
         ),
         threadId: t.Optional(
           t.String({ description: "Only documents issued on this thread." }),

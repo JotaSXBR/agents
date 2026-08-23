@@ -318,6 +318,23 @@ describe.skipIf(!dbUp)("MCP document writes", () => {
     );
     expect(renamed.ok).toBe(false);
     if (!renamed.ok) expect(renamed.error).toContain("send_image");
+    // The description bound belongs to the dry run too: it is checked by the apply and ignored by
+    // the render, so a preview would report a template valid that the write then refuses.
+    const longDescription = await documentTemplateCreate(
+      principal({ tenantId }),
+      {
+        starter: "quote",
+        name: "Descritivo",
+        slug: "descritivo_mcp",
+        description: "x".repeat(2_001),
+      },
+      { base: appDb },
+    );
+    expect(longDescription.ok).toBe(false);
+    if (!longDescription.ok) {
+      expect(longDescription.error).toContain("2000");
+    }
+
     const blankRename = await documentTemplateUpdate(
       principal({ tenantId }),
       { document_template_id: tpl?.id as string, name: "   " },

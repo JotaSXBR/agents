@@ -458,6 +458,28 @@ describe("parseDocumentValues", () => {
     expect(optional.ok).toBe(true);
   });
 
+  // Required has to mean the customer READS something. Whitespace and control characters are
+  // non-empty as a string and empty once sanitised, so a required customer name could clear every
+  // gate and come out as a blank line on a numbered document.
+  test("refuses required text that is blank once sanitised", () => {
+    const required = [
+      { name: "cliente", label: "Cliente", type: "text", required: true },
+    ] as never;
+    for (const cliente of ["   ", "\u0000\u0001", "\u00a0\u00a0"]) {
+      const r = parseDocumentValues(required, { cliente });
+      expect(r.ok).toBe(false);
+      expect(r.ok === false && r.reason).toContain("cliente");
+    }
+    expect(parseDocumentValues(required, { cliente: " Ana " }).ok).toBe(true);
+    // An OPTIONAL text field is free to be blank: nothing was promised.
+    expect(
+      parseDocumentValues(
+        [{ name: "obs", label: "Obs", type: "text" }] as never,
+        { obs: "   " },
+      ).ok,
+    ).toBe(true);
+  });
+
   test("refuses more line items than the ceiling", () => {
     const r = parseDocumentValues(FIELDS as never, {
       cliente: "Ana",

@@ -15,6 +15,7 @@ import {
   isReservedTokenName,
   malformedTokenIn,
   RESERVED_TOKEN_NAMES,
+  sanitizeDocumentValue,
   tokensIn,
 } from "./tokens";
 
@@ -456,6 +457,20 @@ export function parseDocumentValues(
       return {
         ok: false,
         reason: `values: "${field.name}" (${field.label}) is required, so it needs at least one item.`,
+      };
+    }
+    // The same rule for text, against what will actually PRINT. "   " and a string of control
+    // characters are non-empty here and empty after sanitising, so a required customer name could
+    // clear every gate and come out as a blank line on a numbered document. What survives
+    // sanitising is what the customer reads, so that is what "required" has to be about.
+    if (
+      field.required &&
+      typeof value === "string" &&
+      sanitizeDocumentValue(value).trim() === ""
+    ) {
+      return {
+        ok: false,
+        reason: `values: "${field.name}" (${field.label}) is required, and this value is blank once whitespace and control characters are removed.`,
       };
     }
     const problem = valueProblem(field, value);

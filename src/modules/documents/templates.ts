@@ -98,19 +98,17 @@ function slugConflict(slug: string): (e: unknown) => never {
 // is the check that can run without writing anything.
 export async function documentTemplateWriteProblem(
   ctx: TenantContext,
-  input: { name?: unknown; slug?: string },
+  input: { name?: unknown; slug?: string; description?: unknown },
   base: PrismaClient = basePrisma,
   opts: { deriveSlugFromName: boolean; excludeId?: bigint } = {
     deriveSlugFromName: true,
   },
 ): Promise<string | null> {
   const { deriveSlugFromName, excludeId } = opts;
-  let name: string | undefined;
-  if (input.name !== undefined) {
-    const parsed = templateNameSchema.safeParse(input.name);
-    if (!parsed.success) return "name: must be between 1 and 120 characters.";
-    name = parsed.data;
-  }
+  const metadata = templateMetadataProblem(input);
+  if (metadata) return metadata;
+  const name =
+    input.name !== undefined ? templateNameSchema.parse(input.name) : undefined;
   // Only CREATE derives a slug from the name; a rename keeps the slug it already has, because the
   // slug is a tool name an agent may already be granted. Deriving here on an update would refuse a
   // perfectly good rename over a slug the write was never going to use — and only on the dry run,
@@ -218,28 +216,47 @@ export const templateDescriptionSchema = z.string().max(2_000).nullable();
 // ZodError, so it reaches the fallback handler as an INTERNAL_SERVER_ERROR and an operator who left
 // the name empty is told the server broke. The create route in particular CANNOT require the name at
 // the transport — the body schema is shared with the patch — so this is where the answer is decided.
+// The metadata rules as ONE answer, so the four ways a template gets written cannot drift: the REST
+// and MCP writes (which throw), the MCP dry runs (which must refuse exactly what the apply refuses),
+// and an imported bundle (which warns and skips). Every one of them had to be told separately about
+// the description bound, and one of them was not.
+export function templateMetadataProblem(input: {
+  name?: unknown;
+  description?: unknown;
+}): string | null {
+  if (
+    input.name !== undefined &&
+    !templateNameSchema.safeParse(input.name).success
+  ) {
+    return "name: must be between 1 and 120 characters.";
+  }
+  if (
+    input.description !== undefined &&
+    !templateDescriptionSchema.safeParse(input.description ?? null).success
+  ) {
+    return "description: must be at most 2000 characters.";
+  }
+  return null;
+}
+
 function parseTemplateDescription(value: unknown): string | null {
-  const parsed = templateDescriptionSchema.safeParse(value ?? null);
-  if (!parsed.success) {
+  const problem = templateMetadataProblem({ description: value });
+  if (problem) {
     throw new AppError(
-      "description: must be at most 2000 characters.",
+      problem,
       400,
       "errors.invalidDocumentTemplateDescription",
     );
   }
-  return parsed.data;
+  return templateDescriptionSchema.parse(value ?? null);
 }
 
 function parseTemplateName(value: unknown): string {
-  const parsed = templateNameSchema.safeParse(value);
-  if (!parsed.success) {
-    throw new AppError(
-      "name: must be between 1 and 120 characters.",
-      400,
-      "errors.invalidDocumentTemplateName",
-    );
+  const problem = templateMetadataProblem({ name: value });
+  if (problem) {
+    throw new AppError(problem, 400, "errors.invalidDocumentTemplateName");
   }
-  return parsed.data;
+  return templateNameSchema.parse(value);
 }
 
 // Every write goes through the AUTHORING gate, never the tolerant reader: what the operator wrote
@@ -299,6 +316,17 @@ export async function createDocumentTemplate(
   const problem = slugProblem(slug);
   if (problem) {
     throw new AppError(`slug: ${problem}.`, 400, "errors.invalidDocumentSlug");
+  }
+  if (input.blockText !== undefined) {
+    // Accepted by the shared body schema because the PATCH needs it, and meaningless here: there is
+    // no stored layout to merge into, and the caller is already sending the blocks. Refused rather
+    // than ignored — a 200 that discarded what was asked for is the failure this whole field exists
+    // to prevent.
+    throw new AppError(
+      "blockText: only an update can replace text by block id; when creating, write the text inside blocks.",
+      400,
+      "errors.invalidDocumentTemplate",
+    );
   }
   const content = validated({
     blocks: input.blocks ?? [],

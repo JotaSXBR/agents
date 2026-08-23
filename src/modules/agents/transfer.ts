@@ -33,7 +33,10 @@ import {
 } from "@/modules/agents/credential-paths";
 import { clampOversizedTextInPlace } from "@/modules/agents/text-caps";
 import { parseDocumentStyle } from "@/modules/documents/blocks";
-import { slugProblem } from "@/modules/documents/templates";
+import {
+  slugProblem,
+  templateMetadataProblem,
+} from "@/modules/documents/templates";
 import { parseAuthoredTemplate } from "@/modules/documents/validate";
 import { normalizeSettingsForStorage } from "@/modules/images/settings";
 import { isKnownCatalogType } from "@/modules/integrations/catalog";
@@ -1329,9 +1332,17 @@ async function createMissingComponents(
     // slug becomes a tool name: one reading `image` produces `send_image`, which the assembly then
     // drops as a duplicate of the built-in — the operator would see a granted template whose tool
     // never appears, with nothing anywhere saying why.
-    const slugFault = slugProblem(tpl.slug);
-    const content = slugFault
-      ? ({ ok: false, reason: `slug: ${slugFault}.` } as const)
+    // A bundle is hand-editable, and this path writes to the table directly rather than through
+    // createDocumentTemplate — so every rule that write applies has to be applied here too. The
+    // description is the one that bites: it is appended verbatim to the agent's tool description on
+    // every turn, and an oversized one arriving in a bundle would do that on the destination.
+    const metaFault =
+      templateMetadataProblem({
+        name: tpl.name,
+        description: tpl.description ?? null,
+      }) ?? (slugProblem(tpl.slug) ? `slug: ${slugProblem(tpl.slug)}.` : null);
+    const content = metaFault
+      ? ({ ok: false, reason: metaFault } as const)
       : parseAuthoredTemplate(tpl.blocks, tpl.fields, tpl.style);
     if (!content.ok) {
       warnings.push({

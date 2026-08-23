@@ -1077,4 +1077,23 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       ),
     ).rejects.toThrow(/2000/);
   });
+
+  // The shared write body carries `blockText` because the PATCH needs it, and it means nothing on a
+  // create: there is no stored layout to merge into. Accepting and dropping it is the exact failure
+  // the field exists to prevent — a 200 that discarded what the caller asked for.
+  test("refuses blockText on create instead of dropping it", async () => {
+    await expect(
+      createDocumentTemplate(
+        ctx(tenantA),
+        {
+          name: "Com blockText",
+          slug: "com_block_text",
+          blocks: [{ id: "t", type: "text", text: "Olá" }],
+          fields: [],
+          blockText: { t: "Outro" },
+        },
+        appDb,
+      ),
+    ).rejects.toThrow(/only an update/);
+  });
 });

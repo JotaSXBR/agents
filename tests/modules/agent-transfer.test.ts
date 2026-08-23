@@ -854,6 +854,37 @@ describe.skipIf(!dbUp)("agent export/import with components", () => {
     );
   });
 
+  // A bundle is hand-editable and this import writes to the table directly, so every rule the normal
+  // write applies has to be applied here too. The description is the one that bites: it is appended
+  // verbatim to the agent's tool description on every turn of the DESTINATION.
+  test("refuses an imported template whose metadata breaks the write's own rules", async () => {
+    const exp = await exportAgent(srcCtx(), srcAgentId, appDb, {
+      includeComponents: true,
+    });
+    const tampered = structuredClone(exp);
+    const tpl = tampered.components?.documentTemplates?.find(
+      (t) => t.slug === "orcamento",
+    );
+    if (!tpl) throw new Error("bundle missing the document template");
+    tpl.slug = "orcamento_importado";
+    tpl.description = "x".repeat(2_001);
+    const { agent, warnings } = await importAgent(dstCtx(), tampered, appDb);
+    expect(warnings.some((w) => w.code === "documentTemplateInvalid")).toBe(
+      true,
+    );
+    expect(
+      await suDb.documentTemplate.count({
+        where: { tenantId: dstTenant, slug: "orcamento_importado" },
+      }),
+    ).toBe(0);
+    await suDb.$executeRawUnsafe(
+      `DELETE FROM agent_tool_selections WHERE agent_id = ${BigInt(agent.id)}`,
+    );
+    await suDb.$executeRawUnsafe(
+      `DELETE FROM agents WHERE id = ${BigInt(agent.id)}`,
+    );
+  });
+
   test("import canonicalizes legacy authoring shapes (JSON-Schema inputSchema, single-brace {var})", async () => {
     const exp = await exportAgent(srcCtx(), srcAgentId, appDb, {
       includeComponents: true,
