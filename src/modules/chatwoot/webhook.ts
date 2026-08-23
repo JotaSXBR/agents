@@ -67,7 +67,10 @@ import {
   announceFailedTurn,
   readDirectFence,
 } from "@/modules/conversations/failure-note";
-import { returnConversationToAgent } from "@/modules/conversations/service";
+import {
+  type ReturnToAgentOutcome,
+  returnConversationToAgent,
+} from "@/modules/conversations/service";
 import {
   armDebounce,
   debounceDedupeKey,
@@ -1703,22 +1706,21 @@ async function maybeConsumeCommandOrGate(params: {
       }
     }
     const resetBlocker = await answerBlocker();
-    // Somebody claimed the conversation while the hand-back was in flight. Not a failure — the
-    // takeover wins on purpose — but the operator asked for the agent back, so the acknowledgement
-    // below has to say it did not get it.
-    let takenOver = false;
+    // `undefined` = never attempted, which is a third answer and not a quieter version of the other
+    // two: the two guards below stand the hand-back down for reasons the acknowledgement has to
+    // report differently from a hand-back that ran and answered.
+    let handBack: ReturnToAgentOutcome | null | undefined;
     if (
       notOursAtStart &&
       resetBlocker === "ownership" &&
       (await heldBySameParty())
     ) {
-      const handBack = await step(
+      handBack = await step(
         "return the conversation to the agent",
         "atribuição",
         () =>
           returnConversationToAgent(sysCtx(tenantId), ctx.conv.id, {}, base),
       );
-      takenOver = handBack === "taken-over";
     }
     // Best-effort is the design; announcing a full reset after a partial one is not. The operator
     // typed /reset to get a clean slate, and acting on a conversation that is not clean is worse than
@@ -1727,12 +1729,22 @@ async function maybeConsumeCommandOrGate(params: {
     // The assignment is the one thing the operator can SEE not happening, so silence about it would
     // read as the command failing. Only when it was actually withheld: a conversation the agent
     // already owned has nothing to explain.
-    const heldBack =
-      resetBlocker === "disabled" && !(await stillOursOrUnknown())
+    // ONE question, asked once and at the END, because there are four ways to finish this command
+    // with somebody else holding the conversation and each was silent in its own way: the hand-back
+    // ran and found a new holder, the holder changed before it could run, the conversation was the
+    // bot's at the start and somebody claimed it during the cleanup, or the agent is switched off.
+    // They read the same to the operator, who typed /reset and is about to watch the agent not
+    // answer — so the sentence is chosen from the state at the END, not from which guard fired.
+    const leftWithSomebodyElse = !(await stillOursOrUnknown());
+    const heldBack = !leftWithSomebodyElse
+      ? ""
+      : resetBlocker === "disabled"
         ? " Este agente está desativado, então a conversa continua com quem a atendia."
-        : takenOver
-          ? " Alguém assumiu a conversa durante o reset, então ela continua com essa pessoa."
-          : "";
+        : handBack === null
+          ? // Attempted and threw. `failed` already names the assignment below, and explaining the
+            // same conversation twice reads as two separate problems.
+            ""
+          : " Alguém assumiu a conversa durante o reset, então ela continua com essa pessoa.";
     await postAcknowledgement(
       distinctFailed.length === 0
         ? `🔄 Memória, preferência de áudio e etiquetas/atributos desta conversa foram limpos.${heldBack}`

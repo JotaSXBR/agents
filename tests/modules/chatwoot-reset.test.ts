@@ -764,6 +764,9 @@ describe.skipIf(!dbUp)(
         .map((c) => (c.body as { content?: string })?.content ?? "")
         .join(" ");
       expect(ack).not.toContain("desativado");
+      // Nor the takeover sentence: the agent HAS it back, and a sentence that fired on every
+      // hand-back would pass the takeover tests without meaning anything.
+      expect(ack).not.toContain("Alguém assumiu");
     });
 
     // The other way the conversation can still be a human's when the reset ends: the assignment call
@@ -781,6 +784,9 @@ describe.skipIf(!dbUp)(
         .join(" ");
       expect(ack).toContain("atribuição");
       expect(ack).not.toContain("desativado");
+      // And not ALSO as a takeover. The conversation is still the human's, which is what the
+      // takeover sentence reports too — saying both would read as two separate problems.
+      expect(ack).not.toContain("Alguém assumiu");
     });
 
     // And the third way it ends with a human: somebody claimed the conversation between the status
@@ -884,6 +890,14 @@ describe.skipIf(!dbUp)(
           select: { assigneeType: true, assigneeId: true },
         });
         expect([conv.assigneeType, conv.assigneeId]).toEqual(["User", 4242]);
+        // And the operator is told. Nothing was withheld here — the command never had a hand-back to
+        // do — but the conversation still ends with a human, so a bare "cleared" would have them
+        // waiting on an agent that is now gated out.
+        expect(
+          ackCalls(cw.calls)
+            .map((c) => (c.body as { content?: string })?.content ?? "")
+            .join(" "),
+        ).toContain("Alguém assumiu a conversa durante o reset");
       } finally {
         globalThis.fetch = originalFetch;
         await suDb.conversation.updateMany({
