@@ -161,16 +161,25 @@ describe.skipIf(!dbUp)("the redirect identity backfill", () => {
       [{ sentAt: new Date(now + 60_000) }],
       new Date(now - 119_000),
     );
-    // Two funnels for one contact, and only one of them redirected before this chat was linked. The
-    // ordering still answers, and the fallback must NOT override it.
+    // Two funnels for one contact, both redirects before this chat was linked. No timestamp in the
+    // set can have moved past the link, so the ordering is a proof and the later one is the entry.
     const ordered = await episode(
+      [
+        { sentAt: new Date(now - 300_000) },
+        { sentAt: new Date(now - 200_000) },
+      ],
+      new Date(now - 100_000),
+    );
+    // The shape the ordering CANNOT settle: one redirect before the link and one after it. The later
+    // one could be this chat's entry with its stamp moved by a resend, and the earlier one an
+    // unrelated funnel — both readings fit the rows equally, so the answer is none. A funnel stage
+    // that does not fire, rather than a goodbye and a RESOLVE on somebody else's conversation.
+    const ambiguous = await episode(
       [{ sentAt: new Date(now - 200_000) }, { sentAt: new Date(now + 60_000) }],
       new Date(now - 100_000),
     );
-    // Two funnels, and BOTH timestamps sit after the link — each could have been resent. Which one
-    // this chat opened from is not in the rows, so the answer is none: a funnel stage that does not
-    // fire, rather than a goodbye and a RESOLVE landing on somebody else's conversation.
-    const ambiguous = await episode(
+    // And with both after the link there is nothing to order at all.
+    const bothAfter = await episode(
       [{ sentAt: new Date(now + 30_000) }, { sentAt: new Date(now + 60_000) }],
       new Date(now - 100_000),
     );
@@ -181,10 +190,12 @@ describe.skipIf(!dbUp)("the redirect identity backfill", () => {
 
     expect(await identityOf(plain.widget)).toBe(plain.entryIds[0] as number);
     expect(await identityOf(resent.widget)).toBe(resent.entryIds[0] as number);
+    // The LATER of the two, not the first seeded one.
     expect(await identityOf(ordered.widget)).toBe(
-      ordered.entryIds[0] as number,
+      ordered.entryIds[1] as number,
     );
     expect(await identityOf(ambiguous.widget)).toBeNull();
+    expect(await identityOf(bothAfter.widget)).toBeNull();
     expect(await identityOf(unrelated.widget)).toBeNull();
   });
 });
