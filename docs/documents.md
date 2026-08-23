@@ -280,7 +280,10 @@ enormously, so a 40 KB file can declare 20000×20000 and the renderer — which 
 every preview and every issuance, in a process every tenant shares — would allocate gigabytes for it.
 The dimensions are read from the header (PNG's IHDR, JPEG's first SOFn) and refused above four
 megapixels; an image whose dimensions cannot be read is refused too, because unmeasurable is
-unbounded.
+unbounded. The JPEG walk skips **fill bytes** — any marker may be preceded by any number of `0xFF`
+(ITU T.81 B.1.1.2) — because reading one as a marker turns the bytes after it into a segment length
+and steps the walk off the file, and the operator then sees a standards-valid logo refused as too
+large.
 
 The upload's **bytes decide the format**, not the label on them: `file.type` is whatever the caller
 put in the multipart part (and Bun derives it from the file name's extension, which a REST caller

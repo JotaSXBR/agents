@@ -85,10 +85,22 @@ export function logoPixels(
     return beUint32(bytes, 16) * beUint32(bytes, 20);
   }
   let at = 2; // past SOI
-  while (at + 9 < bytes.length) {
+  while (at + 1 < bytes.length) {
     if (bytes[at] !== 0xff) return null;
     const marker = bytes[at + 1] ?? 0;
+    // FILL BYTES: any marker may be preceded by any number of 0xFF (ITU T.81, B.1.1.2). Reading one
+    // as the marker turns the two bytes after it into a segment length and steps the walk off the
+    // file — the image then measures as unmeasurable, which is refused, so a standards-valid logo
+    // comes back to the operator as "too many pixels".
+    if (marker === 0xff) {
+      at++;
+      continue;
+    }
     // SOF0..SOF15 carry the frame header; C4 (DHT), C8 (JPG) and CC (DAC) do not.
+    // NOTE: no length guard on either read below. A byte past the end reads as `undefined ?? 0`, so
+    // a truncated header measures 0 pixels and is refused by the `<= 0` check at the call site —
+    // both explicit guards were written here and removed after surviving mutation against the whole
+    // table, which is the definition of a clause that decides nothing.
     if (
       marker >= 0xc0 &&
       marker <= 0xcf &&

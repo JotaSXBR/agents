@@ -68,6 +68,33 @@ const jpeg = (w = 100, h = 100) =>
     ...JPEG_END,
   );
 
+// The same file with `fill` extra 0xFF bytes in front of every marker after SOI — which a JPEG
+// encoder is allowed to emit and some do.
+const jpegWithFill = (w = 100, h = 100, fill = 1) => {
+  const pad = Array.from({ length: fill }, () => 0xff);
+  return bytes(
+    0xff,
+    0xd8,
+    ...pad,
+    0xff,
+    0xe0,
+    ...be16(4),
+    0x00,
+    0x00,
+    ...pad,
+    0xff,
+    0xc0,
+    ...be16(11),
+    0x08,
+    ...be16(h),
+    ...be16(w),
+    0x00,
+    0x00,
+    0x00,
+    ...JPEG_END,
+  );
+};
+
 describe("logoBytesLookLike", () => {
   test("accepts a complete file of each format", () => {
     expect(logoBytesLookLike(png(), "png")).toBe(true);
@@ -119,6 +146,15 @@ describe("logoPixels", () => {
     expect(logoPixels(png(640, 480), "png")).toBe(640 * 480);
     // Past an APP0 segment: the frame header is not the first marker in a real file.
     expect(logoPixels(jpeg(640, 480), "jpg")).toBe(640 * 480);
+  });
+
+  // FILL BYTES. Any JPEG marker may be preceded by any number of 0xFF (ITU T.81 B.1.1.2), and a
+  // walk that reads one of them as the marker turns the two bytes after it into a segment length
+  // and steps off the file. The image is then unmeasurable, and unmeasurable is refused — so a
+  // standards-valid logo comes back as "too many pixels".
+  test("reads past the fill bytes a marker may be padded with", () => {
+    expect(logoPixels(jpegWithFill(640, 480, 1), "jpg")).toBe(640 * 480);
+    expect(logoPixels(jpegWithFill(640, 480, 5), "jpg")).toBe(640 * 480);
   });
 
   // The dimensions are UNSIGNED 32-bit, and JavaScript's bitwise operators are not: a width and a
