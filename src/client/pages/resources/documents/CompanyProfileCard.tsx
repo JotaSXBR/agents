@@ -37,16 +37,18 @@ export function CompanyProfileCard({
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // Marks the `company` change that came from a logo write, so the draft effect below can skip it.
-  const logoOnlyRef = useRef(false);
+  // Marks a `company` change this card CAUSED, so the draft effect below leaves the operator's text
+  // alone. Two of them: a logo write (which answers with the whole block) and a successful save
+  // (whose echo IS the draft). Only a change from OUTSIDE should replace what someone is typing.
+  const ownChangeRef = useRef(false);
 
   useEffect(() => {
     if (!company) return;
     // A logo upload or removal returns the whole company block, and reinitialising the draft from it
     // would discard the text the operator has typed and not yet saved — losing their edits because
     // they changed the picture. Only the logo state (below) reacts to that write.
-    if (logoOnlyRef.current) {
-      logoOnlyRef.current = false;
+    if (ownChangeRef.current) {
+      ownChangeRef.current = false;
       return;
     }
     setDraft(
@@ -104,6 +106,10 @@ export function CompanyProfileCard({
         showToast(t("documents.company.saveError", "Could not save."), "error");
         return;
       }
+      // The same mark: the operator can keep typing while the request is in flight, and resetting
+      // the draft from this echo would silently discard every keystroke made since they clicked
+      // Save. The echo carries what we SENT; the draft carries what they have now.
+      ownChangeRef.current = true;
       onChanged(data.company);
       showToast(t("common.saved", "Saved."), "success");
     } catch {
@@ -121,7 +127,7 @@ export function CompanyProfileCard({
   // has been typing but not yet saved. Their edits would vanish because they changed the logo. The
   // logo half is applied on its own, and the draft is left alone.
   function applyLogoOnly(next: CompanyProfile) {
-    logoOnlyRef.current = true;
+    ownChangeRef.current = true;
     onChanged(next);
   }
 

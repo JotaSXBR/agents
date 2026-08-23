@@ -77,7 +77,12 @@ const sidn = (v: bigint | null): string | null =>
   v === null ? null : String(v);
 
 // Parse a bigint id arg, mapping a bad value to a uniform error.
+// The pattern, not just the throw. `BigInt("")` is 0n and `BigInt(" 7 ")` is 7n, so an id a caller
+// typed wrong becomes a VALID id for some other row — or, for the empty string, for row zero, which
+// silently answers "nothing found" to a question the caller never meant to ask. An id is a run of
+// digits or it is a mistake worth reporting.
 function asBigInt(raw: string, label: string): bigint | WriteResult {
+  if (!/^\d+$/.test(raw)) return err(`invalid ${label}`);
   try {
     return BigInt(raw);
   } catch {
@@ -266,7 +271,10 @@ export async function issuedDocumentList(
   const ctx = readGate(principal);
   if ("ok" in ctx) return ctx;
   let templateId: bigint | undefined;
-  if (args.template_id) {
+  // `!== undefined`, not truthiness: an explicitly empty template_id is a malformed NARROWING
+  // filter, and treating it as absent answers the tenant's whole recent list — the widest possible
+  // answer to the narrowest possible question. Parsed and refused instead.
+  if (args.template_id !== undefined) {
     const parsed = asBigInt(args.template_id, "template_id");
     if (typeof parsed !== "bigint") return parsed;
     templateId = parsed;

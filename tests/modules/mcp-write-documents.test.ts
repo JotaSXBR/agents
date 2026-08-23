@@ -3,6 +3,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/../generated/prisma/client";
 import { listDocumentTemplates } from "@/modules/documents/templates";
 import type { VerifiedToken } from "@/modules/mcp/oauth/tokens";
+import { issuedDocumentList } from "@/modules/mcp/read";
 import {
   documentTemplateCreate,
   documentTemplateDelete,
@@ -389,6 +390,27 @@ describe.skipIf(!dbUp)("MCP document writes", () => {
     expect(await listDocumentTemplates(ctx(), appDb)).toHaveLength(
       before.length,
     );
+  });
+
+  // A narrowing filter that arrives malformed must NARROW to nothing, not widen to everything.
+  // Truthiness read an explicit empty string as "not supplied" and answered with the tenant's whole
+  // recent list — the widest possible answer to the narrowest possible question.
+  test("an explicitly empty template filter is refused, not ignored", async () => {
+    const r = await issuedDocumentList(
+      principal({ tenantId }),
+      { template_id: "" },
+      { base: appDb },
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("template_id");
+    // …and a real one still filters.
+    const [tpl] = await listDocumentTemplates(ctx(), appDb);
+    const scoped = await issuedDocumentList(
+      principal({ tenantId }),
+      { template_id: tpl?.id as string },
+      { base: appDb },
+    );
+    expect(scoped.ok).toBe(true);
   });
 
   // The tenant fence: a template belonging to tenant A is not addressable from tenant B's token,

@@ -63,8 +63,13 @@ export function DocumentsPanel() {
   const refsModal = useModalController<{ name: string }>();
   const deleteModal = useModalController<{ id: string; name: string }>();
 
+  // `loading` is the FIRST load only. Every handler here reloads on success, and the company card
+  // sits inside a boundary keyed on this flag — so a shared flag made deleting a template unmount
+  // the profile editor and discard whatever the operator had typed into it, over an action that had
+  // nothing to do with it. A refresh replaces the data underneath; it does not take the screen away.
+  const loadedOnce = useRef(false);
   const load = useCallback(async () => {
-    setLoading(true);
+    if (!loadedOnce.current) setLoading(true);
     setError(false);
     try {
       const [list, startersRes, settings, issuedRes] = await Promise.all([
@@ -92,6 +97,7 @@ export function DocumentsPanel() {
     } catch {
       setError(true);
     } finally {
+      loadedOnce.current = true;
       setLoading(false);
     }
     // Reloads when the operator switches language: the starters are the one thing on this panel
