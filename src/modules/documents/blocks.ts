@@ -205,6 +205,16 @@ export const MAX_LINE_ITEMS = 100;
 // model is handed. Well above any real document: the bundled starters declare four to six.
 export const MAX_FIELDS_PER_DOCUMENT = 40;
 
+// The largest amount a document may carry, per value AND per line. `Number.isFinite` is not enough:
+// a unit price of 1e308 passes it, and the integer-cent arithmetic then produces Infinity — a
+// numbered PDF whose total reads "∞", or worse, a number that is merely wrong.
+//
+// Derived, not picked: cents must stay exact, so the accumulated total has to stay a safe integer.
+// MAX_SAFE_INTEGER is ~9.007e15 cents; MAX_LINE_ITEMS (100) lines of this cap sum to 1e13 cents,
+// two orders of magnitude inside it, with the discount and tax rows fitting the same way. And it is
+// a hundred billion — no real document approaches it, so nothing legitimate is refused.
+export const MAX_DOCUMENT_AMOUNT = 1e11;
+
 // The authoring contract, generated FROM the schemas above so it cannot drift from what the
 // validator enforces. Served on demand (the `document_template_schema` MCP tool, and the console's
 // block reference) rather than published in every tools/list: a six-variant discriminated union

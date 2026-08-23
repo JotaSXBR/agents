@@ -3,11 +3,13 @@ import {
   DOCUMENT_STYLE_DEFAULTS,
   documentAuthoringSchema,
   MAX_BLOCKS_PER_DOCUMENT,
+  MAX_DOCUMENT_AMOUNT,
   MAX_FIELDS_PER_DOCUMENT,
   MAX_LINE_ITEMS,
   parseDocumentStyle,
 } from "@/modules/documents/blocks";
 import { printedDate } from "@/modules/documents/issue";
+import { computeTotals } from "@/modules/documents/totals";
 import {
   parseAuthoredTemplate,
   parseDocumentValues,
@@ -478,6 +480,53 @@ describe("parseDocumentValues", () => {
         { obs: "   " },
       ).ok,
     ).toBe(true);
+  });
+
+  // Finite is not the same as usable. The arithmetic is in integer cents, so a unit price of 1e308
+  // clears `Number.isFinite` and then becomes Infinity in cents — a numbered PDF whose total reads
+  // as infinity, or, one order down, one that is merely wrong.
+  test("refuses amounts the cent arithmetic cannot hold", () => {
+    const over = parseDocumentValues(FIELDS as never, {
+      cliente: "Ana",
+      desconto: 1e308,
+    });
+    expect(over.ok).toBe(false);
+    expect(over.ok === false && over.reason).toContain("at most");
+
+    // A quantity and a unit price can each be inside the cap while their product is outside it.
+    const line = parseDocumentValues(FIELDS as never, {
+      cliente: "Ana",
+      itens: [
+        {
+          description: "Consultoria",
+          quantity: MAX_DOCUMENT_AMOUNT,
+          unitPrice: MAX_DOCUMENT_AMOUNT,
+        },
+      ],
+    });
+    expect(line.ok).toBe(false);
+    expect(line.ok === false && line.reason).toContain("Consultoria");
+
+    // A full document at the ceiling still adds up exactly: MAX_LINE_ITEMS lines of the cap stay
+    // inside the safe-integer range the cents live in, which is how the cap was chosen.
+    const atCeiling = parseDocumentValues(FIELDS as never, {
+      cliente: "Ana",
+      itens: Array.from({ length: MAX_LINE_ITEMS }, () => ({
+        description: "x",
+        quantity: 1,
+        unitPrice: MAX_DOCUMENT_AMOUNT,
+      })),
+    });
+    expect(atCeiling.ok).toBe(true);
+    const totals = computeTotals(
+      Array.from({ length: MAX_LINE_ITEMS }, () => ({
+        description: "x",
+        quantity: 1,
+        unitPrice: MAX_DOCUMENT_AMOUNT,
+      })),
+    );
+    expect(Number.isSafeInteger(Math.round(totals.total * 100))).toBe(true);
+    expect(totals.total).toBe(MAX_LINE_ITEMS * MAX_DOCUMENT_AMOUNT);
   });
 
   test("refuses more line items than the ceiling", () => {

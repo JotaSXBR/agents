@@ -98,6 +98,19 @@ describe("documentToolSchema", () => {
     ).toBe(true);
   });
 
+  // Zod strips by default, so a misspelled optional argument would be removed before the service
+  // ever saw it: the document issues without the discount the model believed it sent, and every
+  // gate reports success. `parseDocumentValues` refuses undeclared keys — it just never gets the
+  // chance. The model can fix a typo it is told about.
+  test("refuses an argument the template never declared", () => {
+    const parsed = documentToolSchema(FIELDS).safeParse({
+      cliente: "Ana",
+      itens: [],
+      descontoo: 10,
+    });
+    expect(parsed.success).toBe(false);
+  });
+
   test("a template with no fields yields a tool that takes no arguments", () => {
     const shape = (documentToolSchema([]) as z.ZodObject<z.ZodRawShape>).shape;
     expect(Object.keys(shape)).toEqual([]);

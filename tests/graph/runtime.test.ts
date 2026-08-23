@@ -2166,6 +2166,93 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
     }
   });
 
+  // The recheck fails CLOSED and, just as importantly, LOCALLY. It runs inside the loop that also
+  // delivers the model's text, so an exception escaping it would cost the customer an answer they
+  // were owed — over a lookup about an attachment. The document is held back; the reply is not.
+  test("a failing revocation lookup holds the document and still sends the reply", async () => {
+    await seedConversation(945, null);
+    const dir = `/tmp/fazerai-runtime-lookupfail-${process.pid}`;
+    const starter = documentStarter("quote", "pt-BR");
+    if (!starter) throw new Error("no starter");
+    const agent = await suDb.agent.findFirst({
+      where: { tenantId },
+      select: { id: true },
+    });
+    const tpl = await createDocumentTemplate(
+      { tenantId, userId: null, role: "TENANT_ADMIN" },
+      {
+        name: "Orçamento instável",
+        slug: "orcamento_instavel",
+        blocks: starter.blocks,
+        fields: starter.fields,
+        style: starter.style,
+      },
+      appDb,
+    );
+    await suDb.agentToolSelection.create({
+      data: {
+        tenantId,
+        agentId: agent?.id as bigint,
+        source: "DOCUMENT",
+        documentTemplateId: BigInt(tpl.id),
+        enabledTools: [],
+        knowledgeBaseIds: [],
+      },
+    });
+    // Only the delivery recheck is broken: it is the one read that selects `revoked` alone, so the
+    // issuance path (which reads the whole row) is untouched and the document really is queued.
+    const flaky = appDb.$extends({
+      query: {
+        issuedDocument: {
+          async findUnique({ args, query }) {
+            const select = args.select as Record<string, unknown> | undefined;
+            if (
+              select &&
+              Object.keys(select).length === 1 &&
+              select.revoked === true
+            ) {
+              throw new Error("connection lost");
+            }
+            return query(args);
+          },
+        },
+      },
+    }) as unknown as PrismaClient;
+    const calls: Array<[string, number, string]> = [];
+    try {
+      const outcome = await runAgentTurn({
+        tenantId,
+        instanceId,
+        agentBotId: 9,
+        event: incoming({ conversationId: 945 }),
+        base: flaky,
+        deps: {
+          makeModel: () =>
+            new SendDocumentThenReplyModel(
+              "Segue o orçamento!",
+              "send_orcamento_instavel",
+              {
+                cliente: "Ana Ribeiro",
+                itens: [
+                  { description: "Consultoria", quantity: 1, unitPrice: 100 },
+                ],
+              },
+            ) as unknown as BaseChatModel,
+          makeClient: makeImageClient(calls),
+          checkpointer: new MemorySaver(),
+          documentsStorageDir: dir,
+        },
+      });
+      expect(outcome).toBe("posted");
+      expect(calls).toEqual([["sendMessage", 945, "Segue o orçamento!"]]);
+    } finally {
+      await suDb.$executeRawUnsafe(
+        `DELETE FROM agent_tool_selections WHERE tenant_id = ${tenantId}`,
+      );
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   // "Show me the three colours" is one response with three tool calls, which LangGraph runs with
   // Promise.all. Whoever answers first would otherwise be first in the conversation, and the customer
   // would read "a azul é essa" under the green one.

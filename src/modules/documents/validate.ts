@@ -7,6 +7,7 @@ import {
   documentFieldSchema,
   documentStyleSchema,
   MAX_BLOCKS_PER_DOCUMENT,
+  MAX_DOCUMENT_AMOUNT,
   MAX_FIELDS_PER_DOCUMENT,
   MAX_LINE_ITEMS,
   parseDocumentStyle,
@@ -405,9 +406,14 @@ function valueProblem(field: DocumentField, value: unknown): string | null {
         : "must be a string of at most 2000 characters";
     case "number":
     case "currency":
-      return typeof value === "number" && Number.isFinite(value)
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        return "must be a finite number";
+      }
+      // Finite is not enough: the arithmetic is in integer cents, and 1e308 is finite right up to
+      // the point where it becomes Infinity in cents and prints as a total nobody can read.
+      return Math.abs(value) <= MAX_DOCUMENT_AMOUNT
         ? null
-        : "must be a finite number";
+        : `must be at most ${MAX_DOCUMENT_AMOUNT}`;
     case "date":
       // NOTE: ISO date only, never a pre-formatted string. The document is rendered in the
       // template's locale, and a date the model already wrote as "22/08" cannot be reformatted —
@@ -421,9 +427,17 @@ function valueProblem(field: DocumentField, value: unknown): string | null {
         return `must have at most ${MAX_LINE_ITEMS} line items`;
       }
       const parsed = z.array(lineItemValueSchema).safeParse(value);
-      return parsed.success
-        ? null
-        : `line items: ${issues(parsed.error)} — each is {"description":"…","quantity":n,"unitPrice":n}`;
+      if (!parsed.success) {
+        return `line items: ${issues(parsed.error)} — each is {"description":"…","quantity":n,"unitPrice":n}`;
+      }
+      // The LINE's own total, not just its two factors: a quantity and a unit price can each be
+      // inside the cap and their product outside it, which is the same overflow one step later.
+      for (const item of parsed.data) {
+        if (item.quantity * item.unitPrice > MAX_DOCUMENT_AMOUNT) {
+          return `line items: "${item.description}" totals more than ${MAX_DOCUMENT_AMOUNT}`;
+        }
+      }
+      return null;
     }
   }
 }

@@ -253,6 +253,10 @@ async function deliverPendingAttachments(
     // response to finish — and revocation has to win that race the same way it wins the download
     // route's. Asked here, immediately before the send, because anywhere earlier leaves the same gap.
     if (file.documentId && document) {
+      // Fails CLOSED and, just as importantly, fails LOCALLY: a transient database error here must
+      // not throw out of the loop, because the loop is also what delivers the model's text reply.
+      // Losing an answer the customer was owed, over a lookup about an attachment, would be a worse
+      // outcome than the one this check exists to prevent.
       const live = await runScopedOn(
         document.base,
         { tenantId: document.tenantId, userId: null, role: "TENANT_ADMIN" },
@@ -261,7 +265,14 @@ async function deliverPendingAttachments(
             where: { id: file.documentId as bigint },
             select: { revoked: true },
           }),
-      );
+      ).catch((e: unknown) => {
+        logger.warn(
+          "document %s: revocation recheck failed before delivery — not sending: %s",
+          String(file.documentId),
+          e instanceof Error ? e.message : String(e),
+        );
+        return null;
+      });
       if (live?.revoked !== false) {
         emitFlowEvent(flow, {
           stage: "tool",

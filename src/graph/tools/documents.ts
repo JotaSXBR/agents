@@ -87,7 +87,12 @@ export function documentToolSchema(fields: DocumentField[]): z.ZodTypeAny {
     const schema = fieldSchema(field);
     shape[field.name] = field.required ? schema : schema.optional();
   }
-  return z.object(shape);
+  // STRICT: an argument the template never declared is returned to the model as an error instead of
+  // being dropped. Zod strips by default, so `{cliente: "A", descontoo: 10}` would issue a document
+  // silently missing the discount the model believed it sent — and `parseDocumentValues`, which
+  // refuses undeclared keys, would never see it because the schema removed it first. The model can
+  // fix a typo it is told about; it cannot fix one nobody reports.
+  return z.object(shape).strict();
 }
 
 // Same values, same document. Derived from the thread and the values rather than taken as an
