@@ -1725,6 +1725,9 @@
       "silent": "Follow-up: the agent chose not to send anything."
     },
     "goToGeneral": "Go to General",
+    "guardrails": "Run guardrails",
+    "guardrailsHint": "Screens the message and the reply exactly as the inbox does, so you read what the customer would receive. Costs one extra model call per direction, plus one more when answer relevance runs alongside another reply check.",
+    "guardrailsUnavailable": "Guardrails are off or have no credential. Configure them in the Guardrails tab to screen playground turns.",
     "hint": "Uses the saved config.",
     "historyEmpty": "No saved sessions yet.",
     "image": {
@@ -1754,6 +1757,7 @@
     "resize": "Drag to resize",
     "send": "Send",
     "sessions": "Sessions",
+    "suppressedNote": "Nothing would be sent: the guardrail acted on this turn.",
     "thinking": "Thinking…",
     "toolsDirtyNote": "Prompt and model changes are tested live. Tool changes need saving first.",
     "toolsim": {
@@ -1774,6 +1778,14 @@
       "title": "Tool simulation"
     },
     "trace": {
+      "guardrailClean": "approved",
+      "guardrailInput": "Guardrail on the message",
+      "guardrailOutput": "Guardrail on the reply",
+      "guardrailReplaced": "replaced by the configured reply",
+      "guardrailReplacedGenerated": "replaced by a reply the guardrail wrote",
+      "guardrailSuppressed": "blocked, nothing would be sent",
+      "guardrailUnavailableInput": "could not be checked, so the message reached the agent unchecked",
+      "guardrailUnavailableOutput": "could not be checked, so the reply went out unscreened",
       "mocked": "mocked",
       "result": "result",
       "simulated": "simulated",

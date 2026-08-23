@@ -19,6 +19,7 @@ import {
   RefreshCw,
   Send,
   Settings2,
+  ShieldAlert,
   Trash2,
   Wrench,
   X,
@@ -76,6 +77,7 @@ export type PlaygroundCapabilities = {
   audioInput: boolean; // STT → record/send voice notes
   audioReply: boolean; // TTS → "reply with audio"
   fileInput: boolean; // vision → attach image/document
+  guardrails: boolean; // moderation → screen the turn like the inbox does
 };
 
 // Wraps a control in a hover tooltip explaining WHY it is disabled. A disabled <button> emits no
@@ -181,6 +183,34 @@ export function PlaygroundChat({
               {t("playground.hint", "Tests your live (unsaved) edits.")}
             </p>
             <div className="flex flex-wrap items-center gap-3">
+              <SwitchField
+                checked={chat.guardrails && capabilities.guardrails}
+                onCheckedChange={chat.setGuardrails}
+                disabled={!capabilities.guardrails}
+                label={
+                  capabilities.guardrails ? (
+                    <span className="inline-flex items-center gap-1">
+                      {t("playground.guardrails", "Run guardrails")}
+                      <Tooltip
+                        content={t(
+                          "playground.guardrailsHint",
+                          "Screens the message and the reply exactly as the inbox does, so you read what the customer would receive. Costs one extra model call per direction, plus one more when answer relevance runs alongside another reply check.",
+                        )}
+                      />
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1">
+                      {t("playground.guardrails", "Run guardrails")}
+                      <Tooltip
+                        content={t(
+                          "playground.guardrailsUnavailable",
+                          "Guardrails are off or have no credential. Configure them in the Guardrails tab to screen playground turns.",
+                        )}
+                      />
+                    </span>
+                  )
+                }
+              />
               <SwitchField
                 checked={chat.forceAudio && capabilities.audioReply}
                 onCheckedChange={chat.setForceAudio}
@@ -643,10 +673,23 @@ function TurnBubble({
 }) {
   const { t } = useTranslation();
   if (turn.role === "note") {
+    // A note the guardrail produced carries the verdict that explains it. Rendered inline rather
+    // than behind the "Execution details" disclosure, which belongs to a reply that exists.
+    const verdicts = (turn.trace ?? []).filter((e) => e.type === "guardrail");
     return (
-      <p className="self-center px-2 text-center text-text-muted text-xs italic">
-        {turn.text}
-      </p>
+      <div className="flex w-full flex-col items-center gap-1">
+        <p className="self-center px-2 text-center text-text-muted text-xs italic">
+          {turn.text}
+        </p>
+        {verdicts.length > 0 && (
+          <div className="flex w-full max-w-[85%] flex-col gap-1 text-xs">
+            {verdicts.map((entry, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: ordered, immutable trace
+              <TraceRow key={i} entry={entry} />
+            ))}
+          </div>
+        )}
+      </div>
     );
   }
   // A user-uploaded file renders OUTSIDE the chat bubble: an inline image thumbnail or a file chip,
@@ -1276,6 +1319,51 @@ function TracePanel({
   );
 }
 
+// What one guardrail row SAYS. A table rather than a chain of ternaries, because two independent
+// fields decide it and the chain grew a wrong arm for each: one sentence for both directions said
+// the REPLY went out unscreened, on rows where the reply was screened and approved a line below;
+// and every trip said "the configured reply", on text the judge itself had written.
+export function guardrailTraceLabel(
+  t: (key: string, fallback: string) => string,
+  entry: Pick<
+    Extract<TraceEntry, { type: "guardrail" }>,
+    "direction" | "outcome" | "action"
+  >,
+): string {
+  switch (entry.outcome) {
+    case "clean":
+      return t("playground.trace.guardrailClean", "approved");
+    case "unavailable":
+      return entry.direction === "input"
+        ? t(
+            "playground.trace.guardrailUnavailableInput",
+            "could not be checked, so the message reached the agent unchecked",
+          )
+        : t(
+            "playground.trace.guardrailUnavailableOutput",
+            "could not be checked, so the reply went out unscreened",
+          );
+    case "suppressed":
+      return t(
+        "playground.trace.guardrailSuppressed",
+        "blocked, nothing would be sent",
+      );
+    case "replaced":
+      // `generated` reaches here only when the judge actually handed text back: the gate reports
+      // `template` when the action was `generated` and no reply came with it, so this reads the
+      // event and not the configuration.
+      return entry.action === "generated"
+        ? t(
+            "playground.trace.guardrailReplacedGenerated",
+            "replaced by a reply the guardrail wrote",
+          )
+        : t(
+            "playground.trace.guardrailReplaced",
+            "replaced by the configured reply",
+          );
+  }
+}
+
 function TraceRow({ entry }: { entry: TraceEntry }) {
   const { t } = useTranslation();
   if (entry.type === "assistant") {
@@ -1293,6 +1381,35 @@ function TraceRow({ entry }: { entry: TraceEntry }) {
         <pre className="overflow-x-auto rounded bg-bg-tertiary px-2 py-1 text-text-muted">
           {JSON.stringify(entry.args, null, 2)}
         </pre>
+      </div>
+    );
+  }
+  if (entry.type === "guardrail") {
+    const tripped =
+      entry.outcome === "replaced" || entry.outcome === "suppressed";
+    return (
+      <div className="flex flex-col gap-0.5">
+        <span
+          className={cn("flex items-center gap-1 font-medium", {
+            "text-warning": tripped || entry.outcome === "unavailable",
+            "text-text-secondary": entry.outcome === "clean",
+          })}
+        >
+          <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
+          {entry.direction === "input"
+            ? t("playground.trace.guardrailInput", "Guardrail on the message")
+            : t("playground.trace.guardrailOutput", "Guardrail on the reply")}
+          <span className="font-normal text-text-muted">
+            {guardrailTraceLabel(t, entry)}
+          </span>
+        </span>
+        {tripped && (
+          <pre className="overflow-x-auto whitespace-pre-wrap rounded bg-bg-tertiary px-2 py-1 text-text-muted">
+            {[entry.categories?.join(", "), entry.rationale]
+              .filter(Boolean)
+              .join(" — ")}
+          </pre>
+        )}
       </div>
     );
   }
