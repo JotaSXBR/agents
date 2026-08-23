@@ -25441,6 +25441,25 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Conflict — a duplicate or a state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Conflict — a duplicate or a state conflict.",
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
           }
         },
         "operationId": "patchV1Document-templatesById"
@@ -25919,6 +25938,25 @@
               "application/json": {
                 "schema": {
                   "description": "Not found.",
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — a duplicate or a state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Conflict — a duplicate or a state conflict.",
                   "type": "object",
                   "properties": {
                     "error": {

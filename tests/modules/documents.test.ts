@@ -1422,10 +1422,11 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     ).toEqual([]);
   });
 
-  // The claim decides who PUBLISHES. Renaming before it let a caller that then lost replace a file
-  // the winner had already declared final — and because the logo is read live, a letterhead swapped
-  // between the two renders makes that published document visibly change after the fact.
-  test("a render that loses the claim leaves the winner's file alone", async () => {
+  // The FILE has one publisher, decided by the filesystem: `link` fails with EEXIST when the name is
+  // taken, so a second render adopts what is there rather than replacing it. Without that, and
+  // because the logo is read live, a letterhead swapped between two renders of one key made the
+  // published document visibly change after it had been served.
+  test("a render that publishes second adopts the first file, never replaces it", async () => {
     const key = `claim-loser-${process.pid}`;
     const seed = await issueDocument({
       tenantId: tenantA,

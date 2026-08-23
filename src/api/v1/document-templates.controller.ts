@@ -272,7 +272,8 @@ export const documentTemplatesController = new Elysia({
         "Update document template",
         "Patches a document template; omitted fields keep their value.",
       ),
-      response: errors(400, 401, 403, 404),
+      // 409 for a slug already taken, and for a stored template this version cannot read.
+      response: errors(400, 401, 403, 404, 409),
     },
   )
   .delete(

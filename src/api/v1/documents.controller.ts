@@ -141,7 +141,10 @@ export const documentsController = new Elysia({
         "Issue document",
         "Idempotently issues a document from a template and renders its PDF.",
       ),
-      response: errors(400, 401, 403, 404),
+      // 409 is a real answer here: an idempotency key can land on a row that was revoked, that could
+      // not be numbered, or that nobody managed to store. A status the route returns and the
+      // contract does not name is a status no generated client knows how to handle.
+      response: errors(400, 401, 403, 404, 409),
     },
   )
   .post(
@@ -175,6 +178,12 @@ export const documentsController = new Elysia({
         headers: {
           "Content-Type": "application/pdf",
           "Content-Disposition": `inline; filename="${fileName}"`,
+          // The document is TENANT-scoped, and the scoped read of the row is the only thing that
+          // fences it — the filesystem has none. A shared proxy caching by URL would replay these
+          // bytes without that read ever running, handing one tenant's document to another
+          // requester. `no-store` rather than the logo route's `private, max-age`: a priced document
+          // is worth less caching than a letterhead is.
+          "Cache-Control": "private, no-store",
         },
       });
     },

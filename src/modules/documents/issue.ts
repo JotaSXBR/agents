@@ -1,4 +1,4 @@
-import { rename, rm } from "node:fs/promises";
+import { link, rm } from "node:fs/promises";
 import { Prisma, type PrismaClient } from "@/../generated/prisma/client";
 import basePrisma from "@/api/lib/prisma";
 import config from "@/config";
@@ -395,63 +395,63 @@ async function finish(
     },
   });
   const key = storageKey(tenantId, row.id);
-  // Written to a temporary name and RENAMED into place. Two callers holding the same idempotency key
-  // can both find the row PENDING and both render it, and a plain write to the final path lets the
-  // second truncate a file the first already marked READY — so a download in that window serves a
-  // half-written PDF. Rename is atomic within a filesystem: a reader sees the old file or the whole
-  // new one, never part of one.
+  // Written to a temporary name first. Two callers holding the same idempotency key can both find
+  // the row PENDING and both render it, and a plain write to the final path lets the second truncate
+  // a file the first already published — so a download in that window serves a half-written PDF.
   //
   // Bun.write creates parent directories, which is why the temporary lives beside the target rather
-  // than in a system temp dir — and why the rename cannot cross a filesystem. The suffix keeps two
-  // concurrent renders from sharing the temporary as well.
+  // than in a system temp dir — and why the link below cannot cross a filesystem. The suffix keeps
+  // two concurrent renders from sharing the temporary as well.
   //
-  // The ORDERING (claim, then publish) IS covered: a render that loses the claim leaves the winner's
-  // file alone, which a test can force by having another connection finish the row first. What is
-  // not covered is the truncation the rename prevents — that needs two renders of one key
-  // overlapping AND a reader landing inside the window, which no single-process test reaches with
-  // any reliability (the last attempt at a race like it passed three times out of three with the fix
-  // removed, and was deleted rather than kept). The other visible half is asserted too: a successful
-  // issuance leaves no `.part` behind.
+  // WHAT IS COVERED: that a second publisher adopts the first one's file instead of replacing it,
+  // and that no `.part` survives a successful issuance. What is NOT is the truncation itself — that
+  // needs two renders of one key overlapping AND a reader landing inside the window, which no
+  // single-process test reaches with any reliability (the last attempt at a race like it passed
+  // three times out of three with the fix removed, and was deleted rather than kept).
   const finalPath = `${dir}/${key}`;
   const tempPath = `${finalPath}.${process.pid}-${Math.random().toString(36).slice(2, 10)}.part`;
   await Bun.write(tempPath, buffer);
 
-  // The CAS decides WHO publishes, and it runs before the rename. Renaming first let a caller that
-  // then lost the CAS replace a file the winner had already published — the two renders come from
-  // one frozen snapshot, but the LOGO is read live, so a letterhead swapped between them makes the
-  // published document visibly change after it was declared final.
+  // PUBLISHED BEFORE the row says READY, and published with `link` rather than `rename`.
   //
-  // `revoked: false` is in the same claim, not only PENDING: an operator can revoke while this
-  // render is running, and without it the row would flip to READY and hand its bytes back for
-  // delivery — revocation losing a race it should always win.
+  // Both orders on their own leave a window, and each was tried. Renaming first lets a caller that
+  // then loses the claim replace a file the winner already published — the renders share a frozen
+  // snapshot, but the LOGO is read live, so the published document can visibly change after it was
+  // declared final. Claiming first is worse: a reader who sees READY can arrive before the file
+  // exists and get a 404, and a process killed in that window leaves a row that says READY forever
+  // with nothing behind it, which nothing re-renders.
+  //
+  // `link` closes both instead of choosing. It creates the final name from a fully-written temporary
+  // and FAILS with EEXIST if that name already exists, so the first publisher wins the file and a
+  // later one adopts it rather than replacing it; and because it happens before the CAS, a row is
+  // never READY without its bytes. A crash anywhere here leaves a PENDING row and at worst an
+  // unreferenced temporary — both recoverable, since the next call re-renders and re-adopts.
+  try {
+    await link(tempPath, finalPath);
+  } catch (e) {
+    // EEXIST: someone published this document first. Theirs stands — same snapshot, and the one on
+    // disk is the one every download will serve.
+    if ((e as { code?: string }).code !== "EEXIST") {
+      await rm(tempPath, { force: true });
+      throw e;
+    }
+  }
+  await rm(tempPath, { force: true });
+
+  // `revoked: false` in the claim, not only PENDING: an operator can revoke while this render is
+  // running, and without it the row would flip to READY and hand its bytes back for delivery —
+  // revocation losing a race it should always win.
   const finished = await runScopedOn(base, ctx, (db) =>
     db.issuedDocument.updateMany({
       where: { id: row.id, status: "PENDING", revoked: false },
       data: { status: "READY", pdfStorageKey: key },
     }),
   );
-  if (finished.count === 1) {
-    try {
-      await rename(tempPath, finalPath);
-    } catch (e) {
-      // Back to PENDING: a row that says READY with no file behind it is permanently broken,
-      // because nothing renders it again. (A hard crash between the two cannot be caught here —
-      // that is the limit of a non-transactional filesystem, and it is bounded to the same window.)
-      await runScopedOn(base, ctx, (db) =>
-        db.issuedDocument.updateMany({
-          where: { id: row.id, status: "READY", pdfStorageKey: key },
-          data: { status: "PENDING", pdfStorageKey: null },
-        }),
-      );
-      await rm(tempPath, { force: true });
-      throw e;
-    }
-  } else {
-    // Lost, so this render does NOT publish: the winner's file stands. And it must not RETURN its
-    // own bytes either — the logo is read live, so the loser's PDF can look different from the one
-    // the winner persisted, and `withBytes: true` would attach that to a customer's reply while the
-    // download link served the other. The winner's row is the answer.
-    await rm(tempPath, { force: true });
+  if (finished.count !== 1) {
+    // Lost the claim. The file on disk is whoever published first (this call adopted it if it was
+    // already there), and the bytes returned have to be THAT file, not this render's: the logo is
+    // read live, so the two can differ, and `withBytes: true` would attach one PDF to a customer's
+    // reply while the download link served another.
     const now = await runScopedOn(base, ctx, (db) =>
       db.issuedDocument.findUnique({
         where: { id: row.id },
