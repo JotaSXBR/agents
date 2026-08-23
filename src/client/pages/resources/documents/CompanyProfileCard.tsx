@@ -39,15 +39,19 @@ export function CompanyProfileCard({
   // an unsaved edit and a click on another tab — or a tenant switch, which is a full reload. The
   // same `companyChanges` the save sends is what "unsaved" means here, so the two cannot disagree.
   useNavGuard(Object.keys(companyChanges(form)).length > 0);
-  const [saving, setSaving] = useState(false);
-  // ONE logo write at a time, and the reason is that both routes answer with the whole company
-  // block and the card applies what comes back: two in flight are decided by whichever ANSWERS
-  // last, which is not necessarily the one that wrote last. An older response landing after a newer
-  // one puts a superseded logoKey on screen — usually one whose file the newer write has already
-  // deleted, so the letterhead renders broken until somebody reloads.
+
+  // ONE write to the company block at a time — across all THREE of them, not one flag per control.
   //
-  // Serialised rather than reconciled with a generation counter: an upload is a deliberate act, the
-  // operator expects it to finish, and this is the same shape as creating from a starter.
+  // Every route here answers with the WHOLE block: the profile save echoes it, and both logo routes
+  // return it with their new key. So two writes in flight are decided by whichever ANSWERS last,
+  // which is not necessarily the one that wrote last. An older response landing after a newer one
+  // puts a superseded logoKey on screen — usually one whose file the newer write already deleted, so
+  // the letterhead renders broken until somebody reloads — or puts back profile text that was just
+  // replaced.
+  //
+  // Serialised rather than reconciled with a generation counter: each of these is a deliberate act
+  // the operator expects to finish, and this is the same shape as creating from a starter. The flag
+  // names WHICH one so its own button can show the spinner.
   //
   // The DISABLED CONTROLS are the whole mechanism. A matching `if (busy) return` inside each handler
   // was written first and then removed: a click is a discrete event, so React has already re-rendered
@@ -55,7 +59,9 @@ export function CompanyProfileCard({
   // beat that, two dispatches inside a single tick, the handler reads the same stale value the
   // render did and lets both through anyway. It guarded nothing that the button was not already
   // guarding, and mutation testing is what showed it.
-  const [logoBusy, setLogoBusy] = useState<"upload" | "remove" | null>(null);
+  const [busy, setBusy] = useState<"profile" | "upload" | "remove" | null>(
+    null,
+  );
   const logoUrl = useCompanyLogoUrl(company?.logoKey, company?.logoVersion);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -79,7 +85,7 @@ export function CompanyProfileCard({
   };
 
   async function save() {
-    setSaving(true);
+    setBusy("profile");
     // Only what this form changed, captured before the await: the operator can type during it, and
     // a field they never touched is not this request's to write.
     const sent = companyChanges(form);
@@ -101,7 +107,7 @@ export function CompanyProfileCard({
       // button that did nothing and an unhandled rejection in the console.
       showToast(t("documents.company.saveError", "Could not save."), "error");
     } finally {
-      setSaving(false);
+      setBusy(null);
     }
   }
 
@@ -122,7 +128,7 @@ export function CompanyProfileCard({
         ),
         "error",
       );
-    setLogoBusy("upload");
+    setBusy("upload");
     try {
       const { data, error } = await api.api.v1[
         "tenant-settings"
@@ -132,7 +138,7 @@ export function CompanyProfileCard({
     } catch {
       failed();
     } finally {
-      setLogoBusy(null);
+      setBusy(null);
     }
   }
 
@@ -140,7 +146,7 @@ export function CompanyProfileCard({
   // outright. Neither said anything before — the logo simply stayed where it was, which reads as a
   // button that does not work.
   async function removeLogo() {
-    setLogoBusy("remove");
+    setBusy("remove");
     try {
       const { data, error } =
         await api.api.v1["tenant-settings"].company.logo.delete();
@@ -158,7 +164,7 @@ export function CompanyProfileCard({
         "error",
       );
     } finally {
-      setLogoBusy(null);
+      setBusy(null);
     }
   }
 
@@ -220,8 +226,8 @@ export function CompanyProfileCard({
           <Button
             variant="secondary"
             size="sm"
-            disabled={logoBusy !== null}
-            loading={logoBusy === "upload"}
+            disabled={busy !== null}
+            loading={busy === "upload"}
             onClick={() => fileRef.current?.click()}
           >
             <ImageUp className="h-4 w-4" aria-hidden="true" />
@@ -231,8 +237,8 @@ export function CompanyProfileCard({
             <Button
               variant="secondary"
               size="sm"
-              disabled={logoBusy !== null}
-              loading={logoBusy === "remove"}
+              disabled={busy !== null}
+              loading={busy === "remove"}
               onClick={removeLogo}
               aria-label={t("common.delete", "Delete")}
             >
@@ -243,7 +249,12 @@ export function CompanyProfileCard({
       </FormField>
 
       <div className="flex justify-end">
-        <Button size="sm" onClick={save} loading={saving}>
+        <Button
+          size="sm"
+          onClick={save}
+          disabled={busy !== null}
+          loading={busy === "profile"}
+        >
           {t("common.save", "Save")}
         </Button>
       </div>

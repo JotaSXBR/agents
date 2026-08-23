@@ -13,6 +13,7 @@ import {
 import basePrisma from "@/api/lib/prisma";
 import { updateTenant } from "@/api/v1/tenants.admin.service";
 import { getTenant } from "@/api/v1/tenants.service";
+import { parseDbId } from "@/lib/db-id";
 import { AppError } from "@/lib/errors";
 import {
   asSuperAdminOn,
@@ -81,12 +82,11 @@ export interface WriteDeps {
 // defect fixed nowhere: the round that added this rule to the READ parser left the seven writes
 // exactly as they were.
 export function parseMcpId(raw: string, label: string): bigint | WriteResult {
-  if (!/^\d+$/.test(raw)) return err(`invalid ${label}`);
-  try {
-    return BigInt(raw);
-  } catch {
-    return err(`invalid ${label}`);
-  }
+  // Range as well as spelling. `BigInt` is arbitrary precision, so an id past 2^63-1 parses here and
+  // is refused by POSTGRES when the query binds it — a tool call that answers with a database error
+  // instead of "invalid <label>". `parseDbId` holds both halves; see lib/db-id.ts.
+  const id = parseDbId(raw);
+  return id === null ? err(`invalid ${label}`) : id;
 }
 
 // Field-level diff: only keys whose JSON projection changed appear (before → after).

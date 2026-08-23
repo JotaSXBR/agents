@@ -1,11 +1,13 @@
 import { Elysia, t } from "elysia";
 import { doc, errors } from "@/api/lib/openapi";
 import { tenancyPlugin } from "@/api/middlewares/tenancy";
+import { requireDbId } from "@/lib/db-id";
 import { ForbiddenError, TenantTargetRequiredError } from "@/lib/errors";
 import { instanceIdentity } from "@/lib/instance";
 import type { TenantContext } from "@/lib/tenancy";
 import { documentStarters } from "@/modules/documents/starters";
 import {
+  // translate('errors.invalidId', 'This id is not valid')
   createDocumentTemplate,
   deleteDocumentTemplate,
   documentTemplateReferences,
@@ -151,7 +153,10 @@ export const documentTemplatesController = new Elysia({
         // `!== undefined`, not truthiness: "0" is a supplied id, and reading it as "no id given"
         // answers a lookup for a template that does not exist with a blank draft preview — telling
         // the operator their template rendered.
-        id: body.id !== undefined ? BigInt(body.id) : undefined,
+        id:
+          body.id !== undefined
+            ? requireDbId(body.id, "template id")
+            : undefined,
         name: body.name,
         blocks: body.blocks,
         blockText: body.blockText,
@@ -227,7 +232,7 @@ export const documentTemplatesController = new Elysia({
       instance: instanceIdentity,
       template: await getDocumentTemplate(
         ctxOrThrow(tenantContext),
-        BigInt(params.id),
+        requireDbId(params.id),
       ),
     }),
     {
@@ -248,7 +253,7 @@ export const documentTemplatesController = new Elysia({
       instance: instanceIdentity,
       references: await documentTemplateReferences(
         ctxOrThrow(tenantContext),
-        BigInt(params.id),
+        requireDbId(params.id),
       ),
     }),
     {
@@ -272,7 +277,7 @@ export const documentTemplatesController = new Elysia({
       instance: instanceIdentity,
       template: await updateDocumentTemplate(
         ctxOrThrow(tenantContext),
-        BigInt(params.id),
+        requireDbId(params.id),
         body,
       ),
     }),
@@ -298,7 +303,7 @@ export const documentTemplatesController = new Elysia({
     async ({ tenantContext, params }) => {
       await deleteDocumentTemplate(
         ctxOrThrow(tenantContext),
-        BigInt(params.id),
+        requireDbId(params.id),
       );
       return { instance: instanceIdentity, success: true };
     },

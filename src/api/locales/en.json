@@ -45,6 +45,7 @@
     "invalidDocumentTemplateName": "The document template name must be between 1 and 120 characters",
     "invalidDocumentTemplateReason": "This document template is not valid: {{reason}}",
     "invalidDocumentValues": "The values do not match what this template declares",
+    "invalidId": "This id is not valid",
     "invalidPassword": "Incorrect password",
     "invalidSetupToken": "Invalid or missing setup token",
     "invalidSiteUrl": "Invalid website URL",

@@ -1,6 +1,6 @@
 /// <reference lib="dom" />
 
-import { afterAll, afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
 import {
   cleanup,
   fireEvent,
@@ -48,6 +48,9 @@ let releaseRemove = () => {};
 let holdRemove = false;
 const inFlight: string[] = [];
 
+let holdProfile = false;
+let releaseProfile = () => {};
+
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(
     typeof input === "string"
@@ -84,10 +87,27 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       },
     );
   }
+  if (url.pathname.endsWith("/tenant-settings/company") && method !== "GET") {
+    inFlight.push("PUT");
+    if (holdProfile) {
+      await new Promise<void>((r) => {
+        releaseProfile = r;
+      });
+    }
+    return new Response(JSON.stringify({ company: company() }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
   // The letterhead image itself.
   return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
 }) as unknown as typeof fetch;
 
+beforeEach(() => {
+  holdRemove = false;
+  holdProfile = false;
+  inFlight.length = 0;
+});
 afterEach(cleanup);
 afterAll(() => {
   globalThis.fetch = realFetch;
@@ -183,6 +203,92 @@ test("an upload cannot start while a removal is in flight", async () => {
           /Upload|Enviar/.test(b.textContent ?? ""),
         ) as HTMLButtonElement | undefined
       )?.disabled,
+    ).toBe(false);
+  });
+});
+
+// The THIRD writer of the same block, and the one a per-control flag misses: saving the profile text
+// answers with the whole company block too, logo key included. An operator who saves while an upload
+// is out gets whichever response lands last — and if that is the older one, the card adopts a
+// logoKey whose file the newer write already deleted, so the letterhead renders broken until reload.
+//
+// One state for "a write to this block is in flight", not one per control.
+test("saving the profile cannot start while a logo write is in flight", async () => {
+  inFlight.length = 0;
+  holdRemove = true;
+  render(
+    <MemoryRouter>
+      <NavGuardProvider>
+        <ToastProvider>
+          <CompanyProfileCard company={company()} onChanged={() => {}} />
+        </ToastProvider>
+      </NavGuardProvider>
+    </MemoryRouter>,
+  );
+  fireEvent.click(await screen.findByLabelText(/Delete|Excluir/));
+  await waitFor(() => {
+    expect(inFlight.join(",")).toBe("DELETE");
+  });
+
+  const save = [...document.querySelectorAll("button")].find((b) =>
+    /^(Save|Salvar)$/.test(b.textContent ?? ""),
+  ) as HTMLButtonElement | undefined;
+  expect(save?.disabled).toBe(true);
+  if (save) fireEvent.click(save);
+  await new Promise((r) => setTimeout(r, 30));
+  expect(inFlight.join(",")).toBe("DELETE");
+
+  releaseRemove();
+  await waitFor(() => {
+    expect(
+      (
+        [...document.querySelectorAll("button")].find((b) =>
+          /^(Save|Salvar)$/.test(b.textContent ?? ""),
+        ) as HTMLButtonElement | undefined
+      )?.disabled,
+    ).toBe(false);
+  });
+});
+
+test("a logo write cannot start while the profile is saving", async () => {
+  inFlight.length = 0;
+  holdProfile = true;
+  render(
+    <MemoryRouter>
+      <NavGuardProvider>
+        <ToastProvider>
+          <CompanyProfileCard company={company()} onChanged={() => {}} />
+        </ToastProvider>
+      </NavGuardProvider>
+    </MemoryRouter>,
+  );
+  const save = [...document.querySelectorAll("button")].find((b) =>
+    /^(Save|Salvar)$/.test(b.textContent ?? ""),
+  ) as HTMLButtonElement | undefined;
+  if (!save) throw new Error("no save button");
+  fireEvent.click(save);
+  await waitFor(() => {
+    expect(inFlight.join(",")).toBe("PUT");
+  });
+
+  const remove = screen.queryByLabelText(
+    /Delete|Excluir/,
+  ) as HTMLButtonElement | null;
+  expect(remove?.disabled).toBe(true);
+  if (remove) fireEvent.click(remove);
+  const upload = [...document.querySelectorAll("button")].find((b) =>
+    /Upload|Enviar/.test(b.textContent ?? ""),
+  ) as HTMLButtonElement | undefined;
+  expect(upload?.disabled).toBe(true);
+  if (upload) fireEvent.click(upload);
+  await new Promise((r) => setTimeout(r, 30));
+  expect(inFlight.join(",")).toBe("PUT");
+
+  releaseProfile();
+  await waitFor(() => {
+    expect(
+      (screen.queryByLabelText(/Delete|Excluir/) as HTMLButtonElement | null)
+        ?.disabled,
     ).toBe(false);
   });
 });

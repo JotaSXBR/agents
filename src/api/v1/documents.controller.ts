@@ -1,10 +1,12 @@
 import { Elysia, t } from "elysia";
 import { doc, errors } from "@/api/lib/openapi";
 import { tenancyPlugin } from "@/api/middlewares/tenancy";
+import { requireDbId } from "@/lib/db-id";
 import { ForbiddenError, TenantTargetRequiredError } from "@/lib/errors";
 import { instanceIdentity } from "@/lib/instance";
 import type { TenantContext } from "@/lib/tenancy";
 import {
+  // translate('errors.invalidId', 'This id is not valid')
   getIssuedDocumentPdf,
   issueDocument,
   listIssuedDocuments,
@@ -81,7 +83,9 @@ export const documentsController = new Elysia({
         // filter, and dropping it answers with EVERY document instead of none. (`limit` above can
         // stay truthy-checked — its pattern refuses "0" at the transport.)
         templateId:
-          query.templateId !== undefined ? BigInt(query.templateId) : undefined,
+          query.templateId !== undefined
+            ? requireDbId(query.templateId, "template id")
+            : undefined,
         threadId: query.threadId,
       }),
     }),
@@ -122,12 +126,12 @@ export const documentsController = new Elysia({
         instance: instanceIdentity,
         document: await issueDocument({
           tenantId: ctx.tenantId as bigint,
-          templateId: BigInt(body.templateId),
+          templateId: requireDbId(body.templateId, "template id"),
           idempotencyKey: body.idempotencyKey,
           values: body.values ?? {},
           threadId: body.threadId ?? null,
           conversationId: body.conversationId
-            ? BigInt(body.conversationId)
+            ? requireDbId(body.conversationId, "conversation id")
             : null,
         }),
       };
@@ -175,7 +179,10 @@ export const documentsController = new Elysia({
   .post(
     "/:id/revoke",
     async ({ tenantContext, params }) => {
-      await revokeIssuedDocument(ctxOrThrow(tenantContext), BigInt(params.id));
+      await revokeIssuedDocument(
+        ctxOrThrow(tenantContext),
+        requireDbId(params.id),
+      );
       return { instance: instanceIdentity, success: true };
     },
     {
@@ -200,7 +207,7 @@ export const documentsController = new Elysia({
       if (!ctx) throw new ForbiddenError();
       const { bytes, fileName } = await getIssuedDocumentPdf(
         ctx,
-        BigInt(params.id),
+        requireDbId(params.id),
       );
       return new Response(bytes, {
         headers: {
