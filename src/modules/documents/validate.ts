@@ -14,6 +14,7 @@ import {
   MAX_TOKENS_PER_DOCUMENT,
   parseDocumentStyle,
 } from "./blocks";
+import { unprintableProblem } from "./printable";
 import {
   DOCUMENT_TOKEN_RE,
   isReservedTokenName,
@@ -243,12 +244,69 @@ export function parseAuthoredTemplate(
     if (problem) return { ok: false, reason: problem };
   }
 
-  return {
-    ok: true,
-    // Clamped, not refused: baseFontSize is a SIZE, and sizes are clamped by contract
-    // (docs/mcp.md). The clamp changes a value, never a key, so it survives the check above.
-    content: { ...shared.content, style: parseDocumentStyle(styleIn) },
-  };
+  // A layout that draws NOTHING is not a document. `blocks` defaults to [] and templates default to
+  // enabled, so an omitted layout became a granted tool that issued a numbered, blank PDF — burning
+  // a number from the template's sequence and attaching an empty page to a customer's conversation.
+  // A divider on its own is the same thing: the rule is about what PRINTS, not about the count.
+  if (authored.blocks) {
+    const draws = shared.content.blocks.some((b) => b.type !== "divider");
+    if (!draws) {
+      return {
+        ok: false,
+        reason:
+          "blocks: a document needs at least one block that prints something (header, text, fields, lineItems or totals) — as written, every issued document would be a numbered blank page.",
+      };
+    }
+  }
+
+  // What the AUTHOR wrote has to be printable, checked here and not in the shared parse: content
+  // that came out of storage belongs to whoever wrote it, and refusing to load a template because a
+  // newer build put an emoji in it would make it uneditable rather than fixable.
+  // Clamped, not refused: baseFontSize is a SIZE, and sizes are clamped by contract (docs/mcp.md).
+  // The clamp changes a value, never a key, so it survives the check above.
+  const style = parseDocumentStyle(styleIn);
+  for (const [label, text] of authoredText(
+    { ...shared.content, style },
+    authored,
+  )) {
+    const problem = unprintableProblem(text, label);
+    if (problem) return { ok: false, reason: problem };
+  }
+
+  return { ok: true, content: { ...shared.content, style } };
+}
+
+// Every string a template PRINTS, from the halves the caller wrote. Labels and titles included:
+// they are drawn on the page like any other text, and a heading is exactly where an operator reaches
+// for a symbol.
+function authoredText(
+  content: {
+    blocks: DocumentBlock[];
+    fields: DocumentField[];
+    style?: DocumentStyle;
+  },
+  authored: AuthoredHalves,
+): [string, string][] {
+  const out: [string, string][] = [];
+  if (authored.blocks) {
+    for (const block of content.blocks) {
+      for (const key of ["title", "subtitle", "heading", "text"] as const) {
+        const value = (block as Record<string, unknown>)[key];
+        if (typeof value === "string")
+          out.push([`blocks."${block.id}".${key}`, value]);
+      }
+    }
+  }
+  if (authored.fields) {
+    for (const field of content.fields) {
+      out.push([`fields."${field.name}".label`, field.label]);
+    }
+  }
+  const footer = content.style?.footerText;
+  if (authored.style && footer) {
+    out.push(["style.footerText", footer]);
+  }
+  return out;
 }
 
 export function parseTemplateContent(
@@ -569,6 +627,15 @@ export function parseDocumentValues(
     if (problem) {
       return { ok: false, reason: `values: "${field.name}" ${problem}.` };
     }
+    // Every string that will be PRINTED, including the description of each line item. A model
+    // writes these, and a model reaches for an emoji or a customer's name in its own script without
+    // being asked; printed as-is they come out as a different Latin character (see printable.ts).
+    // Refused rather than stripped, because the tool's error is something the model can act on and
+    // a quietly shortened name in a customer's receipt is not.
+    for (const text of printedStrings(field, value)) {
+      const unprintable = unprintableProblem(text, `values: "${field.name}"`);
+      if (unprintable) return { ok: false, reason: unprintable };
+    }
     // Line items are stored PARSED and sanitised: the snapshot then holds exactly what the renderer
     // will print, which is the whole point of freezing it.
     values[field.name] =
@@ -583,6 +650,16 @@ export function parseDocumentValues(
         : (value as DocumentValue);
   }
   return { ok: true, values };
+}
+
+// The strings a value contributes to the page: the value itself when it is text, and every line
+// item's description when it is a table.
+function printedStrings(field: DocumentField, value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (field.type !== "lineItems" || !Array.isArray(value)) return [];
+  return value
+    .map((item) => (item as { description?: unknown }).description)
+    .filter((d): d is string => typeof d === "string");
 }
 
 // A refusal that keeps the REASON. The global error handler localizes `translationKey` and drops

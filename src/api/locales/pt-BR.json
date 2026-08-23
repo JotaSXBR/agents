@@ -35,6 +35,7 @@
     "imageTooLarge": "A imagem é muito grande",
     "invalidColorMode": "Modo de cor inválido",
     "invalidColorToken": "Cor inválida",
+    "invalidCompanyField": "Este campo do perfil da empresa não é válido: {{reason}}",
     "invalidCredentials": "Email ou senha inválidos",
     "invalidDocumentNumberPrefix": "O prefixo de numeração do documento é longo demais",
     "invalidDocumentSlug": "Este identificador não é válido",

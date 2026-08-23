@@ -712,6 +712,139 @@ describe("parseDocumentStyle", () => {
   });
 });
 
+// The values a MODEL writes reach the page too, and a model reaches for an emoji, or for a
+// customer's name in its own script, without being asked. Printed as-is they come out as a
+// different Latin character, so they are refused — an error the model can act on beats a name
+// silently misspelled in a document the customer keeps.
+describe("printed values have to be printable", () => {
+  const fields = [
+    { name: "cliente", label: "Cliente", type: "text" as const },
+    { name: "itens", label: "Itens", type: "lineItems" as const },
+  ];
+
+  test("refuses a text value and a line-item description", () => {
+    const bad = parseDocumentValues(fields, { cliente: "李伟", itens: [] });
+    expect(bad.ok).toBe(false);
+    expect(bad.ok ? "" : bad.reason).toContain("李");
+
+    const badItem = parseDocumentValues(fields, {
+      cliente: "Ana",
+      itens: [{ description: "Serviço 😀", quantity: 1, unitPrice: 10 }],
+    });
+    expect(badItem.ok).toBe(false);
+  });
+
+  test("ordinary Portuguese passes", () => {
+    expect(
+      parseDocumentValues(fields, {
+        cliente: "João Conceição",
+        itens: [
+          { description: "Instalação — 2ª via", quantity: 1, unitPrice: 10 },
+        ],
+      }).ok,
+    ).toBe(true);
+  });
+});
+
+// A template that draws NOTHING is not a document, and it is the DEFAULT shape: `blocks` defaults
+// to [] and a template defaults to enabled, so an omitted layout became a granted tool that issued a
+// numbered blank page — a burned number from the sequence and an empty PDF attached to a customer's
+// conversation.
+describe("a layout has to print something", () => {
+  const field = { name: "cliente", label: "Cliente", type: "text" };
+
+  test("refuses an empty layout, and one that only draws rules", () => {
+    expect(parseAuthoredTemplate([], [field], {}).ok).toBe(false);
+    expect(
+      parseAuthoredTemplate(
+        [
+          { id: "a", type: "divider" },
+          { id: "b", type: "divider" },
+        ],
+        [field],
+        {},
+      ).ok,
+    ).toBe(false);
+  });
+
+  test("one printing block is enough, whichever it is", () => {
+    for (const block of [
+      { id: "h", type: "header", title: "Orçamento" },
+      { id: "t", type: "text", text: "Olá." },
+      {
+        id: "f",
+        type: "fields",
+        rows: [{ label: "Cliente", value: "{{cliente}}" }],
+      },
+    ]) {
+      expect(parseAuthoredTemplate([block], [field], {}).ok).toBe(true);
+    }
+  });
+
+  // STORED content is read tolerantly, always: a row that somehow holds an empty layout still has
+  // to load, or the operator cannot open it to fix it. That includes the AUTHORED path when the
+  // caller did not send blocks — a wording-only or style-only patch must not be refused over a
+  // layout it is not touching.
+  test("a stored empty layout still reads, and a patch that leaves it alone still saves", () => {
+    expect(parseTemplateContent([], [], {}).ok).toBe(true);
+    expect(
+      parseAuthoredTemplate([], [], {}, { blocks: false, fields: false }).ok,
+    ).toBe(true);
+  });
+});
+
+// Everything the page PRINTS has to be printable by the fonts that draw it, and the rule is
+// checked where it was WRITTEN — not on the way out of storage, which belongs to whoever wrote it.
+describe("authored text has to be printable", () => {
+  test("refuses a block, a label and a footer that would be mangled", () => {
+    const bad = parseAuthoredTemplate(
+      [{ id: "t", type: "text", text: "Olá 中" }],
+      [],
+      {},
+    );
+    expect(bad.ok).toBe(false);
+    expect(bad.ok ? "" : bad.reason).toContain("中");
+
+    expect(
+      parseAuthoredTemplate(
+        [{ id: "t", type: "text", text: "ok" }],
+        [{ name: "cliente", label: "Cliente 😀", type: "text" }],
+        {},
+      ).ok,
+    ).toBe(false);
+    expect(
+      parseAuthoredTemplate([{ id: "t", type: "text", text: "ok" }], [], {
+        footerText: "Obrigado 中",
+      }).ok,
+    ).toBe(false);
+  });
+
+  // Latin text with accents, curly quotes and a euro sign is the ordinary case, and it must not be
+  // caught by a rule aimed at scripts the fonts cannot draw.
+  test("ordinary Portuguese and punctuation pass", () => {
+    expect(
+      parseAuthoredTemplate(
+        [{ id: "t", type: "text", text: "Orçamento — “à vista” € 1.299,90" }],
+        [],
+        {},
+      ).ok,
+    ).toBe(true);
+  });
+
+  // A half the caller did NOT send belongs to storage: refusing it would make a template written by
+  // a newer build impossible to edit rather than possible to fix.
+  test("stored text is not held to it", () => {
+    expect(
+      parseAuthoredTemplate(
+        [{ id: "t", type: "text", text: "Olá 中" }],
+        [],
+        {},
+        { blocks: false },
+      ).ok,
+    ).toBe(true);
+  });
+});
+
 // The contract a client authors against and the gate a write passes through have to be the same
 // statement. Zod strips an unknown key; the write refuses it by name (see the authoring gate above),
 // so a schema published without `additionalProperties: false` would promise a permissiveness no

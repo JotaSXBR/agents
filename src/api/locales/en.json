@@ -35,6 +35,7 @@
     "imageTooLarge": "Image is too large",
     "invalidColorMode": "Invalid color mode",
     "invalidColorToken": "Invalid color value",
+    "invalidCompanyField": "This company profile field is not valid: {{reason}}",
     "invalidCredentials": "Invalid email or password",
     "invalidDocumentNumberPrefix": "The document number prefix is too long",
     "invalidDocumentSlug": "This identifier is not valid",

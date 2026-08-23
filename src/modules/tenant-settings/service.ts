@@ -3,6 +3,7 @@ import type { Prisma, PrismaClient } from "@/../generated/prisma/client";
 import basePrisma from "@/api/lib/prisma";
 import { AppError } from "@/lib/errors";
 import { runScopedOn, type ScopedDb, type TenantContext } from "@/lib/tenancy";
+import { unprintableProblem } from "@/modules/documents/printable";
 import { tryResolveVaultEntry } from "@/modules/vault/service";
 
 // Per-tenant settings live in the Tenant.settings JSON column. RLS scopes the row to the active
@@ -299,6 +300,18 @@ export async function updateCompanySettings(
   patch: CompanyUpdateInput,
   base: PrismaClient = basePrisma,
 ): Promise<CompanySettings> {
+  // This block is the letterhead every issued document carries — it exists for no other purpose —
+  // so it is held to what a document can print. The PDF fonts cover Latin text, and a character
+  // outside that comes out as a DIFFERENT one (see documents/printable.ts): a trade name would be
+  // misspelled on every document the tenant ever issues, and nobody would see it happen.
+  for (const [field, value] of Object.entries(patch)) {
+    if (typeof value !== "string") continue;
+    const problem = unprintableProblem(value, field);
+    if (problem)
+      throw new AppError(problem, 400, "errors.invalidCompanyField", {
+        reason: problem,
+      });
+  }
   return patchBlock(ctx, base, "company", (raw) =>
     companySettingsSchema.parse({ ...parseCompanySettings(raw), ...patch }),
   );

@@ -33,6 +33,11 @@ import {
 // three things only a real database can answer: idempotency under a repeated key, numbering under
 // concurrency, and one tenant reaching for another's bytes.
 
+// A layout that PRINTS something. An empty one is refused at authoring — every issued document
+// would be a numbered blank page — so a fixture that only cares about names and slugs still has to
+// carry a block.
+const MINIMAL_BLOCKS = [{ id: "corpo", type: "text", text: "Olá." }];
+
 function pdfHeader(bytes: Uint8Array | ArrayBuffer): string {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   return Buffer.from(u8.subarray(0, 5)).toString("latin1");
@@ -161,7 +166,7 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     await expect(
       createDocumentTemplate(
         ctx(tenantA),
-        { name: "Imagem", slug: "image", blocks: [], fields: [] },
+        { name: "Imagem", slug: "image", blocks: MINIMAL_BLOCKS, fields: [] },
         appDb,
       ),
     ).rejects.toThrow(/built-in tool/);
@@ -801,7 +806,7 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     for (const name of ["", "   ", "x".repeat(121)]) {
       const failed = await createDocumentTemplate(
         ctx(tenantA),
-        { name, blocks: [], fields: [] },
+        { name, blocks: MINIMAL_BLOCKS, fields: [] },
         appDb,
       ).catch((e: unknown) => e);
       expect(failed).toBeInstanceOf(AppError);
@@ -811,7 +816,7 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     // The same question on the update path, which raised the same raw error.
     const tpl = await createDocumentTemplate(
       ctx(tenantA),
-      { name: "Nomeado", blocks: [], fields: [] },
+      { name: "Nomeado", blocks: MINIMAL_BLOCKS, fields: [] },
       appDb,
     );
     const patchFailed = await updateDocumentTemplate(
@@ -1139,7 +1144,7 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
         {
           name: "Longo",
           slug: "a".repeat(SLUG_MAX + 1),
-          blocks: [],
+          blocks: MINIMAL_BLOCKS,
           fields: [],
         },
         appDb,
@@ -1152,7 +1157,7 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
           name: "Descritivo",
           slug: "descritivo",
           description: "x".repeat(2_001),
-          blocks: [],
+          blocks: MINIMAL_BLOCKS,
           fields: [],
         },
         appDb,
@@ -1164,7 +1169,7 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
     await expect(
       createDocumentTemplate(
         ctx(tenantA),
-        { name: "Slug vazio", slug: "", blocks: [], fields: [] },
+        { name: "Slug vazio", slug: "", blocks: MINIMAL_BLOCKS, fields: [] },
         appDb,
       ),
     ).rejects.toThrow(/slug/);
@@ -1178,7 +1183,7 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
           name: "Prefixado",
           slug: "prefixado",
           numberPrefix: "P".repeat(21),
-          blocks: [],
+          blocks: MINIMAL_BLOCKS,
           fields: [],
         },
         appDb,
