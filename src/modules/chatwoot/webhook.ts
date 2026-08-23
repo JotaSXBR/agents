@@ -13,6 +13,7 @@ import {
   getCheckpointer,
   resolveGraphThreadId,
 } from "@/graph/checkpointer";
+import { isTurnInFlight } from "@/graph/inflight";
 import type { IngestRole } from "@/graph/ingest";
 import { armIngest } from "@/graph/ingest-job";
 import { runAgentTurn } from "@/graph/runtime";
@@ -1321,6 +1322,28 @@ async function maybeConsumeCommandOrGate(params: {
                 instanceId,
                 contactInboxId,
               );
+              // A TURN ALREADY INVOKING IS THE ONE THING THIS LOCK DOES NOT HOLD BACK. A graph invoke
+              // is a read-modify-write of the whole message channel — it saves what it LOADED plus
+              // its own messages — so a clear that lands mid-invoke is undone the moment that turn
+              // finishes, restoring the history it just deleted (src/graph/inflight.ts, measured in
+              // tests/modules/memory-compaction.test.ts). Compaction, the other rewriter of this
+              // channel, already defers on exactly this question, under exactly this lock.
+              //
+              // And clearing anyway is WORSE than not clearing: the turn's save restores the raw
+              // channel, but nothing restores the summary rows or the AgentThread marker this would
+              // have deleted, so the operator is left with a half-erased memory and an
+              // acknowledgement claiming a clean one. Refusing the step is the honest outcome — the
+              // ack already names what did not clear, and /reset is a command the operator can
+              // simply type again once the turn lands.
+              //
+              // Asked INSIDE the lock, which is what makes the two exclusive rather than merely
+              // staggered: the turn takes this same lock to mark itself, so this either runs entirely
+              // before the mark (and the turn then loads a cleared thread) or it sees the mark.
+              if (isTurnInFlight(graphThreadId)) {
+                throw new Error(
+                  `a turn is still running on this thread (${graphThreadId}) — its save would restore what this clears`,
+                );
+              }
               // QUEUED INGESTION IS REVOKED FIRST, AND FROM IN HERE (issue #194). Continuous
               // ingestion is a scheduler job now, so at any moment this thread can owe an append
               // carrying text from before the reset — pending, or CLAIMED and blocked on the very

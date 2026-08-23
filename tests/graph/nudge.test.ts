@@ -1319,6 +1319,43 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
     expect(s.labelSets).toEqual([]);
   });
 
+  // And the retirement question on that same failure path. The catch runs BEFORE the post-generation
+  // check, so it was the last delivery still reaching the world without asking — a /reset that
+  // retired this job while the invoke was failing was still followed by the promised line.
+  test("a throw after the transfer withholds the line when the job was retired", async () => {
+    // Outside the 24h window (last inbound 48h ago), which is the shape the finding names: there the
+    // promised line becomes an operator NOTE and returns before any other check.
+    await seedConv(9987, null, new Date(Date.now() - 48 * 3_600_000));
+    const s = stub();
+    let asks = 0;
+    await expect(
+      runAgentNudge({
+        tenantId,
+        threadId: `${tenantId}:${instanceId}:9987`,
+        nudge: { source: "followup", kind: "inactivity", step: 1 },
+        postActions: { assignLabels: ["follow-up"], resolve: true },
+        // Yes before the turn, no by the time it has failed.
+        stillWanted: async () => {
+          asks += 1;
+          return asks < 2;
+        },
+        base: appDb,
+        deps: {
+          makeModel: () =>
+            new HandoffThenThrowModel("Um humano vai te atender.") as never,
+          makeClient: s.makeClient,
+          checkpointer: new MemorySaver(),
+          persistUsage: async () => {},
+        },
+      }),
+    ).rejects.toThrow();
+    // The throw still leaves — the turn genuinely failed, and swallowing it would cost the operator
+    // the alert. What does not happen is the delivery.
+    expect(s.messages).toEqual([]);
+    expect(s.notes).toEqual([]);
+    expect(s.labelSets).toEqual([]);
+  });
+
   // The live ownership probe failing is not the same as the bot having lost the conversation, and
   // after a transfer neither answer may take the closing line away: the probe is skipped outright,
   // so a transient Chatwoot GET cannot end the episode holding a sentence nobody will ever deliver.

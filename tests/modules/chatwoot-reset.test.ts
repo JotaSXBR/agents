@@ -12,6 +12,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/../generated/prisma/client";
 import { encryptJson } from "@/api/lib/crypto";
 import { contactInboxThreadId, getCheckpointer } from "@/graph/checkpointer";
+import { clearTurnInFlight, markTurnInFlight } from "@/graph/inflight";
 import { buildThreadStateGraph, THREAD_STATE_NODE } from "@/graph/thread-state";
 import { CHATWOOT_AUTH_HEADER } from "@/modules/chatwoot/constants";
 import {
@@ -1958,6 +1959,47 @@ describe.skipIf(!dbUp)(
       } finally {
         globalThis.fetch = originalFetch;
         await suDb.schedulerJob.deleteMany({ where: { tenantId } });
+      }
+    });
+
+    // The one writer this step's lock does not hold back: a turn already inside `graph.invoke`. It
+    // saves what it LOADED plus its own messages, so a clear landing mid-invoke is undone the moment
+    // it finishes — and the half that is NOT undone is the summary rows and the marker, which nothing
+    // restores. So the command refuses the step and says so, instead of confirming a clean slate over
+    // memory that is coming back.
+    test("a turn still invoking makes the memory step fail rather than half-clear", async () => {
+      // The same key the reset locks on: the conversation's contact-inbox, seeded as 301.
+      const graphThreadId = contactInboxThreadId(tenantId, instanceId, 301);
+      markTurnInFlight(graphThreadId);
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl as typeof fetch;
+      try {
+        await sendReset();
+
+        const ack = ackCalls(cw.calls)
+          .map((c) => (c.body as { content?: string })?.content ?? "")
+          .join(" ");
+        expect(ack).toContain("memória");
+      } finally {
+        clearTurnInFlight(graphThreadId);
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    // The control, and the reason the test above is not satisfied by a command that simply always
+    // reports a failure: with no turn in flight the same reset clears cleanly.
+    test("with no turn in flight the memory step clears", async () => {
+      const cw = fakeChatwoot();
+      globalThis.fetch = cw.impl as typeof fetch;
+      try {
+        await sendReset();
+
+        const ack = ackCalls(cw.calls)
+          .map((c) => (c.body as { content?: string })?.content ?? "")
+          .join(" ");
+        expect(ack).not.toContain("memória");
+      } finally {
+        globalThis.fetch = originalFetch;
       }
     });
 

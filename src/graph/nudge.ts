@@ -821,7 +821,12 @@ export async function runAgentNudge(
         invokeConfig,
       )
       .catch(async (e) => {
-        await deliverPromisedLine();
+        // The transfer can complete and the turn still throw, and then this is the one delivery that
+        // happens BEFORE the post-generation retirement check below — the same "asked after the
+        // write" mistake the checks around it were moved to fix. Outside the window it posts an
+        // operator note, which a /reset that retired this job during the failed invoke should not be
+        // followed by.
+        if (await stillWanted()) await deliverPromisedLine();
         throw e;
       });
   } finally {
