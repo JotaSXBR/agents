@@ -5,7 +5,7 @@ import { PrismaClient } from "@/../generated/prisma/client";
 import config from "@/config";
 import { AppError } from "@/lib/errors";
 import { runScopedOn, type TenantContext } from "@/lib/tenancy";
-import { setCompanyLogo } from "@/modules/documents/company";
+import { clearCompanyLogo, setCompanyLogo } from "@/modules/documents/company";
 import {
   getIssuedDocumentPdf,
   issueDocument,
@@ -1719,5 +1719,60 @@ describe.skipIf(!dbUp)("document templates + issuance", () => {
       ),
     ).toEqual([]);
     await rm(`${dir}/${key}`, { force: true });
+  });
+
+  // An operator asking for the logo to be gone means gone: clearing the key alone left the image on
+  // disk and in every backup taken afterwards. And a PNG replaced by a JPEG writes a NEW path, so
+  // the old extension's file is referenced by nothing and kept forever.
+  test("removes the file a logo no longer references", async () => {
+    const dir = `${config.documentsStorageDir}/company`;
+    const pngKey = `${tenantB}-logo.png`;
+    const jpgKey = `${tenantB}-logo.jpg`;
+    const png = [
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48,
+      0x44, 0x52, 0, 0, 0, 10, 0, 0, 0, 10, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42,
+      0x60, 0x82,
+    ];
+    const jpg = [
+      0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 11, 8, 0, 10, 0, 10, 0,
+      0, 0, 0xff, 0xd9,
+    ];
+    const upload = (type: string, body: number[]) =>
+      setCompanyLogo(
+        ctx(tenantB),
+        {
+          type,
+          size: body.length,
+          arrayBuffer: async () => new Uint8Array(body).buffer as ArrayBuffer,
+        },
+        appDb,
+      );
+
+    await upload("image/png", png);
+    expect(await Bun.file(`${dir}/${pngKey}`).exists()).toBe(true);
+    // Same format: ONE path, rewritten in place. Removing "the previous key" here would delete the
+    // letterhead that was just installed.
+    await upload("image/png", png);
+    expect(await Bun.file(`${dir}/${pngKey}`).exists()).toBe(true);
+    // Format change: the new path is written and the old one must not survive it.
+    await upload("image/jpeg", jpg);
+    expect(await Bun.file(`${dir}/${jpgKey}`).exists()).toBe(true);
+    expect(await Bun.file(`${dir}/${pngKey}`).exists()).toBe(false);
+    // The ORDER: file after row, never before. A clear whose row write fails must leave the file
+    // alone — the settings still name it, and a logo the settings name has to be on disk.
+    const failing = appDb.$extends({
+      query: {
+        tenant: {
+          update() {
+            throw new Error("settings write failed");
+          },
+        },
+      },
+    }) as unknown as typeof appDb;
+    await expect(clearCompanyLogo(ctx(tenantB), failing)).rejects.toThrow();
+    expect(await Bun.file(`${dir}/${jpgKey}`).exists()).toBe(true);
+    // …and clearing removes what is left.
+    await clearCompanyLogo(ctx(tenantB), appDb);
+    expect(await Bun.file(`${dir}/${jpgKey}`).exists()).toBe(false);
   });
 });

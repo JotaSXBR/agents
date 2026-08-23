@@ -3,9 +3,10 @@ import type { PrismaClient } from "@/../generated/prisma/client";
 import basePrisma from "@/api/lib/prisma";
 import config from "@/config";
 import { AppError } from "@/lib/errors";
-import type { TenantContext } from "@/lib/tenancy";
+import { runScopedOn, type TenantContext } from "@/lib/tenancy";
 import {
   type CompanySettings,
+  readCompanySettings,
   setCompanyLogoKey,
 } from "@/modules/tenant-settings/service";
 
@@ -146,6 +147,7 @@ export async function setCompanyLogo(
   base: PrismaClient = basePrisma,
 ): Promise<CompanySettings> {
   if (ctx.tenantId === null) throw new AppError("tenant required", 400);
+  const tenantId = ctx.tenantId;
   const ext = LOGO_EXT_BY_TYPE[file.type];
   if (!ext) {
     throw new AppError(
@@ -178,6 +180,11 @@ export async function setCompanyLogo(
     );
   }
   const key = logoKeyFor(ctx.tenantId, ext);
+  // The key a DIFFERENT format was stored under. Replacing a PNG with a JPEG writes a new path and
+  // leaves the old one behind — referenced by nothing, kept forever, and carried into every backup.
+  const replaced = await runScopedOn(base, ctx, (db) =>
+    readCompanySettings(db, tenantId),
+  );
   // Bytes first, then the row: a crash between the two leaves an unreferenced file, which costs
   // disk. The other order leaves a row pointing at nothing, which costs every render after it.
   //
@@ -203,24 +210,37 @@ export async function setCompanyLogo(
   // The reader-facing swap is still a rename, so nobody ever sees a partial file.
   let hadPrevious = false;
   try {
-    return await setCompanyLogoKey(ctx, key, base, Date.now(), async () => {
-      // COPIED aside, not moved. Renaming the live file away leaves the configured path EMPTY for
-      // the length of the swap, and a preview or an issuance landing in that gap renders a document
-      // with no letterhead at all — permanently, because the document it produces is frozen. A copy
-      // keeps the live name populated the whole time, and the rename below replaces it atomically:
-      // a reader sees the old logo or the new one, never neither.
-      //
-      // NOT COVERED BY A TEST: the gap is between two adjacent statements inside this callback, so
-      // observing it needs a reader scheduled between them — which no test can arrange without a
-      // hook that exists only for the test. The property is structural instead: nothing here ever
-      // unlinks the live name.
-      hadPrevious = await Bun.file(path).exists();
-      if (hadPrevious) await copyFile(path, previous);
-      // No restore here: a throw from inside the lock aborts the transaction and lands in the catch
-      // below, which restores for BOTH reasons a write can fail. Two restores for one condition is
-      // one that never runs.
-      await rename(temp, path);
-    });
+    const saved = await setCompanyLogoKey(
+      ctx,
+      key,
+      base,
+      Date.now(),
+      async () => {
+        // COPIED aside, not moved. Renaming the live file away leaves the configured path EMPTY for
+        // the length of the swap, and a preview or an issuance landing in that gap renders a document
+        // with no letterhead at all — permanently, because the document it produces is frozen. A copy
+        // keeps the live name populated the whole time, and the rename below replaces it atomically:
+        // a reader sees the old logo or the new one, never neither.
+        //
+        // NOT COVERED BY A TEST: the gap is between two adjacent statements inside this callback, so
+        // observing it needs a reader scheduled between them — which no test can arrange without a
+        // hook that exists only for the test. The property is structural instead: nothing here ever
+        // unlinks the live name.
+        hadPrevious = await Bun.file(path).exists();
+        if (hadPrevious) await copyFile(path, previous);
+        // No restore here: a throw from inside the lock aborts the transaction and lands in the catch
+        // below, which restores for BOTH reasons a write can fail. Two restores for one condition is
+        // one that never runs.
+        await rename(temp, path);
+      },
+    );
+    // AFTER the row commits: the old key is no longer referenced, so its file is disk nobody will
+    // ever read again. Only when the FORMAT changed — a same-format replacement wrote over the one
+    // path, and removing it here would delete the letterhead that was just installed.
+    if (replaced.logoKey && replaced.logoKey !== key) {
+      await removeLogoFile(replaced.logoKey);
+    }
+    return saved;
   } catch (e) {
     // The transaction rolled back (the publish itself failed, or the row write did), so the file
     // goes back to whatever the stored version still describes. When there was no previous file,
@@ -240,7 +260,25 @@ export async function clearCompanyLogo(
   ctx: TenantContext,
   base: PrismaClient = basePrisma,
 ): Promise<CompanySettings> {
-  return setCompanyLogoKey(ctx, null, base);
+  if (ctx.tenantId === null) throw new AppError("tenant required", 400);
+  const tenantId = ctx.tenantId;
+  const before = await runScopedOn(base, ctx, (db) =>
+    readCompanySettings(db, tenantId),
+  );
+  const cleared = await setCompanyLogoKey(ctx, null, base);
+  // AFTER the row commits, never before: removing first and failing the write would leave the
+  // settings pointing at a file that is gone, which is the one state every render has to handle and
+  // none of them should have to. Clearing the key alone left the image on disk and in every backup
+  // taken after it — an operator asking for it to be gone means gone.
+  await removeLogoFile(before.logoKey);
+  return cleared;
+}
+
+// The file a key names, if it names one. Best-effort by design: the row no longer references it, so
+// a failure here costs disk and nothing else — refusing the operation over it would be worse.
+async function removeLogoFile(key: string | null): Promise<void> {
+  if (!key || !logoExtOf(key)) return;
+  await rm(logoPath(key), { force: true }).catch(() => undefined);
 }
 
 export interface CompanyLogo {

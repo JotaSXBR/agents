@@ -1,5 +1,5 @@
 import { Building2, ImageUp, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button, Card, FormField, Input, useToast } from "@/client/components";
 import { api } from "@/client/lib/api";
@@ -42,6 +42,17 @@ export function CompanyProfileCard({
   // (whose echo IS the draft). Only a change from OUTSIDE should replace what someone is typing.
   const ownChangeRef = useRef(false);
 
+  // What the draft would be if it were reinitialised from the current props. Comparing against it is
+  // how "the operator has typed something" is known.
+  const fromCompany = useCallback(
+    (next: CompanyProfile) =>
+      Object.fromEntries(FIELDS.map((f) => [f, next[f] ?? ""])) as Record<
+        string,
+        string
+      >,
+    [],
+  );
+
   useEffect(() => {
     if (!company) return;
     // A logo upload or removal returns the whole company block, and reinitialising the draft from it
@@ -51,13 +62,15 @@ export function CompanyProfileCard({
       ownChangeRef.current = false;
       return;
     }
-    setDraft(
-      Object.fromEntries(FIELDS.map((f) => [f, company[f] ?? ""])) as Record<
-        string,
-        string
-      >,
-    );
-  }, [company]);
+    // And a DIRTY draft is never replaced, whatever the change was. The panel hands down a fresh
+    // company object on every reload — including reloads caused by deleting a template, which has
+    // nothing to do with this form — and a new object with identical values still reads as "changed".
+    // The rule that survives all of those: unsaved text belongs to whoever typed it.
+    setDraft((current) => {
+      const dirty = FIELDS.some((f) => current[f] !== (company[f] ?? ""));
+      return dirty ? current : fromCompany(company);
+    });
+  }, [company, fromCompany]);
 
   // The logo endpoint is tenant-scoped, so a bare <img src> would omit the active-tenant header and
   // a SUPER_ADMIN would get "a target tenant is required" instead of a picture. mediaFetch + a blob
