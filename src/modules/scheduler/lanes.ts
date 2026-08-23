@@ -43,6 +43,14 @@ export const JOB_LANE: Record<SchedulerJobKind, SchedulerLane> = {
   // Budget: fires for every agent on every closed attendance, against the model semaphore a
   // customer's turn queues on, so its batch is sized to a fraction of that budget.
   MEMORY_COMPACT: "compaction",
+  // Shared, and the first draft of this had it on the debounce tick for a cadence reason that no
+  // longer holds. What waits behind a queued ingestion is the next turn's CONTEXT, and a turn now
+  // drains what it needs before invoking (../../graph/ingest-job.ts, drainPendingIngest) instead of
+  // hoping the tick got there first. With the barrier the cadence stops mattering, and the fast tick
+  // turns into a liability: the debounce worker can be switched off (DEBOUNCE_WORKER_ENABLED), and
+  // a kind parked in that lane would then never drain at all, silently, on an install that simply
+  // does not use debounce.
+  INGEST_MESSAGE: "shared",
 };
 
 // Whether ONE job of this kind spends capacity at an external provider that the rest of the product
@@ -74,6 +82,8 @@ export const JOB_SPENDS_PROVIDER: Record<SchedulerJobKind, boolean> = {
   FLOWLOG_SWEEP: false,
   DEBOUNCE: false,
   MEMORY_COMPACT: false,
+  // No model, no embedding: it appends to a checkpointer channel and writes one row.
+  INGEST_MESSAGE: false,
 };
 
 // How many provider-spending jobs the shared lane may run at once, out of the model budget. NEVER
@@ -85,8 +95,68 @@ export function sharedProviderConcurrency(budget: number): number {
   return Math.max(1, Math.min(Math.floor(budget / 4), Math.max(1, budget - 1)));
 }
 
-export function kindsInLane(lane: SchedulerLane): SchedulerJobKind[] {
+// Whether a finished job's row is DELETED rather than marked DONE. Almost nothing wants this: a
+// DONE row is the record that the work happened, and every other kind keys its dedupeKey to a unit
+// of work that recurs (a conversation's follow-up, a thread's compaction), so the row count is
+// bounded by units and re-arming reuses it.
+//
+// INGEST_MESSAGE is the exception because its key names ONE MESSAGE — it has to, or the second
+// message of a burst would overwrite the first — so its rows are bounded by traffic and nothing
+// reuses them. Nothing sweeps `scheduler_jobs` either, so left DONE they accumulate forever, along
+// with the unique and status indexes over them.
+export const JOB_DELETE_ON_DONE: Record<SchedulerJobKind, boolean> = {
+  FOLLOWUP: false,
+  FOLLOWUP_SWEEP: false,
+  WEBHOOK_RETRY: false,
+  RAG_INGEST: false,
+  HEARTBEAT: false,
+  FLOWLOG_SWEEP: false,
+  APPOINTMENT_REMINDER: false,
+  REDIRECT_FOLLOWUP: false,
+  DEBOUNCE: false,
+  MEMORY_COMPACT: false,
+  INGEST_MESSAGE: true,
+};
+
+// Whether the NUMBER of rows of this kind follows inbound traffic, rather than a population the
+// install controls. A third question about a kind, and the reason it is not the lane's: everything
+// here shares one tick, and one FIFO batch of a fixed size.
+//
+// Every other kind is bounded by something that does not scale with how much a contact writes — one
+// per agent, per appointment, per closed attendance, per retry. INGEST_MESSAGE is one per MESSAGE the
+// agent did not answer, so a busy fleet can arm more of them per tick than the batch can hold. Being
+// armed for `now`, they are also the oldest rows, so a claim ordered by run_at fills every batch with
+// them and never reaches an appointment reminder — a kind that exists to arrive BEFORE something —
+// no matter how long it waits.
+//
+// The answer is not a lane of its own. Ingestion's tick latency does not matter at all: every reader
+// of a memory thread drains it before reading (../../graph/ingest-drain.ts), so the tick is a
+// backstop for threads nobody touches, and a lane would only add a worker flag that an install can
+// leave off. What it needs is a CAP — the shared tick claims these separately, with a share of the
+// batch, so the fixed-rate kinds always have the rest.
+export const JOB_TRAFFIC_PROPORTIONAL: Record<SchedulerJobKind, boolean> = {
+  FOLLOWUP: false,
+  FOLLOWUP_SWEEP: false,
+  WEBHOOK_RETRY: false,
+  DEBOUNCE: false,
+  RAG_INGEST: false,
+  HEARTBEAT: false,
+  FLOWLOG_SWEEP: false,
+  APPOINTMENT_REMINDER: false,
+  REDIRECT_FOLLOWUP: false,
+  MEMORY_COMPACT: false,
+  INGEST_MESSAGE: true,
+};
+
+export function kindsInLane(
+  lane: SchedulerLane,
+  // Narrow to one side of JOB_TRAFFIC_PROPORTIONAL. Omitted ⇒ the whole lane.
+  trafficProportional?: boolean,
+): SchedulerJobKind[] {
   return (Object.keys(JOB_LANE) as SchedulerJobKind[]).filter(
-    (kind) => JOB_LANE[kind] === lane,
+    (kind) =>
+      JOB_LANE[kind] === lane &&
+      (trafficProportional === undefined ||
+        JOB_TRAFFIC_PROPORTIONAL[kind] === trafficProportional),
   );
 }

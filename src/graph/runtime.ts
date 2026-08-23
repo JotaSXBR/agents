@@ -22,6 +22,11 @@ import {
 } from "@/modules/chatwoot/normalize";
 import { renderInboundMessage } from "@/modules/chatwoot/render";
 import type { NormalizedChatwootEvent } from "@/modules/chatwoot/types";
+import {
+  type ObservedConversation,
+  observeBeforeClose,
+  recordResolutionOrigin,
+} from "@/modules/conversations/record-resolution";
 import { advanceHandledWatermark } from "@/modules/debounce/watermark";
 import {
   emitFlowEvent,
@@ -54,6 +59,7 @@ import {
   isTurnInFlight,
   markTurnInFlight,
 } from "./inflight";
+import { drainPendingIngest } from "./ingest-drain";
 import { conversationDividerMessage, conversationStamp } from "./markers";
 import type { ResolvedModelConfig } from "./models";
 import {
@@ -161,11 +167,43 @@ async function applyDeferredResolve(
   conversationId: number,
   turnState: TurnState,
   flow: FlowContext,
+  origin: {
+    tenantId: bigint;
+    instanceId: bigint;
+    base: PrismaClient;
+    // What the ownership recheck saw, status and version together. Read from the row BEFORE the
+    // toggle, because after it the mirror may already carry our own close and a re-read could not
+    // tell it from somebody else's.
+    observed: ObservedConversation;
+  },
 ): Promise<void> {
   if (!turnState.resolveRequested) return;
   turnState.resolveRequested = false;
   try {
+    // NOTE: Read live before the toggle, not from `origin.observed`. That snapshot is the ownership
+    // recheck's, taken BEFORE delivery, and delivery is not quick on this path: the output guardrail
+    // is a model round-trip, TTS synthesises audio, and split delivery is typing-paced on purpose.
+    // An operator or a timer closing in that window makes the toggle below a silent no-op, and the
+    // stale value would credit the agent for their close.
+    const observed = await observeBeforeClose(
+      client,
+      conversationId,
+      origin.observed,
+    );
     await client.toggleStatus(conversationId, "resolved");
+    // NOTE: The one closing the Resolution funnel counts: the agent called resolve_conversation, so it
+    // judged the customer's request handled. Every other way a conversation reaches "resolved" is
+    // recorded under its own origin, or not at all when it happens outside our code.
+    await recordResolutionOrigin({
+      tenantId: origin.tenantId,
+      conversation: {
+        chatwootInstanceId: origin.instanceId,
+        chatwootConversationId: conversationId,
+      },
+      origin: "agent",
+      observed,
+      base: origin.base,
+    });
     emitFlowEvent(flow, {
       stage: "handoff",
       status: "ok",
@@ -587,6 +625,16 @@ export async function runLoadedTurn(
     //    carrying a system marker the customer never wrote.
     if (loaded.contactInboxId != null) {
       const contactInboxId = loaded.contactInboxId;
+      // BARRIER (issue #194). Continuous ingestion is a queued job now, so a message the agent stayed
+      // silent on may still be a row rather than a turn in this thread. Folded in here, BEFORE the
+      // lock and the in-flight claim below: the drain takes that same lock, and it is also the last
+      // moment at which the append is not the thing this turn erases.
+      //
+      // Its outcome is DISCARDED, and only here and at the nudge. A turn that finds ingestion still
+      // owed has nowhere to wait — a customer is holding the line, and the message it is missing
+      // reaches the thread for the next turn. Compaction consults the same answer and refuses to
+      // read on it, because there the same message is summarised out of existence.
+      await drainPendingIngest(tenantId, graphThreadId, base);
       const checkpointerForDivider =
         params.deps?.checkpointer ?? (await getCheckpointer());
       const dividerGraph = buildThreadStateGraph(checkpointerForDivider);
@@ -607,7 +655,10 @@ export async function runLoadedTurn(
             };
             const existing = await db.agentThread.findUnique({
               where: key,
-              select: { lastConversationId: true },
+              select: {
+                lastConversationId: true,
+                lastSyncedMessageId: true,
+              },
             });
             // Read BEFORE this turn adds its own claim: what matters is whether some OTHER invoke
             // is mid-flight on this thread (./attendance-boundary.ts, case 1).
@@ -650,7 +701,37 @@ export async function runLoadedTurn(
                 THREAD_STATE_NODE,
               );
             }
-            if (claim.advanceMarker) {
+            // THE TURN RECORDS THE INBOUND ID IT HANDLED (issue #194). Ingestion decides whether an
+            // out-of-order message may still speak for the thread's attendance by comparing it with
+            // the newest inbound id the thread has seen (./attendance-boundary.ts,
+            // movesAttendanceFrontier), and this writer used to leave no id at all — so the frontier
+            // was blind to the most ordinary way a new attendance opens, which is the customer
+            // writing and the bot ANSWERING. A delayed message from the previous conversation then
+            // compared newer than a stale mark, walked the marker back and armed compaction for the
+            // conversation being served.
+            //
+            // ON EVERY HANDLED TURN, and `lastConversationId` alone stays conditional. An earlier
+            // round cut this back to boundaries only, reasoning that the frontier merely suppresses a
+            // boundary claim — which was already false by then, because the same change had given it
+            // a second job: it also decides whether the message may carry an attendance STAMP. And
+            // `advanceMarker` is false in two different situations, not one. The second is a boundary
+            // DEFERRED because another invoke is reading (./attendance-boundary.ts, case 1): the
+            // conversation really is new, this turn really is handling its first message, and the
+            // marker deliberately stays behind. Recording nothing there leaves the frontier back in
+            // the previous attendance, so a delayed message from it reads as current, stamps itself
+            // at the end of the channel, and the compaction cut then treats the live conversation as
+            // the closed prefix.
+            //
+            // The scalar only. `recentSyncedMessageIds` is ingestion's own ledger of what IT folded
+            // in, and the two never overlap by construction — a message a turn answers is never
+            // ingested (../modules/chatwoot/webhook.ts) — so putting a turn's id in that set would
+            // describe an append that never happened.
+            const inboundId = params.messageId;
+            const markedId =
+              inboundId === undefined
+                ? null
+                : Math.max(existing?.lastSyncedMessageId ?? 0, inboundId);
+            if (claim.advanceMarker || markedId !== null) {
               await db.agentThread.upsert({
                 where: key,
                 create: {
@@ -659,8 +740,18 @@ export async function runLoadedTurn(
                   contactInboxId,
                   threadId: graphThreadId,
                   lastConversationId: conversationId,
+                  ...(markedId === null
+                    ? {}
+                    : { lastSyncedMessageId: markedId }),
                 },
-                update: { lastConversationId: conversationId },
+                update: {
+                  ...(claim.advanceMarker
+                    ? { lastConversationId: conversationId }
+                    : {}),
+                  ...(markedId === null
+                    ? {}
+                    : { lastSyncedMessageId: markedId }),
+                },
               });
             }
             return claim.closedConversationId;
@@ -774,7 +865,7 @@ export async function runLoadedTurn(
             chatwootConversationId: conversationId,
           },
         },
-        select: { assigneeType: true, status: true },
+        select: { assigneeType: true, status: true, chatwootStatusAt: true },
       });
       const ours = shouldBotHandle(
         {
@@ -791,7 +882,14 @@ export async function runLoadedTurn(
         });
         voiceReply = c?.voiceReply ?? null;
       }
-      return { ours, voiceReply };
+      return {
+        ours,
+        voiceReply,
+        observed: {
+          status: conv?.status ?? null,
+          statusAt: conv?.chatwootStatusAt ?? null,
+        },
+      };
     });
     // Both gates below drop what is no longer wanted: a human took the conversation, or a newer
     // customer message made this answer obsolete. Neither can reach the closing line, which left
@@ -860,7 +958,12 @@ export async function runLoadedTurn(
           "send_image: nenhuma imagem foi entregue e o turno não tinha resposta em texto",
         );
       }
-      await applyDeferredResolve(client, conversationId, turnState, flow);
+      await applyDeferredResolve(client, conversationId, turnState, flow, {
+        tenantId,
+        instanceId,
+        base,
+        observed: recheck.observed,
+      });
       return sent || handedOff ? "posted" : "empty";
     }
 
@@ -869,7 +972,12 @@ export async function runLoadedTurn(
     await deliverPendingImages(client, conversationId, turnState, flow);
 
     deliveredBalloons = await deliverText(reply, recheck.voiceReply);
-    await applyDeferredResolve(client, conversationId, turnState, flow);
+    await applyDeferredResolve(client, conversationId, turnState, flow, {
+      tenantId,
+      instanceId,
+      base,
+      observed: recheck.observed,
+    });
     return "posted";
   } finally {
     clearTurnInFlight(threadId);

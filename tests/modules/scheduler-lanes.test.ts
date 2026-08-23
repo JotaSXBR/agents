@@ -3,8 +3,10 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@/../generated/prisma/client";
 import logger from "@/api/lib/logger";
 import {
+  JOB_DELETE_ON_DONE,
   JOB_LANE,
   JOB_SPENDS_PROVIDER,
+  JOB_TRAFFIC_PROPORTIONAL,
   type SchedulerLane,
   sharedProviderConcurrency,
 } from "@/modules/scheduler/lanes";
@@ -12,10 +14,12 @@ import {
   claimDueCompactionJobs,
   claimDueDebounceJobs,
   claimDueJobs,
+  claimDueTrafficJobs,
   enqueueJob,
   type SchedulerJobKind,
 } from "@/modules/scheduler/service";
 import {
+  getJobHandler,
   registerJobHandler,
   runSchedulerTick,
 } from "@/modules/scheduler/worker";
@@ -77,6 +81,10 @@ const EXPECTED_LANE: Record<SchedulerJobKind, SchedulerLane> = {
   REDIRECT_FOLLOWUP: "shared",
   DEBOUNCE: "debounce",
   MEMORY_COMPACT: "compaction",
+  // Shared: the turn drains its own thread before invoking (issue #194), so the tick cadence stops
+  // deciding correctness — and the debounce lane can be switched off entirely, which would have
+  // stranded every queued message on an install that does not use debounce.
+  INGEST_MESSAGE: "shared",
 };
 
 // Same discipline as EXPECTED_LANE, and for a sharper reason: the bound test below can only
@@ -94,6 +102,41 @@ const EXPECTED_SPENDS_PROVIDER: Record<SchedulerJobKind, boolean> = {
   HEARTBEAT: false,
   FLOWLOG_SWEEP: false,
   DEBOUNCE: false,
+  MEMORY_COMPACT: false,
+  INGEST_MESSAGE: false,
+};
+
+// Same discipline again, and both of these maps were added by the change that introduced
+// INGEST_MESSAGE — the only kind that is `true` in either. A behaviour test can only exercise that
+// one end to end, so what stops a SECOND kind from being flipped is this list and nothing else, and
+// the two failures are quiet ones: a kind marked traffic-proportional silently leaves the fixed-rate
+// batch and is drained at a quarter of the rate; a kind marked delete-on-done stops leaving a
+// completed row behind, and the rows nothing sweeps are simply gone.
+const EXPECTED_TRAFFIC_PROPORTIONAL: Record<SchedulerJobKind, boolean> = {
+  INGEST_MESSAGE: true,
+  FOLLOWUP: false,
+  FOLLOWUP_SWEEP: false,
+  WEBHOOK_RETRY: false,
+  DEBOUNCE: false,
+  RAG_INGEST: false,
+  HEARTBEAT: false,
+  FLOWLOG_SWEEP: false,
+  APPOINTMENT_REMINDER: false,
+  REDIRECT_FOLLOWUP: false,
+  MEMORY_COMPACT: false,
+};
+
+const EXPECTED_DELETE_ON_DONE: Record<SchedulerJobKind, boolean> = {
+  INGEST_MESSAGE: true,
+  FOLLOWUP: false,
+  FOLLOWUP_SWEEP: false,
+  WEBHOOK_RETRY: false,
+  DEBOUNCE: false,
+  RAG_INGEST: false,
+  HEARTBEAT: false,
+  FLOWLOG_SWEEP: false,
+  APPOINTMENT_REMINDER: false,
+  REDIRECT_FOLLOWUP: false,
   MEMORY_COMPACT: false,
 };
 
@@ -141,7 +184,16 @@ describe.skipIf(!dbUp)("scheduler lanes", () => {
         claimedBy.set(kind, [...(claimedBy.get(kind) ?? []), lane]);
       }
     };
+    // The shared lane is claimed in TWO halves — the fixed-rate kinds and the traffic-proportional
+    // ones — so that a kind whose row count follows inbound traffic cannot fill the batch and starve
+    // the rest (../../src/modules/scheduler/lanes.ts, JOB_TRAFFIC_PROPORTIONAL). Both are recorded
+    // as "shared", because they are one lane: what the assertion below still means is that no kind
+    // is claimed by two lanes or by none, and a kind dropped from BOTH halves fails it.
     record("shared", await claimDueJobs(50, appDb, new Date(), tenantId));
+    record(
+      "shared",
+      await claimDueTrafficJobs(50, appDb, new Date(), tenantId),
+    );
     record(
       "debounce",
       await claimDueDebounceJobs(50, appDb, new Date(), tenantId),
@@ -325,6 +377,8 @@ describe.skipIf(!dbUp)("scheduler lanes", () => {
     // Which kinds the bound APPLIES to, stated independently of the source. One kind is exercised
     // above; the rest are only ever covered here.
     expect(JOB_SPENDS_PROVIDER).toEqual(EXPECTED_SPENDS_PROVIDER);
+    expect(JOB_TRAFFIC_PROPORTIONAL).toEqual(EXPECTED_TRAFFIC_PROPORTIONAL);
+    expect(JOB_DELETE_ON_DONE).toEqual(EXPECTED_DELETE_ON_DONE);
   }, 30_000);
 
   // The production sizing, which the test above deliberately does not exercise: never the whole
@@ -379,6 +433,61 @@ describe.skipIf(!dbUp)("scheduler lanes", () => {
         `DELETE FROM tenants WHERE id = ${other.id}`,
       );
     }
+  });
+
+  // The shared tick claims in TWO parts so a traffic-proportional kind cannot fill the batch, and
+  // this is the half a mutation caught untested: the split is asserted at the claim functions, and
+  // deleting the second claim from the tick itself killed nothing. It is the third time in this
+  // change that a function was covered and its call site was not.
+  test("the shared tick drains both halves of its lane", async () => {
+    const fixed = await enqueueJob({
+      tenantId,
+      kind: "WEBHOOK_RETRY",
+      dedupeKey: "dk-tick-fixed",
+      runAt: past(),
+      base: appDb,
+    });
+    const traffic = await enqueueJob({
+      tenantId,
+      kind: "INGEST_MESSAGE",
+      dedupeKey: "dk-tick-traffic",
+      runAt: past(),
+      base: appDb,
+    });
+    const ran: SchedulerJobKind[] = [];
+    const previous = {
+      WEBHOOK_RETRY: getJobHandler("WEBHOOK_RETRY"),
+      INGEST_MESSAGE: getJobHandler("INGEST_MESSAGE"),
+    };
+    for (const kind of ["WEBHOOK_RETRY", "INGEST_MESSAGE"] as const) {
+      registerJobHandler(kind, async () => {
+        ran.push(kind);
+        return { outcome: "done" };
+      });
+    }
+    try {
+      await runSchedulerTick(appDb, {
+        staleMs: 300_000,
+        batchSize: 20,
+        tenantId,
+      });
+    } finally {
+      for (const [kind, handler] of Object.entries(previous)) {
+        if (handler) registerJobHandler(kind, handler);
+      }
+    }
+
+    expect(ran.sort()).toEqual(["INGEST_MESSAGE", "WEBHOOK_RETRY"]);
+    // Both rows are finished: the traffic half is DELETED on completion, the fixed one retired.
+    expect(await suDb.schedulerJob.count({ where: { id: traffic } })).toBe(0);
+    expect(
+      (
+        await suDb.schedulerJob.findUniqueOrThrow({
+          where: { id: fixed },
+          select: { status: true },
+        })
+      ).status,
+    ).toBe("DONE");
   });
 
   test("a write that cannot reach the database is logged, and the batch still drains", async () => {

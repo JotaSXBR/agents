@@ -10,8 +10,10 @@ import {
 import {
   type ClaimedJob,
   claimDueJobs,
+  claimDueTrafficJobs,
   completeJob,
   failJob,
+  type ReapedJob,
   reapStaleJobs,
   rescheduleJob,
 } from "./service";
@@ -89,6 +91,30 @@ async function dispatchDeadLetter(
   }
 }
 
+// THE SECOND ROAD TO DEAD, and the one with nothing else to read: a claim that crashed or hung never
+// reaches failJob, so it carries no `lastError` explaining anything — just a row that stopped moving.
+// Every caller of `reapStaleJobs` owes this call.
+//
+// It is a shared function rather than the loop it replaced because reaping is NOT the scheduler
+// tick's alone: a lane with its own worker reaps its own kind (the compaction lane, the ingest
+// drain), for reasons written at those call sites, and the loop was copied to none of them. Which
+// reaper announced was therefore decided by whichever won the atomic UPDATE — the scheduler's, and
+// the announcement happened; the lane's, and it did not. A kind whose lane runs with the scheduler
+// worker disabled — a configuration the boot sequence supports — never announced at all.
+//
+// Free for a kind with no hook registered, which is what makes "every reaper calls it" a rule a
+// fourth lane can follow without knowing which kinds have one.
+export async function announceReaped(
+  reaped: ReapedJob[],
+  base: PrismaClient,
+): Promise<void> {
+  for (const job of reaped) {
+    if (job.status === "DEAD") {
+      await dispatchDeadLetter(job, "reaped: the claim never finished", base);
+    }
+  }
+}
+
 // Records a failure and, when it was the one that dead-lettered the job, notifies whoever registered
 // a hook for that kind.
 async function fail(
@@ -130,6 +156,7 @@ export async function runClaimed(
       job.tenantId,
       job.id,
       job.claimSeq,
+      job.kind,
       base,
     );
     if (!applied) supersededWarning(job, "done");
@@ -187,19 +214,33 @@ export async function runSchedulerTick(
     new Date(),
     opts.tenantId,
   );
-  // NOTE: The reaper is the other road to DEAD — a claim that crashed or hung never reaches failJob,
-  // so without this a job that exhausts its attempts by hanging dies unannounced.
-  for (const job of reaped) {
-    if (job.status === "DEAD") {
-      await dispatchDeadLetter(job, "reaped: the claim never finished", base);
-    }
-  }
-  const jobs = await claimDueJobs(
-    opts.batchSize,
-    base,
-    new Date(),
-    opts.tenantId,
-  );
+  await announceReaped(reaped, base);
+  // TWO CLAIMS, ONE DRAIN. The fixed-rate kinds take the batch; the traffic-proportional ones take a
+  // share of it on top (../scheduler/lanes.ts, JOB_TRAFFIC_PROPORTIONAL). A single claim ordered by
+  // run_at cannot serve both: ingestion rows are armed for `now` and arrive at the rate contacts
+  // write, so on a busy fleet they are always the oldest and always fill the batch, and an
+  // appointment reminder — a kind whose whole purpose is to arrive before something — is never
+  // claimed at all, however overdue it gets.
+  //
+  // A share rather than the whole batch again, because these are the rows that can be unbounded, and
+  // a quarter of a batch every tick is generous for work whose latency nothing waits on: every
+  // reader of a memory thread drains it before reading, so the tick is only the backstop for threads
+  // nobody touches.
+  // The `max(1, …)` survives mutation, and knowingly: `claimWhere` clamps its own limit to at least
+  // one, so a batch smaller than four would claim a traffic row either way and no test can separate
+  // the two. It stays because that clamp is a hard CAP for the claim, not a floor for this caller —
+  // making the floor depend on it would put this rule in another module, in a line written for the
+  // opposite purpose.
+  const trafficShare = Math.max(1, Math.floor(opts.batchSize / 4));
+  const jobs = [
+    ...(await claimDueJobs(opts.batchSize, base, new Date(), opts.tenantId)),
+    ...(await claimDueTrafficJobs(
+      trafficShare,
+      base,
+      new Date(),
+      opts.tenantId,
+    )),
+  ];
   // NOTE: The batch drains CONCURRENTLY, which is what the debounce and compaction lanes always did
   // and this one did not (issue #165). Serially, the lane advanced at the speed of whatever was
   // running: one large document being indexed, or one follow-up whose model call is slow, delayed

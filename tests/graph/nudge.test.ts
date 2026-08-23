@@ -13,6 +13,7 @@ import { PrismaClient } from "@/../generated/prisma/client";
 import { encryptJson } from "@/api/lib/crypto";
 import { contactInboxThreadId } from "@/graph/checkpointer";
 import { isTurnInFlight } from "@/graph/inflight";
+import { armIngest, ingestHandler } from "@/graph/ingest-job";
 import {
   conversationStamp,
   isConversationDivider,
@@ -30,12 +31,14 @@ import {
 import { buildThreadStateGraph, THREAD_STATE_NODE } from "@/graph/thread-state";
 import type { ChatwootClient } from "@/modules/chatwoot/client";
 import { selectClosedPrefix } from "@/modules/memory/cut";
+import { getJobHandler, registerJobHandler } from "@/modules/scheduler/worker";
 import { seedChatwootInstance } from "../utils/chatwoot";
 import {
   EmptyThenReplyModel,
   guardrailModel,
   HandoffThenReplyModel,
   HandoffThenThrowModel,
+  ResolveThenReplyModel,
 } from "../utils/scripted-models";
 
 describe("renderNudge (prompt-injection boundary)", () => {
@@ -366,6 +369,94 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
     expect(claimedDuringInvoke).toEqual([true]);
     // Released on every exit, or compaction for this contact defers itself forever.
     expect(isTurnInFlight(graphThreadId)).toBe(false);
+  });
+
+  // THE BARRIER (issue #194), at the third reader of the memory thread. A nudge is a model call on
+  // this thread like any other, so a message the agent stayed silent on that is still a queued row
+  // is a message the nudge writes without — and the nudge is the writer most likely to ask about
+  // exactly that message, since it fires on inactivity after the customer's last words.
+  //
+  // The drain's own tests call it directly; this is what pins the wiring at this call site, which
+  // every one of them passes with deleted.
+  test("a nudge folds in a message still queued for the thread", async () => {
+    const contactInboxId = 8809;
+    await seedConv(917, null, new Date(), contactInboxId);
+    const graphThreadId = contactInboxThreadId(
+      tenantId,
+      instanceId,
+      contactInboxId,
+    );
+    const agent = await suDb.agent.findFirstOrThrow({
+      where: { tenantId },
+      select: { id: true },
+    });
+    const OWED = "esqueci-de-perguntar-o-valor-5512";
+    await armIngest({
+      tenantId,
+      instanceId,
+      conversationId: 917,
+      contactInboxId,
+      graphThreadId,
+      messageId: 8401,
+      text: OWED,
+      role: "customer",
+      agentId: agent.id,
+      compactionEnabled: false,
+      base: appDb,
+    });
+    // Pushed into the future, which is what a deferral leaves behind: only a drain that ignores
+    // run_at can take it, so nothing else in this process would.
+    await suDb.$executeRawUnsafe(
+      `UPDATE scheduler_jobs SET run_at = now() + interval '1 hour'
+        WHERE tenant_id = ${tenantId} AND dedupe_key = 'ingest:${graphThreadId}:8401'`,
+    );
+
+    // One checkpointer for both, as production has: the drain runs its job through the scheduler's
+    // registry, so this is where a test says which store it writes to.
+    const saver = new MemorySaver();
+    const previous = getJobHandler("INGEST_MESSAGE");
+    registerJobHandler("INGEST_MESSAGE", (job, jobBase) =>
+      ingestHandler(job, jobBase, saver),
+    );
+    const seen: string[] = [];
+    class ContextObservingModel extends BaseChatModel {
+      constructor() {
+        super({});
+      }
+      _llmType() {
+        return "fake-context-observing";
+      }
+      async _generate(messages: BaseMessage[]): Promise<ChatResult> {
+        seen.push(messages.map((m) => String(m.content)).join("\n"));
+        return {
+          generations: [
+            { text: "Tudo certo?", message: new AIMessage("Tudo certo?") },
+          ],
+        };
+      }
+    }
+    const s = stub();
+    let outcome: string;
+    try {
+      outcome = await runAgentNudge({
+        tenantId,
+        threadId: `${tenantId}:${instanceId}:917`,
+        nudge: { source: "followup", kind: "inactivity", step: 1 },
+        base: appDb,
+        deps: {
+          makeModel: () => new ContextObservingModel(),
+          makeClient: s.makeClient,
+          checkpointer: saver,
+          persistUsage: async () => {},
+        },
+      });
+    } finally {
+      if (previous) registerJobHandler("INGEST_MESSAGE", previous);
+    }
+
+    expect(outcome).toBe("messaged");
+    // The customer's owed words were in the context the nudge was written from.
+    expect(seen[0] ?? "").toContain(OWED);
   });
 
   // The claim is taken inside a transaction, and a transaction can reject AFTER its callback ran (a
@@ -850,6 +941,109 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
     expect(s.labelSets).toEqual([["follow-up"]]);
     // Exactly one status call: the handoff's own `open`. A second one would be the resolve.
     expect(s.resolved).toEqual([9905]);
+  });
+
+  // Issue #188: the last step of a follow-up ladder closes out a customer who stopped answering, and
+  // that close used to be indistinguishable from the agent resolving the conversation itself — so a
+  // lead that ghosted raised the Resolution funnel. The origin is now recorded at the close.
+  test("the last follow-up step's resolve is recorded as an abandonment", async () => {
+    await seedConv(9940, null);
+    const s = stub();
+    const outcome = await runAgentNudge({
+      tenantId,
+      threadId: `${tenantId}:${instanceId}:9940`,
+      nudge: { source: "followup", kind: "inactivity", step: 3 },
+      postActions: { assignLabels: ["cold-lead"], resolve: true },
+      base: appDb,
+      deps: {
+        // The customer never answered, so the agent has nothing to say: the silent branch is the
+        // one the abandonment step actually takes in production.
+        makeModel: () => new FakeListChatModel({ responses: [""] }),
+        makeClient: s.makeClient,
+        checkpointer: new MemorySaver(),
+        persistUsage: async () => {},
+      },
+    });
+    expect(outcome).toBe("silent");
+    expect(s.resolved).toEqual([9940]);
+    const row = await suDb.conversation.findFirst({
+      where: { tenantId, chatwootConversationId: 9940 },
+      select: { resolvedBy: true },
+    });
+    expect(row?.resolvedBy).toBe("followup_abandonment");
+  });
+
+  // The complement, and the one that would silently mis-credit the agent: a resolve that never ran
+  // must leave nothing behind. `allowResolve: false` skips only the toggle, and a stamp written
+  // regardless would be read months later as a resolution that never happened.
+  test("a suppressed resolve records no origin at all", async () => {
+    await seedConv(9941, null);
+    const s = stub();
+    await runAgentNudge({
+      tenantId,
+      threadId: `${tenantId}:${instanceId}:9941`,
+      nudge: { source: "followup", kind: "inactivity", step: 3 },
+      postActions: { assignLabels: ["follow-up"], resolve: true },
+      base: appDb,
+      deps: {
+        makeModel: () =>
+          new HandoffThenReplyModel("", "Um humano vai te atender.") as never,
+        makeClient: s.makeClient,
+        checkpointer: new MemorySaver(),
+        persistUsage: async () => {},
+      },
+    });
+    const row = await suDb.conversation.findFirst({
+      where: { tenantId, chatwootConversationId: 9941 },
+      select: { resolvedBy: true },
+    });
+    expect(row?.resolvedBy).toBeNull();
+  });
+
+  // A nudge turn carries no turnState, so resolve_conversation takes the IMMEDIATE branch instead of
+  // the deferred one runtime.ts applies. Both must record the same origin: this is the only closing
+  // the funnel counts, so a producer that forgets to stamp silently undercounts real resolutions,
+  // and one that stamps on the wrong path inflates them.
+  test("the agent's own resolve on a nudge turn is recorded as the agent's", async () => {
+    await seedConv(9942, null);
+    const s = stub();
+    // NOTE: The live read the tool makes before closing still finds the conversation ours, so the
+    // close IS the agent's. Its version is what the floor has to carry: the caller's pre-generation
+    // snapshot is older, and a floor taken from it would date the stamp to the wrong moment.
+    const LIVE_AT = 1_700_500_000.75;
+    const makeClient = async () => {
+      const base = (await s.makeClient()) as unknown as Record<string, unknown>;
+      return {
+        ...base,
+        getConversation: async () => ({
+          id: 9942,
+          status: "pending",
+          meta: { assignee_type: null, assignee: null },
+          last_activity_at: 1_700_500_000,
+          updated_at: LIVE_AT,
+        }),
+      } as never;
+    };
+    await runAgentNudge({
+      tenantId,
+      threadId: `${tenantId}:${instanceId}:9942`,
+      nudge: { source: "followup", kind: "inactivity", step: 1 },
+      base: appDb,
+      deps: {
+        makeModel: () =>
+          new ResolveThenReplyModel("Tudo certo por aqui!") as never,
+        makeClient,
+        checkpointer: new MemorySaver(),
+        persistUsage: async () => {},
+      },
+    });
+    expect(s.resolved).toEqual([9942]);
+    const row = await suDb.conversation.findFirst({
+      where: { tenantId, chatwootConversationId: 9942 },
+      select: { resolvedBy: true, resolvedByAt: true },
+    });
+    expect(row?.resolvedBy).toBe("agent");
+    expect(row?.resolvedByAt).toBe(LIVE_AT);
   });
 
   // The handoff line returns before the terminal deliveries, so it is the one customer-visible send
@@ -2716,6 +2910,57 @@ describe.skipIf(!dbUp)("runAgentNudge", () => {
         ]);
       },
     );
+  });
+
+  // Review round 10. On a nudge turn resolve_conversation closes IMMEDIATELY, in the middle of the
+  // model call, and the turn's snapshot of the conversation was taken before generation started. A
+  // minute is a long time: an operator, an automation rule or `auto_resolve_after` can close the
+  // conversation meanwhile, Chatwoot answers our toggle with a successful no-op, and the stale
+  // "pending" would credit the agent for their close. So the tool re-reads the live state itself.
+  test("an operator's close during generation is not claimed by the agent's own resolve", async () => {
+    await seedConv(9943, null);
+    const s = stub();
+    let reads = 0;
+    const makeClient = async () => {
+      const base = (await s.makeClient()) as unknown as Record<string, unknown>;
+      return {
+        ...base,
+        // The operator's close already landed in Chatwoot by the time the tool looks. This is the
+        // read the tool makes right before its own toggle; the turn's pre-generation snapshot still
+        // says "pending", which is exactly the stale value that used to be recorded.
+        getConversation: async () => {
+          reads += 1;
+          return {
+            id: 9943,
+            status: "resolved",
+            meta: { assignee_type: null, assignee: null },
+            last_activity_at: 1_700_100_000,
+            updated_at: 1_700_100_001,
+          };
+        },
+      } as never;
+    };
+    await runAgentNudge({
+      tenantId,
+      threadId: `${tenantId}:${instanceId}:9943`,
+      nudge: { source: "followup", kind: "inactivity", step: 1 },
+      base: appDb,
+      deps: {
+        makeModel: () =>
+          new ResolveThenReplyModel("Tudo certo por aqui!") as never,
+        makeClient,
+        checkpointer: new MemorySaver(),
+        persistUsage: async () => {},
+      },
+    });
+    // The toggle still happens (Chatwoot answers it as a no-op), and the tool did look first.
+    expect(s.resolved).toEqual([9943]);
+    expect(reads).toBeGreaterThan(0);
+    const row = await suDb.conversation.findFirst({
+      where: { tenantId, chatwootConversationId: 9943 },
+      select: { resolvedBy: true },
+    });
+    expect(row?.resolvedBy).toBeNull();
   });
 
   test("outside the 24h window, a handoff still leaves the operator the note and the label", async () => {

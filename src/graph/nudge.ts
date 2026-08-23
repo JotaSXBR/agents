@@ -11,6 +11,7 @@ import {
   shouldBotHandle,
 } from "@/modules/chatwoot/normalize";
 import { reconcileMirrorFromLive } from "@/modules/chatwoot/reconcile";
+import { recordResolutionOrigin } from "@/modules/conversations/record-resolution";
 import { emitFlowEvent, type FlowContext } from "@/modules/flowlog/service";
 import {
   buildGuardrailGate,
@@ -40,6 +41,7 @@ import {
   isTurnInFlight,
   markTurnInFlight,
 } from "./inflight";
+import { drainPendingIngest } from "./ingest-drain";
 import { conversationDividerMessage, nudgeMessage } from "./markers";
 import {
   type AgentConfig,
@@ -271,6 +273,7 @@ export async function runAgentNudge(
       select: {
         inboxId: true,
         status: true,
+        chatwootStatusAt: true,
         assigneeType: true,
         assigneeId: true,
         assigneeName: true,
@@ -304,6 +307,9 @@ export async function runAgentNudge(
     return {
       cfg,
       status: conv.status,
+      // NOTE: Kept beside `status` and moved with it: the pair is one observation, and the resolution
+      // recorder needs the version as much as the value (see ObservedConversation).
+      statusAt: conv.chatwootStatusAt,
       assigneeType: conv.assigneeType,
       assigneeId: conv.assigneeId,
       assigneeName: conv.assigneeName,
@@ -403,6 +409,7 @@ export async function runAgentNudge(
       });
       // NOTE: Keep the in-memory snapshot in step so a second probe only re-writes on a NEW divergence.
       loaded.status = live.status;
+      loaded.statusAt = live.updatedAt;
       loaded.assigneeType = live.assigneeType;
       loaded.assigneeId = live.assigneeId;
       loaded.assigneeName = live.assigneeName;
@@ -478,6 +485,12 @@ export async function runAgentNudge(
       client,
       conversationId,
       threadId: params.threadId,
+      // NOTE: The live probe's answer where this path has one, the mirror's otherwise. resolve_conversation
+      // runs immediately on a nudge turn (no turnState), so this is what tells its close apart from
+      // one that had already happened — but only as a FALLBACK: this snapshot is taken before
+      // `graph.invoke`, and the tool fires during a model call that can run for a minute, so the
+      // tool re-reads the live state itself and falls back here only when that read fails.
+      observed: { status: loaded.status, statusAt: loaded.statusAt },
       handoffState,
     },
     { buildNativeTools, mcp: params.deps?.mcp, flow },
@@ -672,6 +685,13 @@ export async function runAgentNudge(
   let claimedGraphThread = false;
   let result: Awaited<ReturnType<typeof graph.invoke>>;
   try {
+    // BARRIER (issue #194), for the same reason the reactive turn has one: a proactive turn reads
+    // this thread too, and a message still queued is a nudge written without it. Before the lock,
+    // which the drain also takes. A conversation-keyed thread simply matches no queued ingestion.
+    // Outcome discarded, as at the reactive turn and for the same reason: a nudge that finds
+    // ingestion still owed writes one message without one line of context, and the next reader gets
+    // it. See ./ingest-drain.ts for the reader that cannot make that trade.
+    await drainPendingIngest(tenantId, graphThreadId, base);
     // Taken INSIDE the try, and released only if it was actually taken: the transaction can reject
     // after its callback ran (a failed commit, a lost connection), and a claim made on the way to a
     // rejection that skips the `finally` never comes back — every later compaction on this thread
@@ -927,6 +947,22 @@ export async function runAgentNudge(
     if (allowResolve && actions.resolve) {
       try {
         await client.toggleStatus(conversationId, "resolved");
+        // NOTE: A follow-up ladder only advances while the customer stays silent (an inbound ends the
+        // episode), so the last step firing means nobody ever answered. Recording that keeps the
+        // Resolution funnel from reading an abandoned lead as a conversation the agent resolved.
+        await recordResolutionOrigin({
+          tenantId,
+          conversation: {
+            chatwootInstanceId: instanceId,
+            chatwootConversationId: conversationId,
+          },
+          origin: "followup_abandonment",
+          // NOTE: `loaded` carries the probe's LIVE answer on this path: requireLiveBotOwnership makes
+          // probeLiveOwnership run a GET immediately before this, and it writes both halves of what
+          // it saw back onto `loaded`.
+          observed: { status: loaded.status, statusAt: loaded.statusAt },
+          base,
+        });
       } catch (err) {
         logger.warn(
           { err, conversationId: String(conversationId) },

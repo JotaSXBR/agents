@@ -13,7 +13,8 @@ import {
   getCheckpointer,
   resolveGraphThreadId,
 } from "@/graph/checkpointer";
-import { type IngestRole, ingestMessageIntoThread } from "@/graph/ingest";
+import type { IngestRole } from "@/graph/ingest";
+import { armIngest } from "@/graph/ingest-job";
 import { runAgentTurn } from "@/graph/runtime";
 import { AppError, UnauthorizedError } from "@/lib/errors";
 import { withEntityLock } from "@/lib/locks";
@@ -62,6 +63,7 @@ import { readMemoryConfig } from "@/modules/memory/settings";
 import {
   cancelPendingJob,
   retireJobsByDedupeKey,
+  revokeJobsByKeyPrefixOn,
 } from "@/modules/scheduler/service";
 import {
   resolveSttConfig,
@@ -522,18 +524,6 @@ async function ingestUnhandledMessage(args: {
   // conversation, or the agent reaching out first). Without this arm, that boundary would be invisible
   // to compaction until the attendance AFTER it, which is exactly the deployment that never resolves
   // conversations — the population the whole feature exists for.
-  const armOnBoundary = (previousConversationId: number): Promise<void> =>
-    armCompaction({
-      tenantId,
-      instanceId,
-      contactInboxId,
-      conversationId: previousConversationId,
-      agentId: args.agentId,
-      reason: "new_attendance",
-      enabled: args.compactionEnabled,
-      base,
-    }).then(() => undefined);
-
   // WHAT gets folded in, and AS WHOM. Two disjoint cases:
   //
   //  - a customer incoming message the bot will NOT answer: silenced out of hours (act && consumed)
@@ -577,8 +567,12 @@ async function ingestUnhandledMessage(args: {
           inReplyTo: n.message.inReplyTo,
         });
   if (!text.trim()) return;
+  // QUEUED, not appended. The append itself has to be able to say "not now" — a turn owning the
+  // channel erases anything written beside it — and an ack we must return in under five seconds is
+  // no place to wait for one (issue #194, ../../graph/ingest-job.ts). What the webhook still owns is
+  // the RENDERING above: it reads the eager media pass, which the job cannot re-derive later.
   try {
-    await ingestMessageIntoThread({
+    await armIngest({
       tenantId,
       instanceId,
       conversationId,
@@ -587,12 +581,16 @@ async function ingestUnhandledMessage(args: {
       messageId,
       text,
       role,
+      agentId: args.agentId,
+      compactionEnabled: args.compactionEnabled,
       base,
-      onAttendanceClosed: armOnBoundary,
     });
   } catch (err) {
+    // Only the ENQUEUE can fail here, and failing it must not fail the delivery: the alternative is
+    // a webhook retry that re-runs the eager media pass (a second provider round-trip) to recover
+    // one memory append.
     logger.warn(
-      "ingest (%s) failed (conv=%s): %s",
+      "ingest arm (%s) failed (conv=%s): %s",
       role,
       String(conversationId),
       errMsg(err),
@@ -1318,17 +1316,38 @@ async function maybeConsumeCommandOrGate(params: {
             db,
             `ingest:${contactInboxThreadId(tenantId, instanceId, contactInboxId)}`,
             async () => {
+              const graphThreadId = contactInboxThreadId(
+                tenantId,
+                instanceId,
+                contactInboxId,
+              );
+              // QUEUED INGESTION IS REVOKED FIRST, AND FROM IN HERE (issue #194). Continuous
+              // ingestion is a scheduler job now, so at any moment this thread can owe an append
+              // carrying text from before the reset — pending, or CLAIMED and blocked on the very
+              // lock this step is holding. Left alone, it lands the instant this releases and
+              // rebuilds the AgentThread row and the checkpoint from the memory the operator was
+              // just told had been cleared.
+              //
+              // Inside the critical section, not as a step after it, because the window between
+              // releasing the lock and cancelling is exactly where a claimed job takes the lock.
+              // Retiring the rows is half; a run already in memory re-reads its own row under this
+              // lock and stands down (../../graph/ingest-job.ts, stillWanted).
+              // On `db`, the connection this step already holds. A helper that opened its own
+              // transaction would wait for a connection this one cannot release until it returns,
+              // and `DB_POOL_MAX=1` is a supported setting — the reset would time out and report a
+              // partial failure of the very step that had nothing wrong with it.
+              await revokeJobsByKeyPrefixOn(
+                db,
+                "INGEST_MESSAGE",
+                `ingest:${graphThreadId}:`,
+              );
               await clearContactMemory({
                 db,
                 checkpointer: await getCheckpointer(),
                 tenantId,
                 instanceId,
                 contactInboxId,
-                threadId: contactInboxThreadId(
-                  tenantId,
-                  instanceId,
-                  contactInboxId,
-                ),
+                threadId: graphThreadId,
               });
             },
           ),

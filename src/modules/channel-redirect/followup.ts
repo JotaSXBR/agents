@@ -6,6 +6,10 @@ import type { RuntimeDeps } from "@/graph/runtime";
 import { runScopedOn, type TenantContext } from "@/lib/tenancy";
 import { loadAgentBot, loadChatwootClient } from "@/modules/chatwoot/instance";
 import {
+  type ObservedConversation,
+  recordResolutionOrigin,
+} from "@/modules/conversations/record-resolution";
+import {
   type ClaimedJob,
   enqueueJob,
   jobRetired,
@@ -291,6 +295,10 @@ export async function armRedirectChatFollowUp(
 
 interface WhatsAppSibling {
   chatwootConversationId: number;
+  // Mirrored status AND its version, read before the closing toggle: see record-resolution.ts
+  // rule 2 and the floor in ObservedConversation.
+  status: string;
+  chatwootStatusAt: number | null;
   chatwootContactId: number;
   lastInboundAt: Date | null;
   channelType: string | null;
@@ -330,6 +338,8 @@ async function resolveWhatsAppSibling(
       },
       select: {
         chatwootConversationId: true,
+        status: true,
+        chatwootStatusAt: true,
         lastInboundAt: true,
         contact: { select: { chatwootContactId: true } },
         inbox: { select: { channelType: true, provider: true } },
@@ -339,6 +349,8 @@ async function resolveWhatsAppSibling(
     if (!sibling?.contact?.chatwootContactId) return null;
     return {
       chatwootConversationId: sibling.chatwootConversationId,
+      status: sibling.status,
+      chatwootStatusAt: sibling.chatwootStatusAt,
       chatwootContactId: sibling.contact.chatwootContactId,
       lastInboundAt: sibling.lastInboundAt,
       channelType: sibling.inbox?.channelType ?? null,
@@ -594,11 +606,30 @@ async function deliverClosing(
   conversationId: number,
   closingMessage: string,
   sendMode: ProactiveSendMode,
+  origin: {
+    tenantId: bigint;
+    instanceId: bigint;
+    base: PrismaClient;
+    // The conversation as the caller loaded it, before this function's own toggle.
+    observed: ObservedConversation;
+  },
 ): Promise<void> {
   await client.sendMessage(conversationId, closingMessage, {
     private: sendMode !== "freeform",
   });
   await client.toggleStatus(conversationId, "resolved");
+  // NOTE: Tidying up the channel the episode moved AWAY from. Whatever the outcome was, it was not decided
+  // here, so this closing is not a resolution the agent can be credited with.
+  await recordResolutionOrigin({
+    tenantId: origin.tenantId,
+    conversation: {
+      chatwootInstanceId: origin.instanceId,
+      chatwootConversationId: conversationId,
+    },
+    origin: "redirect_closing",
+    observed: origin.observed,
+    base: origin.base,
+  });
 }
 
 export interface DeliverRedirectClosingParams {
@@ -649,6 +680,8 @@ export async function deliverRedirectClosing(
         },
       },
       select: {
+        status: true,
+        chatwootStatusAt: true,
         lastInboundAt: true,
         inbox: { select: { agentId: true, channelType: true, provider: true } },
       },
@@ -767,6 +800,16 @@ export async function deliverRedirectClosing(
       p.widgetConversationId,
       p.closingMessage,
       chatMode,
+
+      {
+        tenantId: p.tenantId,
+        instanceId: p.instanceId,
+        base,
+        observed: {
+          status: cx.widget.status,
+          statusAt: cx.widget.chatwootStatusAt,
+        },
+      },
     );
   }
 
@@ -788,6 +831,16 @@ export async function deliverRedirectClosing(
       sibling.chatwootConversationId,
       p.closingMessage,
       waMode,
+
+      {
+        tenantId: p.tenantId,
+        instanceId: p.instanceId,
+        base,
+        observed: {
+          status: sibling.status,
+          statusAt: sibling.chatwootStatusAt,
+        },
+      },
     );
   }
   return "delivered";

@@ -90,8 +90,10 @@ export const MEMORY_HEAD_CLOSE = "</atendimentos-anteriores>";
 export function conversationDividerMessage(
   conversationId: number,
   trailingText?: string,
+  id?: string,
 ): HumanMessage {
   return new HumanMessage({
+    ...(id ? { id } : {}),
     content: trailingText
       ? `${CONVERSATION_DIVIDER}\n\n${trailingText}`
       : CONVERSATION_DIVIDER,
@@ -150,15 +152,21 @@ export function nudgeMessage(
 export const HUMAN_AGENT_NOTE =
   "(Contexto do sistema: mensagem enviada ao cliente por um atendente humano da equipe.)";
 
+// `conversationId` is NULLABLE, and null is not "unknown": it says this message must not claim an
+// attendance. The stamp is what ../modules/memory/cut.ts reads to decide which attendance is open, so
+// a message stamped with a conversation the thread has already left redefines the open one from the
+// end of the channel — see ./ingest.ts, issue #194.
 export function humanAgentMessage(
-  conversationId: number,
+  conversationId: number | null,
   text: string,
+  id?: string,
 ): HumanMessage {
   return new HumanMessage({
+    ...(id ? { id } : {}),
     content: `${HUMAN_AGENT_NOTE}\n\n${text}`,
     additional_kwargs: {
       [MARKER_KWARG]: "human_agent" satisfies SystemMarker,
-      ...conversationStamp(conversationId),
+      ...(conversationId === null ? {} : conversationStamp(conversationId)),
     },
   });
 }
