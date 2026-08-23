@@ -4,7 +4,7 @@ import basePrisma from "@/api/lib/prisma";
 import { type AgentNudge, parseThreadId, runAgentNudge } from "@/graph/nudge";
 import type { RuntimeDeps } from "@/graph/runtime";
 import { assertSafeOutboundUrl } from "@/lib/ssrf";
-import { runScopedOn, type TenantContext } from "@/lib/tenancy";
+import { runScopedOn, type ScopedDb, type TenantContext } from "@/lib/tenancy";
 import { loadAppointmentContext } from "@/modules/appointments/context";
 import {
   type ClaimedJob,
@@ -355,7 +355,11 @@ export async function appointmentReminderHandler(
   // Re-read rather than trusted from `job.payload`: that snapshot is from claim time, which is
   // exactly the moment before the stamp lands. A read that fails does NOT suppress the reminder —
   // an unknown answer must not silently drop a customer-facing message that was legitimately armed.
-  const retired = (): Promise<boolean> => jobRetired(job, base);
+  // Takes the caller's connection when there is one: asked from inside the nudge's thread claim,
+  // which runs in an advisory-lock transaction, a second connection would stall the lock (see
+  // jobRetired).
+  const retired = (scoped?: ScopedDb): Promise<boolean> =>
+    jobRetired(job, base, scoped);
 
   // NOTE: Asked TWICE, and the two calls buy different things. Here it saves the Google round trip, which
   // holds this handler for up to ten seconds. After it — see below — is where the window actually
@@ -393,7 +397,7 @@ export async function appointmentReminderHandler(
     // And once more inside, where the nudge re-asks its own questions across the model call. Three
     // reads is not belt-and-braces: each covers a different slow step (the Google fetch, the nudge's
     // setup, the judge's call), and the stamp can land in any of them.
-    stillWanted: async () => !(await retired()),
+    stillWanted: async (scoped) => !(await retired(scoped)),
     nudge: reminderNudge({
       isLast,
       askConfirmation,

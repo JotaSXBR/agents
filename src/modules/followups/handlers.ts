@@ -467,7 +467,7 @@ export async function followUpHandler(
     // operator resets, which returns the conversation to the agent, and the second probe then finds
     // it bot-owned again and posts a nudge from the episode that was just erased. The tombstone is
     // the question the hand-back cannot answer yes to.
-    stillWanted: async () => !(await jobRetired(job, base)),
+    stillWanted: async (scoped) => !(await jobRetired(job, base, scoped)),
     base,
     deps,
   });

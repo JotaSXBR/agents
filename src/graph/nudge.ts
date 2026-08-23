@@ -3,7 +3,7 @@ import type { PrismaClient } from "@/../generated/prisma/client";
 import logger from "@/api/lib/logger";
 import basePrisma from "@/api/lib/prisma";
 import { withEntityLock } from "@/lib/locks";
-import { runScopedOn, type TenantContext } from "@/lib/tenancy";
+import { runScopedOn, type ScopedDb, type TenantContext } from "@/lib/tenancy";
 import { isTestSilenced } from "@/modules/agents/test-mode";
 import { loadChatwootClient } from "@/modules/chatwoot/instance";
 import {
@@ -134,7 +134,12 @@ export interface RunAgentNudgeParams {
   // retired while it sat CLAIMED is the caller: cancelling a job reaches PENDING rows only, so the
   // handler runs on regardless and the only thing that can stop it is asking. Answering false aborts
   // with "stale", which is what it is — the state the job was armed for is gone.
-  stillWanted?: () => Promise<boolean>;
+  // Given the caller's own connection when the ask happens inside a transaction that already holds
+  // one — today that is the thread claim, under the `ingest:` advisory lock. A provider that opens a
+  // second connection there stalls on an exhausted pool while holding the lock, and `DB_POOL_MAX=1`
+  // is supported; the ingestion barrier takes the same argument for the same reason. Optional
+  // because the other six asks are outside any transaction and have nothing to hand over.
+  stillWanted?: (db?: ScopedDb) => Promise<boolean>;
   base?: PrismaClient;
   deps?: RuntimeDeps;
 }
@@ -459,8 +464,8 @@ export async function runAgentNudge(
   }
 
   // Absent, the answer is yes: every caller that does not schedule work has nothing to retire.
-  const stillWanted = async (): Promise<boolean> =>
-    params.stillWanted === undefined || (await params.stillWanted());
+  const stillWanted = async (db?: ScopedDb): Promise<boolean> =>
+    params.stillWanted === undefined || (await params.stillWanted(db));
 
   // THE RULE for the asks below, because a check placed by intuition is a check the next branch is
   // born without: ONE ask per stretch of I/O that precedes a write, and never any I/O between an ask
@@ -906,7 +911,7 @@ export async function runAgentNudge(
         // direction: either this claims the thread first (and the clear refuses on isTurnInFlight)
         // or the clear ran first (and this sees the tombstone). Asked BEFORE markTurnInFlight, so a
         // retired run takes no claim it would then have to release.
-        if (!(await stillWanted())) return null;
+        if (!(await stillWanted(db))) return null;
         // A thread keyed by CONVERSATION rather than by contact-inbox (resolveGraphThreadId, when the
         // contact-inbox is unknown) carries a single attendance by construction: there is no earlier
         // one for a divider to separate this from, and no sidecar row keyed by contact-inbox to

@@ -1289,10 +1289,22 @@ async function maybeConsumeCommandOrGate(params: {
           const isEntry = ep.entryConversationId === conversationId;
           const isWidget = ep.widgetConversationId === conversationId;
           if (!isEntry && !isWidget) return;
-          redirectSibling = isEntry
-            ? ep.widgetConversationId
-            : ep.entryConversationId;
-          ladderConversationId = ep.widgetConversationId ?? conversationId;
+          // Only an EVIDENCED pair is widened to. Without it the sibling is the contact's latest
+          // conversation on the other inbox, which for a contact starting a new funnel is last
+          // month's — and this command tombstones that conversation's appointment reminders.
+          redirectSibling = ep.paired
+            ? isEntry
+              ? ep.widgetConversationId
+              : ep.entryConversationId
+            : null;
+          // The ladder is keyed by the WIDGET thread. Typed on the widget that is this conversation,
+          // whatever the pairing says; typed on the entry it is only reachable through the pair.
+          ladderConversationId =
+            (isWidget
+              ? conversationId
+              : ep.paired
+                ? ep.widgetConversationId
+                : null) ?? conversationId;
         },
       );
     }

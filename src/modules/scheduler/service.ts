@@ -245,12 +245,20 @@ export async function retireJobsByDedupeKey(
 export async function jobRetired(
   job: ClaimedJob,
   base: PrismaClient = basePrisma,
+  // The connection to read on, when the caller already holds one. Required in practice wherever this
+  // is asked from inside an advisory-lock transaction: opening a second connection there stalls on
+  // an exhausted pool while still holding the lock, and `DB_POOL_MAX=1` is a supported setting. The
+  // ingestion barrier states the same rule for the same reason (../../graph/ingest.ts, stillWanted).
+  scoped?: ScopedDb,
 ): Promise<boolean> {
-  const row = await runScopedOn(base, sysCtx(job.tenantId), (db) =>
+  const read = (db: ScopedDb) =>
     db.schedulerJob.findUnique({
       where: { id: job.id },
       select: { payload: true, claimSeq: true },
-    }),
+    });
+  const row = await (scoped
+    ? read(scoped)
+    : runScopedOn(base, sysCtx(job.tenantId), read)
   ).catch((err: unknown) => {
     logger.warn(
       "scheduler: could not re-read the retirement of a claimed job (kind=%s job=%s): %s",

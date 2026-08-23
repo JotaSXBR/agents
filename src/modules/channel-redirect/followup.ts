@@ -3,7 +3,7 @@ import logger from "@/api/lib/logger";
 import basePrisma from "@/api/lib/prisma";
 import { type AgentNudge, parseThreadId, runAgentNudge } from "@/graph/nudge";
 import type { RuntimeDeps } from "@/graph/runtime";
-import { runScopedOn, type TenantContext } from "@/lib/tenancy";
+import { runScopedOn, type ScopedDb, type TenantContext } from "@/lib/tenancy";
 import { loadAgentBot, loadChatwootClient } from "@/modules/chatwoot/instance";
 import {
   type ObservedConversation,
@@ -66,13 +66,28 @@ export function followUpDedupeKey(widgetThreadId: string): string {
 // was ever in, including another agent's active one (contact ids are account-wide, and a tenant can
 // run several agents on the same instance).
 //
-// The pair is whatever the CONFIG says it is: the contact's most recently active conversation on the
-// configured entry inbox, and the same on the configured widget inbox. Two agents with different
-// inbox pairs resolve to disjoint episodes, which is the fence. `null` on a side means the contact
-// has no conversation there.
+// The config says which INBOXES an episode spans; the most recently active conversation on each is
+// how the two sides are found. Two agents with different inbox pairs resolve to disjoint episodes.
+// `null` on a side means the contact has no conversation there.
+//
+// But "latest on each side" is not by itself one episode, and the difference matters because the
+// caller acts on the sibling. A contact who starts a NEW entry conversation before opening its
+// widget chat has a live entry row and a stale widget one, from the funnel they ran last month — and
+// pairing those would let a /reset typed on the new conversation clear the old widget's anchors and
+// tombstone the appointment reminders of a booking that is still ahead. That is the same harm the
+// appointment cancel refuses to risk by never widening from a thread to an event.
+//
+// `paired` is the evidence, read off the anchors the funnel already writes: the widget side was
+// linked (`redirectLinkedAt`) at or after the entry side sent its redirect (`redirectSentAt`), which
+// is the order those two writes happen in within one run of the funnel. It fails CLOSED — a widget
+// chat the customer reused keeps its original link time and reads as unpaired — because the cost of
+// not clearing a sibling is a ladder that outlives a reset, and the cost of clearing the wrong one
+// is a real appointment going unremembered.
 export interface RedirectEpisode {
   entryConversationId: number | null;
   widgetConversationId: number | null;
+  // Whether the two above are one episode. False whenever either side is missing.
+  paired: boolean;
 }
 
 export async function resolveRedirectEpisode(
@@ -98,7 +113,11 @@ export async function resolveRedirectEpisode(
       )
     : [];
   if (sides.length === 0)
-    return { entryConversationId: null, widgetConversationId: null };
+    return {
+      entryConversationId: null,
+      widgetConversationId: null,
+      paired: false,
+    };
   return runScopedOn(base, sysCtx(tenantId), async (db) => {
     const convs = await db.conversation.findMany({
       where: {
@@ -111,6 +130,8 @@ export async function resolveRedirectEpisode(
       },
       select: {
         chatwootConversationId: true,
+        redirectSentAt: true,
+        redirectLinkedAt: true,
         inbox: { select: { chatwootInboxId: true } },
       },
       // Most recently active first, so `find` below picks the live conversation of each side rather
@@ -119,14 +140,21 @@ export async function resolveRedirectEpisode(
       // event would outrank the live one and the whole episode would silently stop being recognised.
       orderBy: { lastEventAt: { sort: "desc", nulls: "last" } },
     });
-    const sideOf = (inboxId: number | null): number | null =>
+    const sideOf = (inboxId: number | null) =>
       inboxId === null
         ? null
-        : (convs.find((c) => c.inbox?.chatwootInboxId === inboxId)
-            ?.chatwootConversationId ?? null);
+        : (convs.find((c) => c.inbox?.chatwootInboxId === inboxId) ?? null);
+    const entry = sideOf(cfg.entryInboxId);
+    const widget = sideOf(cfg.widgetInboxId);
+    const sentAt = entry?.redirectSentAt ?? null;
+    const linkedAt = widget?.redirectLinkedAt ?? null;
     return {
-      entryConversationId: sideOf(cfg.entryInboxId),
-      widgetConversationId: sideOf(cfg.widgetInboxId),
+      entryConversationId: entry?.chatwootConversationId ?? null,
+      widgetConversationId: widget?.chatwootConversationId ?? null,
+      paired:
+        sentAt !== null &&
+        linkedAt !== null &&
+        linkedAt.getTime() >= sentAt.getTime(),
     };
   });
 }
@@ -454,7 +482,10 @@ export async function redirectFollowUpHandler(
   //
   // A read that fails does NOT retire the job: an unknown answer must not silently drop work that
   // was legitimately armed.
-  const retired = (): Promise<boolean> => jobRetired(job, base);
+  // Takes the caller's connection when there is one — see jobRetired: asked from inside the nudge's
+  // thread claim, a second connection would stall on the pool while the advisory lock is held.
+  const retired = (scoped?: ScopedDb): Promise<boolean> =>
+    jobRetired(job, base, scoped);
   if (await retired()) return { outcome: "done" };
   const parsed = parseThreadId(payload.widgetThreadId);
   if (!parsed || parsed.tenantId !== job.tenantId) return { outcome: "done" };
@@ -510,7 +541,7 @@ export async function redirectFollowUpHandler(
         threadId: payload.widgetThreadId,
         nudge: chatFollowupNudge(cfg.chatFollowupInstructions),
         base,
-        stillWanted: async () => !(await retired()),
+        stillWanted: async (scoped) => !(await retired(scoped)),
         deps,
       });
     }

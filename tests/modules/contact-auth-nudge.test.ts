@@ -260,12 +260,20 @@ describe.skipIf(!dbUp)("contact authorization on the proactive nudge", () => {
       wanted = false;
       return new Response('{"authorized":true}', { status: 200 });
     });
+    // Recorded per ask: the one made inside the thread claim runs in an advisory-lock transaction,
+    // so it must arrive WITH a connection to read on. A provider that opens its own there asks a
+    // pinned pool for a second one, which on `DB_POOL_MAX=1` fails — and jobRetired swallows a
+    // failed read as "not retired", so the fence would go quiet exactly where it matters.
+    const gotDb: boolean[] = [];
     const outcome = await runAgentNudge({
       tenantId,
       threadId: `${tenantId}:${instanceId}:9413`,
       nudge: { source: "followup", kind: "inactivity" },
       postActions: { assignLabels: ["seguimento"] },
-      stillWanted: async () => wanted,
+      stillWanted: async (scoped) => {
+        gotDb.push(scoped !== undefined);
+        return wanted;
+      },
       base: appDb,
       deps: {
         makeModel: () => new FakeListChatModel({ responses: ["Tudo certo?"] }),
@@ -278,6 +286,9 @@ describe.skipIf(!dbUp)("contact authorization on the proactive nudge", () => {
 
     expect(outcome).toBe("stale");
     expect(auth.calls).toHaveLength(1);
+    // The entry ask has no transaction to share; the last one is the claim's, and it does.
+    expect(gotDb[0]).toBe(false);
+    expect(gotDb.at(-1)).toBe(true);
     // The durable half: had the run gone on, this row would name the conversation the reset cleared.
     const row = await suDb.agentThread.findUnique({
       where: {

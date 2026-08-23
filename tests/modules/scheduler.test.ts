@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { Prisma, PrismaClient } from "@/../generated/prisma/client";
+import { runScopedOn } from "@/lib/tenancy";
 import {
   type ClaimedJob,
   claimDueCompactionJobs,
@@ -482,6 +483,48 @@ describe.skipIf(!dbUp)("scheduler", () => {
     await suDb.schedulerJob.delete({ where: { id: gone.id } });
     expect(await jobRetired(gone, appDb)).toBe(false);
     expect(await sqlSaysRetired(gone)).toBe(false);
+  });
+
+  // The reason jobRetired takes a connection at all, measured rather than argued. runScopedOn opens
+  // a $transaction, which PINS a pooled connection, and withEntityLock's advisory lock is held by
+  // that same transaction — so a retirement read that opens its own asks a pinned pool for a second
+  // connection. `DB_POOL_MAX=1` is a supported setting, and there the read does not wait: it fails.
+  // Which would be survivable if it were loud, and it is not — jobRetired swallows a failed read as
+  // NOT retired (deliberately: an unknown must not drop a legitimate message), so on that setting
+  // the fence inside the claim would answer "keep going" every single time.
+  test("the retirement read answers inside a pinned transaction, on a pool of one", async () => {
+    const id = await enqueueJob({
+      tenantId,
+      kind: "FOLLOWUP",
+      dedupeKey: "dk-pool-one",
+      runAt: past(),
+      base: appDb,
+    });
+    const [job] = await claimDueJobs(1, appDb, new Date(), tenantId);
+    if (!job || job.id !== id)
+      throw new Error("claim did not return dk-pool-one");
+    await retireJobsByDedupeKey(tenantId, "FOLLOWUP", "dk-pool-one", appDb);
+
+    const onePool = new PrismaClient({
+      adapter: new PrismaPg({ connectionString: appUrl as string, max: 1 }),
+    });
+    try {
+      const answers = await runScopedOn(
+        onePool,
+        { tenantId, userId: null, role: "SUPER_ADMIN" } as never,
+        async (scoped) => ({
+          // Handed the transaction's own connection: reads the row and sees the tombstone.
+          shared: await jobRetired(job, onePool, scoped),
+          // Opening its own from in here is the bug: the read cannot run, and the swallow turns
+          // that into "not retired" — the fence silently off.
+          own: await jobRetired(job, onePool),
+        }),
+      );
+      expect(answers.shared).toBe(true);
+      expect(answers.own).toBe(false);
+    } finally {
+      await onePool.$disconnect();
+    }
   });
 
   test("reaper requeues a stranded CLAIMED job", async () => {
