@@ -1048,7 +1048,11 @@ export async function runLoadedTurn(
         flow,
         writeCalledOff,
       );
-      if (images.calledOff) return "stale";
+      // Only when NOTHING left. A batch that was called off after its second attachment already
+      // reached the customer, and "stale" would leave the watermark where it is — handing the same
+      // burst to the next flush, which would send that attachment again. What was delivered decides
+      // the word, the same rule the reply below follows.
+      if (images.calledOff && !images.sent) return "stale";
       const sent = images.sent;
       // NOTE: The images WERE the turn and none of them reached the customer. That is a failed turn,
       // not a silent one: returning "empty" here would let the deferred resolve close a conversation
@@ -1079,13 +1083,17 @@ export async function runLoadedTurn(
     // The image lands before the text that talks about it, and before the TTS branch: an audio
     // reply must not swallow the attachment.
     if (await writeCalledOff()) return "stale";
-    await deliverPendingImages(
+    const images = await deliverPendingImages(
       client,
       conversationId,
       turnState,
       flow,
       writeCalledOff,
     );
+    // Called off mid-batch with something already out: the text below would stand down anyway, and
+    // returning "stale" from there would replay a burst whose attachment the customer has. The turn
+    // reports what it delivered and stops here.
+    if (images.calledOff) return images.sent ? "posted" : "stale";
 
     const delivered = await deliverText(reply, recheck.voiceReply);
     if (delivered === "stale") return "stale";

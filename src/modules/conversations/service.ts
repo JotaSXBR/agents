@@ -1343,11 +1343,17 @@ export async function returnConversationToAgent(
     status: "pending",
     ...(newHolder ?? { assigneeId: null, assigneeType: null }),
   });
+  // The fallback names the holder that SURVIVED, not nobody: `mirrorConsoleWrite` returns null when
+  // its versioned read comes back empty, and it has already written this same holder to the row. A
+  // null here would tell every open console the conversation is unassigned while Chatwoot and the
+  // mirror both say a human has it.
   broadcastConversationEvent(tenantId, {
     conversationId: String(id),
     status: state?.status ?? "pending",
-    assigneeId: state ? state.assigneeId : null,
-    assigneeType: state ? state.assigneeType : null,
+    assigneeId: state ? state.assigneeId : (newHolder?.assigneeId ?? null),
+    assigneeType: state
+      ? state.assigneeType
+      : (newHolder?.assigneeType ?? null),
     lastEventAt:
       (state ? state.lastEventAt : conv.lastEventAt)?.toISOString() ?? null,
   });

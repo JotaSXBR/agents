@@ -929,6 +929,27 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
     const contact = await suDb.contact.findFirstOrThrow({
       where: { tenantId, chatwootContactId: 991 },
     });
+    // A SECOND conversation on the entry inbox, more recently active than the one that sent the
+    // redirect and carrying no redirect of its own. Chosen by activity it wins, and the id recorded
+    // below is permanent — the pair, the closing and /reset would all name a conversation this chat
+    // never opened from.
+    const DECOY_CONV = 7174;
+    const entryInbox = await suDb.inbox.findFirstOrThrow({
+      where: { tenantId, chatwootInboxId: 110 },
+    });
+    const decoy = await suDb.conversation.create({
+      data: {
+        tenantId,
+        chatwootInstanceId: instanceId,
+        inboxId: entryInbox.id,
+        contactId: contact.id,
+        chatwootConversationId: DECOY_CONV,
+        status: "open",
+        threadId: `${tenantId}:${instanceId}:${DECOY_CONV}`,
+        lastEventAt: new Date(Date.now() + 60_000),
+        lastInboundAt: new Date(),
+      },
+    });
     const fresh = await suDb.conversation.create({
       data: {
         tenantId,
@@ -1003,6 +1024,7 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
     } finally {
       globalThis.fetch = originalFetch;
       await suDb.conversation.delete({ where: { id: fresh.id } });
+      await suDb.conversation.delete({ where: { id: decoy.id } });
     }
   });
 });

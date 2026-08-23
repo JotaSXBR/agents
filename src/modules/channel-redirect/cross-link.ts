@@ -83,7 +83,19 @@ export async function linkRedirectConversations(
   const now = p.now ?? new Date();
   const entryInboxId = p.cfg.entryInboxId;
 
-  // The WhatsApp sibling: the same contact's most-recently-active conversation on the entry inbox.
+  // The WhatsApp sibling: the conversation on the entry inbox that most recently SENT a redirect,
+  // which is the one this chat opened from.
+  //
+  // NOT the most recently active one, which is what this used to ask. Activity is mutable and says
+  // nothing about the funnel: a contact who writes into an OLD entry conversation before opening the
+  // chat makes that one the latest, and the id recorded below is permanent — the pair, the closing
+  // and /reset would all name a conversation the redirect never came from. `redirectSentAt` is the
+  // funnel's own fact, and the most recent one is this run's. (The old ordering also sorted NULLs
+  // FIRST, Postgres's default on DESC, so a conversation that never carried an event outranked the
+  // live one; the predicate below makes that unreachable rather than merely ordering around it.)
+  //
+  // Null when the contact has no redirect on that inbox, and that is honest: without one there is no
+  // episode to pair, to propagate test mode from, or to cross-link a note to.
   const sibling =
     p.widgetConv.contactId === null || entryInboxId === null
       ? null
@@ -93,9 +105,10 @@ export async function linkRedirectConversations(
               contactId: p.widgetConv.contactId,
               chatwootInstanceId: p.instanceId,
               inbox: { chatwootInboxId: entryInboxId },
+              redirectSentAt: { not: null },
             },
             select: { chatwootConversationId: true, testActivatedAt: true },
-            orderBy: { lastEventAt: "desc" },
+            orderBy: { redirectSentAt: "desc" },
           }),
         );
 
