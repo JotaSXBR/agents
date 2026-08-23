@@ -18,6 +18,7 @@ import { renderDocumentPdf } from "./render";
 import { readRenderContext } from "./templates";
 import {
   type DocumentValues,
+  invalidDocumentTemplate,
   parseDocumentValues,
   parseTemplateContent,
 } from "./validate";
@@ -193,7 +194,7 @@ export async function issueDocument(
     prepared.style,
   );
   if (!content.ok) {
-    throw new AppError(content.reason, 400, "errors.invalidDocumentTemplate");
+    throw invalidDocumentTemplate(content.reason);
   }
   const parsedValues = parseDocumentValues(
     content.content.fields,

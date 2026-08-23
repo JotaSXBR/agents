@@ -20,15 +20,19 @@ export function useCompanyLogoUrl(
   useEffect(() => {
     let minted: string | null = null;
     let cancelled = false;
-    if (!logoKey) {
-      setUrl(null);
-      return;
-    }
+    // Cleared BEFORE the request, not after it answers. The PREVIOUS run's cleanup has already
+    // revoked its blob URL, so leaving it in state points the <img> at bytes the browser released:
+    // a broken image for the length of the request, and permanently when the request fails or the
+    // logo was removed. Nothing to show is the honest state while there is nothing to show.
+    setUrl(null);
+    if (!logoKey) return;
     void (async () => {
+      // A rejected fetch is a state too — offline, a reset connection — and unhandled it is only an
+      // error in the console next to a card that never stops looking empty.
       const res = await mediaFetch(
         `/api/v1/tenant-settings/company/logo?v=${logoVersion}`,
-      );
-      if (!res.ok || cancelled) return;
+      ).catch(() => null);
+      if (!res?.ok || cancelled) return;
       const blob = await res.blob();
       // Checked AGAIN after the body arrives, because the cleanup can run during that await: a
       // tenant switch, another logo write. Minting the URL before this check hands it to a cleanup

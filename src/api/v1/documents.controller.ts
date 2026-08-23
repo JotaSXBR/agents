@@ -27,6 +27,7 @@ import {
 // translate('errors.documentTemplateDisabled', 'This document template is disabled')
 // translate('errors.documentTemplateSlugTaken', 'A document template with this identifier already exists')
 // translate('errors.invalidDocumentTemplate', 'This document template is not valid')
+// translate('errors.invalidDocumentTemplateReason', 'This document template is not valid: {{reason}}')
 // translate('errors.invalidDocumentValues', 'The values do not match what this template declares')
 // translate('errors.invalidDocumentSlug', 'This identifier is not valid')
 // translate('errors.invalidDocumentTemplateName', 'The document template name must be between 1 and 120 characters')

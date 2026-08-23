@@ -24,6 +24,7 @@ import {
   type AuthoredHalves,
   authoredStyleProblem,
   type DocumentValues,
+  invalidDocumentTemplate,
   parseAuthoredTemplate,
   parseDocumentValues,
   parseTemplateContent,
@@ -308,7 +309,7 @@ function validated(input: {
     input.authored,
   );
   if (!parsed.ok) {
-    throw new AppError(parsed.reason, 400, "errors.invalidDocumentTemplate");
+    throw invalidDocumentTemplate(parsed.reason);
   }
   return parsed.content;
 }
@@ -379,10 +380,8 @@ export async function createDocumentTemplate(
     // no stored layout to merge into, and the caller is already sending the blocks. Refused rather
     // than ignored — a 200 that discarded what was asked for is the failure this whole field exists
     // to prevent.
-    throw new AppError(
+    throw invalidDocumentTemplate(
       "blockText: only an update can replace text by block id; when creating, write the text inside blocks.",
-      400,
-      "errors.invalidDocumentTemplate",
     );
   }
   const content = validated({
@@ -467,10 +466,8 @@ function applyBlockText(
   );
   for (const id of Object.keys(text)) {
     if (byId.get(id)?.type !== "text") {
-      throw new AppError(
+      throw invalidDocumentTemplate(
         `blockText: "${id}" is not a text block of this template.`,
-        400,
-        "errors.invalidDocumentTemplate",
       );
     }
   }
@@ -540,7 +537,7 @@ export function patchedContent(
   if (patch.style !== undefined) {
     const problem = authoredStyleProblem(patch.style);
     if (problem) {
-      throw new AppError(problem, 400, "errors.invalidDocumentTemplate");
+      throw invalidDocumentTemplate(problem);
     }
   }
   // MERGED BEFORE validation, not after. A partial patch like {font:"mono"} validated on its own
@@ -786,7 +783,7 @@ export async function previewDocumentTemplate(
       : {}),
   });
   if (metadata) {
-    throw new AppError(metadata, 400, "errors.invalidDocumentTemplate");
+    throw invalidDocumentTemplate(metadata);
   }
   // The same statement the apply runs, from the same source: strictness on the halves the caller
   // wrote, the style merged over the stored one, and the stored halves read as they are.

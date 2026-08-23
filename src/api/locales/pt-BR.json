@@ -41,6 +41,7 @@
     "invalidDocumentTemplate": "Este modelo de documento não é válido",
     "invalidDocumentTemplateDescription": "A descrição do modelo de documento é longa demais",
     "invalidDocumentTemplateName": "O nome do modelo de documento deve ter entre 1 e 120 caracteres",
+    "invalidDocumentTemplateReason": "Este modelo de documento não é válido: {{reason}}",
     "invalidDocumentValues": "Os valores não correspondem ao que este modelo declara",
     "invalidPassword": "Senha incorreta",
     "invalidSetupToken": "Token de configuração inválido ou ausente",

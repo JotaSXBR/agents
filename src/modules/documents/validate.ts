@@ -1,4 +1,5 @@
 import { type ZodError, z } from "zod";
+import { AppError } from "@/lib/errors";
 import {
   type DocumentBlock,
   type DocumentField,
@@ -582,4 +583,17 @@ export function parseDocumentValues(
         : (value as DocumentValue);
   }
   return { ok: true, values };
+}
+
+// A refusal that keeps the REASON. The global error handler localizes `translationKey` and drops
+// `message` when the key resolves, so a plain "errors.invalidDocumentTemplate" answers every
+// malformed block, token, field and style with the same sentence — and the preview panel, whose
+// entire purpose is to name the block and the rule that failed, then shows nothing an operator can
+// act on. Passing the reason as an interpolation keeps the sentence around it translated while the
+// specific half survives; the reason itself is the validator's own English, which is the language
+// the block ids and property names it quotes are written in anyway.
+export function invalidDocumentTemplate(reason: string): AppError {
+  return new AppError(reason, 400, "errors.invalidDocumentTemplateReason", {
+    reason,
+  });
 }
