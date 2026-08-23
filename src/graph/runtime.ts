@@ -864,6 +864,11 @@ export async function runLoadedTurn(
     // silent (send nothing). Anything short of a trip proceeds as normal — including a screening
     // that could not run, which is the fail-open half of the policy.
     const inGuard = await runGuardrail("input", text);
+    // Asked on the way OUT of the screening, not only before the send it may lead to. The verdict
+    // costs a model call, and its silent branch returns "blocked" — a word that says the burst was
+    // consumed, so the watermark advances. A run the command called off during that call would be
+    // the one path that reports a retired burst as handled.
+    if (await writeCalledOff()) return "stale";
     if (guardrailTripped(inGuard)) {
       const inReply = screenedText(inGuard, text);
       if (inReply !== null) {
@@ -1022,6 +1027,9 @@ export async function runLoadedTurn(
       .filter((c): c is string => !!c);
     const screened = [reply, ...captions].filter(Boolean).join("\n");
     const outGuard = screened ? await runGuardrail("output", screened) : null;
+    // Same wait, same reason: `postBlocked` answered before this model call, and the suppressed
+    // branch below returns "blocked" without passing any later ask.
+    if (await writeCalledOff()) return "stale";
     if (outGuard && guardrailTripped(outGuard)) {
       turnState.pendingImages.length = 0;
       const replacement = screenedText(outGuard, screened);
