@@ -153,16 +153,18 @@ export async function conversationReturn(
         note: "Returns the conversation to the bot (unassigns human, status pending). Calls Chatwoot.",
       });
     }
-    await returnConversationToAgent(ctx, id, {}, base);
+    const outcome = await returnConversationToAgent(ctx, id, {}, base);
     await recordMcpAudit(ctx, base, {
       actorId: principal.userId,
       actorType: "mcp",
       action: "mcp.conversation_return",
       target,
       before: truncForAudit({ status: current.status }),
-      after: truncForAudit({ status: "pending" }),
+      after: truncForAudit({ status: "pending", outcome }),
     });
-    return ok({ dryRun: false, applied: true, target });
+    // Reported, not swallowed: a takeover during the call leaves the conversation with the human who
+    // claimed it, and an `applied: true` alone would tell the caller the agent has it back.
+    return ok({ dryRun: false, applied: true, target, outcome });
   } catch (e) {
     return failOf(e);
   }

@@ -83,15 +83,17 @@ export async function linkRedirectConversations(
   const now = p.now ?? new Date();
   const entryInboxId = p.cfg.entryInboxId;
 
-  // Every entry-inbox conversation of this contact that has ever SENT a redirect, most recent first.
-  // Two rows is all this needs: the first to work with, and a second whose mere existence answers
-  // the only question that matters below.
+  // This contact's conversations on the ENTRY inbox, the ones that redirected first. Two rows is all
+  // this needs: the first to work with, and a second whose mere existence answers the question below.
   //
-  // NOT ordered by activity, which is what this used to ask. Activity is mutable and says nothing
-  // about the funnel: a contact who writes into an OLD entry conversation before opening the chat
-  // makes that one the latest. (The old ordering also sorted NULLs FIRST, Postgres's default on
-  // DESC, so a conversation that never carried an event outranked the live one; the predicate makes
-  // that unreachable rather than merely ordering around it.)
+  // The predicate is EXISTENCE, not "has redirected", and that is the load-bearing part. Every
+  // redirect anchor is resettable by design — this feature's own /reset clears `redirectSentAt` and
+  // zeroes `redirectCount` on both sides precisely so the funnel can be tested twice — while the
+  // token those anchors described stays live for its full 24h. So a count over the anchors can drop
+  // to one while two links are still out there, and it would read as proof. Rows do not move.
+  //
+  // Ordered with NULLs LAST, against Postgres's default on DESC, so the row that actually carries a
+  // redirect is the one at the front rather than one that never carried an event.
   const candidates =
     p.widgetConv.contactId === null || entryInboxId === null
       ? []
@@ -101,33 +103,38 @@ export async function linkRedirectConversations(
               contactId: p.widgetConv.contactId,
               chatwootInstanceId: p.instanceId,
               inbox: { chatwootInboxId: entryInboxId },
-              redirectSentAt: { not: null },
             },
-            select: { chatwootConversationId: true, testActivatedAt: true },
-            orderBy: { redirectSentAt: "desc" },
+            select: {
+              chatwootConversationId: true,
+              testActivatedAt: true,
+              redirectSentAt: true,
+            },
+            orderBy: { redirectSentAt: { sort: "desc", nulls: "last" } },
             take: 2,
           }),
         );
 
   // The best guess, and it is only ever used for things a human reads or a test mode toggles: which
-  // conversation the cross-link notes point at, and where a /teste carries over from. Null when the
-  // contact has no redirect on that inbox, and that is honest — without one there is no episode to
-  // pair, to propagate test mode from, or to cross-link a note to.
-  const sibling = candidates[0] ?? null;
+  // conversation the cross-link notes point at, and where a /teste carries over from. Null when no
+  // conversation on that inbox has redirected — without one there is no episode to pair, to
+  // propagate test mode from, or to cross-link a note to.
+  const sibling =
+    candidates[0]?.redirectSentAt != null ? (candidates[0] ?? null) : null;
 
   // The episode's IDENTITY, and it is not the same answer as the guess above, because the bar is not
   // the same. This id is permanent and machines act on it destructively: the closing sends to it, and
   // a /reset tombstones its ladder and its appointment reminders. So it is written only where the
-  // rows PROVE it, which is exactly one candidate — whichever token opened this chat, it came from
-  // the only conversation that ever sent one.
+  // rows PROVE it, which is a contact with a single conversation on the entry inbox — every token is
+  // minted on one of these, so with one of them there is nothing else the chat could have opened
+  // from, whatever the anchors say now.
   //
-  // With several candidates the most recent send does not prove origin: a redirect link is a
-  // single-use token with a fixed 24h TTL (docs/channel-redirect.md), so an older, unconsumed one is
-  // still live and the customer may have clicked THAT — the newer conversation's token is simply the
-  // one we happened to mint last. Nothing in this repo can tell the two apart: the token is resolved
-  // inside Chatwoot and what comes back identifies the CONTACT, not the conversation it was minted
-  // from. Guessing wrong here is silent and permanent, so an unknown pair stays unknown and the
-  // callers act on one conversation alone, which is what they did before this column existed.
+  // With two of them the answer is unknowable here, and not merely unknown. A redirect link is a
+  // single-use token with a fixed 24h TTL (docs/channel-redirect.md), so more than one can be live at
+  // a time and the newest is only the one we happened to mint last. Nothing in this repo can tell
+  // them apart: the token is resolved inside Chatwoot and what comes back identifies the CONTACT, not
+  // the conversation it was minted from. Guessing wrong is silent and permanent, so an unknown pair
+  // stays unknown and the callers act on one conversation alone, which is what they did before this
+  // column existed.
   const entryConversationId =
     sibling !== null && candidates.length === 1
       ? sibling.chatwootConversationId

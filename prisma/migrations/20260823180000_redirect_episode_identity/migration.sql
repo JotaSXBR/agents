@@ -24,25 +24,24 @@ SET app.is_super_admin = 'on';
 -- find the conversation they message and resolve, so an upgrade that left every existing episode
 -- unpaired would stop those two stages for funnels already in flight.
 --
--- The rule is PROVABILITY, and exactly one shape proves anything: a contact with exactly ONE
--- conversation that ever redirected on this instance. Whichever token opened that chat, it came from
--- the only conversation that ever sent one. It has to be read that way rather than by timestamp,
--- because `redirect_sent_at` is OVERWRITTEN by a resend rather than appended to, so an entry that
--- redirected again after its chat was linked now carries a timestamp AFTER the link.
+-- The rule is PROVABILITY, and exactly one shape proves anything: a contact whose only conversation
+-- outside this widget's own inbox is a single row. Every redirect token is minted on a conversation
+-- of that contact somewhere off the widget inbox, so with one such row there is nothing else the
+-- chat could have opened from.
 --
--- With several candidates the timestamps prove nothing, in either ordering. A redirect link is a
--- single-use token with a fixed 24h TTL (docs/channel-redirect.md), so an older, unconsumed one is
--- still live and the customer may have clicked THAT rather than the last one minted. Picking the
--- latest send is therefore a guess, and this column is the input to a goodbye and a RESOLVE landing
--- on a conversation — a wrong guess is silent, permanent and destructive, where an unknown pair only
--- costs a funnel stage that does not fire. Everything else stays null.
+-- It counts ROWS and not redirect anchors, which is the difference between a proof and a reading.
+-- Every anchor this feature writes is resettable on purpose — /reset clears `redirect_sent_at` and
+-- zeroes `redirect_count` so the funnel can be tested twice — while the token the cleared anchor
+-- described stays live for its full 24h. A count over anchors can therefore fall to one while two
+-- links are still out there. It does not use the ordering either: a link is single-use with a fixed
+-- 24h TTL (docs/channel-redirect.md), so more than one can be live and the latest send is the one we
+-- minted last, not the one that was clicked. Everything with two candidates stays null.
 --
--- Only same tenant, same Chatwoot instance and same contact, which is the whole reach one episode
--- can have. It does NOT check the inbox pair, because a migration does not have the agent's config:
--- a tenant running two redirect funnels for one contact could be given the other funnel's entry.
--- That resolves itself at read time and in the safe direction — both callers look the stored id up
--- CONSTRAINED to the configured entry inbox, so an id from another pair matches no row and reads as
--- unpaired.
+-- The inbox is read off the widget row rather than from config, because a migration does not have
+-- the agent's: `inbox_id <> w.inbox_id` reaches the entry inbox and every other one the contact ever
+-- wrote on, so a contact who also has an email conversation simply comes out unpaired. Fail-closed
+-- in the direction that costs a funnel stage rather than a goodbye and a RESOLVE on somebody else's
+-- conversation. Same tenant and same Chatwoot instance, which is the whole reach one episode has.
 --
 -- A correlated subquery in SET, not a LATERAL join: the UPDATE target is not a FROM item, so
 -- Postgres refuses to let a LATERAL reference it (42P10). HAVING with no GROUP BY yields a row when
@@ -56,11 +55,11 @@ SET "redirect_entry_conversation_id" = (
   WHERE c."tenant_id" = w."tenant_id"
     AND c."chatwoot_instance_id" = w."chatwoot_instance_id"
     AND c."contact_id" = w."contact_id"
-    AND c."id" <> w."id"
-    AND c."redirect_sent_at" IS NOT NULL
+    AND c."inbox_id" <> w."inbox_id"
   HAVING COUNT(*) = 1
 )
 WHERE w."redirect_linked_at" IS NOT NULL
-  AND w."contact_id" IS NOT NULL;
+  AND w."contact_id" IS NOT NULL
+  AND w."inbox_id" IS NOT NULL;
 
 RESET app.is_super_admin;

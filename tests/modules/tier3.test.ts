@@ -669,12 +669,14 @@ describe.skipIf(!dbUp)("tier-3 conversation ops (stub client)", () => {
 
   test("return sets pending + clears assignee in the mirror", async () => {
     const stub = makeStub();
-    await returnConversationToAgent(
+    const outcome = await returnConversationToAgent(
       ctx(tenant),
       convId,
       { makeClient: stub.makeClient },
       appDb,
     );
+    // The control the takeover test needs: an outcome that were always "taken-over" would pass it.
+    expect(outcome).toBe("returned");
     expect(stub.calls.unassignConversation).toBe(1);
     expect(stub.calls.toggleStatus).toEqual(["pending"]);
     const row = await suDb.conversation.findUnique({
@@ -695,12 +697,15 @@ describe.skipIf(!dbUp)("tier-3 conversation ops (stub client)", () => {
     });
     // Chatwoot now says somebody ELSE is holding it.
     const stub = makeStub({ assigneeType: "User", assigneeId: 42 });
-    await returnConversationToAgent(
+    const outcome = await returnConversationToAgent(
       ctx(tenant),
       convId,
       { makeClient: stub.makeClient },
       appDb,
     );
+    // Said out loud, because nothing throws here: the status was set and the mirror corrected, so a
+    // caller that only watched for an exception would report the agent as having it back.
+    expect(outcome).toBe("taken-over");
     expect(stub.calls.toggleStatus).toEqual(["pending"]);
     expect(stub.calls.unassignConversation).toBe(0);
     const row = await suDb.conversation.findUnique({

@@ -1703,14 +1703,22 @@ async function maybeConsumeCommandOrGate(params: {
       }
     }
     const resetBlocker = await answerBlocker();
+    // Somebody claimed the conversation while the hand-back was in flight. Not a failure — the
+    // takeover wins on purpose — but the operator asked for the agent back, so the acknowledgement
+    // below has to say it did not get it.
+    let takenOver = false;
     if (
       notOursAtStart &&
       resetBlocker === "ownership" &&
       (await heldBySameParty())
     ) {
-      await step("return the conversation to the agent", "atribuição", () =>
-        returnConversationToAgent(sysCtx(tenantId), ctx.conv.id, {}, base),
+      const handBack = await step(
+        "return the conversation to the agent",
+        "atribuição",
+        () =>
+          returnConversationToAgent(sysCtx(tenantId), ctx.conv.id, {}, base),
       );
+      takenOver = handBack === "taken-over";
     }
     // Best-effort is the design; announcing a full reset after a partial one is not. The operator
     // typed /reset to get a clean slate, and acting on a conversation that is not clean is worse than
@@ -1722,7 +1730,9 @@ async function maybeConsumeCommandOrGate(params: {
     const heldBack =
       resetBlocker === "disabled" && !(await stillOursOrUnknown())
         ? " Este agente está desativado, então a conversa continua com quem a atendia."
-        : "";
+        : takenOver
+          ? " Alguém assumiu a conversa durante o reset, então ela continua com essa pessoa."
+          : "";
     await postAcknowledgement(
       distinctFailed.length === 0
         ? `🔄 Memória, preferência de áudio e etiquetas/atributos desta conversa foram limpos.${heldBack}`

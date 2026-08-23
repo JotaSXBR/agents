@@ -504,11 +504,14 @@ export const v1Controller = new Elysia({ prefix: "/v1" })
   .post(
     "/conversations/:id/return",
     async ({ tenantContext, params }) => {
-      await returnConversationToAgent(
+      const outcome = await returnConversationToAgent(
         ctxOrThrow(tenantContext),
         BigInt(params.id),
       );
-      return { instance: instanceIdentity, success: true };
+      // The call succeeded either way — the conversation is pending and the mirror is correct. The
+      // outcome says whether the unassign happened, because "taken-over" means a human claimed it
+      // mid-request and still holds it, and a bare success would read as the agent having it back.
+      return { instance: instanceIdentity, success: true, outcome };
     },
     {
       requireAuth: true,

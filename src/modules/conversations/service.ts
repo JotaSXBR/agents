@@ -1291,12 +1291,14 @@ export async function handoffConversation(
 // conditional unassign, so this is the compare done here — it narrows the window to one request
 // instead of two, and the direction it fails in is leaving a human in place, which is the direction
 // a takeover should always win.
+export type ReturnToAgentOutcome = "returned" | "taken-over";
+
 export async function returnConversationToAgent(
   ctx: TenantContext,
   id: bigint,
   deps: LoadChatwootClientDeps = {},
   base: PrismaClient = basePrisma,
-): Promise<void> {
+): Promise<ReturnToAgentOutcome> {
   const tenantId = requireTenant(ctx);
   const conv = await loadConvRef(ctx, id, base);
   // Operator-initiated → instance admin token (audit shows the operator, not the persona).
@@ -1357,6 +1359,11 @@ export async function returnConversationToAgent(
     lastEventAt:
       (state ? state.lastEventAt : conv.lastEventAt)?.toISOString() ?? null,
   });
+  // The outcome, because "taken over" is not a failure and every caller would otherwise report the
+  // hand-back it asked for as having happened. Nothing throws on this path: the status WAS set to
+  // pending and the mirror WAS corrected — the one thing withheld is the unassign, which is exactly
+  // what the caller told its operator it was doing.
+  return newHolder === null ? "returned" : "taken-over";
 }
 
 export async function setConversationStatus(

@@ -61,7 +61,16 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 // `failing` marks endpoints that answer 500 even with a valid token, so a test can drive a partial
 // failure without going through the auth path.
-function fakeChatwoot(failing: RegExp | null = null): FakeChatwoot {
+// `takeoverAfterToggle` is a holder the live read reports only AFTER the hand-back's status call,
+// which is the window the takeover branch exists for and the only way to reach it: an earlier guard
+// re-reads the holder and stands the whole hand-back down if it has already changed. Without it the
+// GET carries no status at all, `parseLiveConversation` returns null, and the run takes the
+// "unreadable, hand back anyway" path every other test here exercises.
+function fakeChatwoot(
+  failing: RegExp | null = null,
+  takeoverAfterToggle: { type: string; id: number } | null = null,
+): FakeChatwoot {
+  let toggled = false;
   const calls: CwCall[] = [];
   const impl = (async (input, init) => {
     const url = new URL(String(input));
@@ -74,6 +83,9 @@ function fakeChatwoot(failing: RegExp | null = null): FakeChatwoot {
       token,
       body: typeof raw === "string" ? JSON.parse(raw) : null,
     });
+    if (method === "POST" && url.pathname.endsWith("/toggle_status")) {
+      toggled = true;
+    }
     if (token.trim() === "") {
       return jsonResponse({ error: "Invalid Access Token" }, 401);
     }
@@ -83,7 +95,24 @@ function fakeChatwoot(failing: RegExp | null = null): FakeChatwoot {
       method === "GET" &&
       url.pathname.endsWith(`/conversations/${CONV_ID}`)
     ) {
-      return jsonResponse({ id: CONV_ID, kanban_task: { id: KANBAN_TASK_ID } });
+      return jsonResponse({
+        id: CONV_ID,
+        kanban_task: { id: KANBAN_TASK_ID },
+        ...(takeoverAfterToggle
+          ? {
+              status: "pending",
+              meta: toggled
+                ? {
+                    assignee_type: takeoverAfterToggle.type,
+                    assignee: {
+                      id: takeoverAfterToggle.id,
+                      type: takeoverAfterToggle.type,
+                    },
+                  }
+                : { assignee_type: "User", assignee: { id: 77, type: "User" } },
+            }
+          : {}),
+      });
     }
     // The account's attribute schema. `crm_id` is deliberately absent from it: it is the key an
     // integration owns, and the one a wholesale clear would destroy.
@@ -752,6 +781,48 @@ describe.skipIf(!dbUp)(
         .join(" ");
       expect(ack).toContain("atribuição");
       expect(ack).not.toContain("desativado");
+    });
+
+    // And the third way it ends with a human: somebody claimed the conversation between the status
+    // call and the live read. Nothing throws — the hand-back deliberately leaves a takeover alone —
+    // so the command would otherwise announce a clean slate over a conversation that is still theirs.
+    test("a takeover during the hand-back is named in the acknowledgement", async () => {
+      const cw = fakeChatwoot(null, { type: "User", id: 999 });
+      globalThis.fetch = cw.impl;
+      // The mirror has to agree with the payload's holder, or the guard that runs BEFORE the
+      // hand-back sees a changed holder and stands the whole thing down — which is the other,
+      // already-tested takeover, the one that lands earlier in the cleanup.
+      await suDb.conversation.updateMany({
+        where: { tenantId, chatwootConversationId: CONV_ID },
+        data: { status: "open", assigneeType: "User", assigneeId: 77 },
+      });
+      try {
+        await sendReset("/reset", CONV_ID, {
+          status: "open",
+          assigneeType: "User",
+        });
+
+        // The unassign was withheld, which is the behaviour this sentence has to explain.
+        expect(
+          cw.calls.some(
+            (c) =>
+              c.method === "POST" &&
+              c.path.endsWith(`/conversations/${CONV_ID}/assignments`),
+          ),
+        ).toBe(false);
+        const ack = ackCalls(cw.calls)
+          .map((c) => (c.body as { content?: string })?.content ?? "")
+          .join(" ");
+        expect(ack).toContain("Alguém assumiu a conversa durante o reset");
+        // Not a failure and not the disabled agent: both would send the operator somewhere else.
+        expect(ack).not.toContain("atribuição");
+        expect(ack).not.toContain("desativado");
+      } finally {
+        await suDb.conversation.updateMany({
+          where: { tenantId, chatwootConversationId: CONV_ID },
+          data: { status: "pending", assigneeType: null, assigneeId: null },
+        });
+      }
     });
 
     // And what that ordering buys. The status call failing must leave the human where they were, not

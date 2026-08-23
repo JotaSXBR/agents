@@ -929,27 +929,6 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
     const contact = await suDb.contact.findFirstOrThrow({
       where: { tenantId, chatwootContactId: 991 },
     });
-    // A SECOND conversation on the entry inbox, more recently active than the one that sent the
-    // redirect and carrying no redirect of its own. Chosen by activity it wins, and the id recorded
-    // below is permanent — the pair, the closing and /reset would all name a conversation this chat
-    // never opened from.
-    const DECOY_CONV = 7174;
-    const entryInbox = await suDb.inbox.findFirstOrThrow({
-      where: { tenantId, chatwootInboxId: 110 },
-    });
-    const decoy = await suDb.conversation.create({
-      data: {
-        tenantId,
-        chatwootInstanceId: instanceId,
-        inboxId: entryInbox.id,
-        contactId: contact.id,
-        chatwootConversationId: DECOY_CONV,
-        status: "open",
-        threadId: `${tenantId}:${instanceId}:${DECOY_CONV}`,
-        lastEventAt: new Date(Date.now() + 60_000),
-        lastInboundAt: new Date(),
-      },
-    });
     const fresh = await suDb.conversation.create({
       data: {
         tenantId,
@@ -1024,11 +1003,10 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
     } finally {
       globalThis.fetch = originalFetch;
       await suDb.conversation.delete({ where: { id: fresh.id } });
-      await suDb.conversation.delete({ where: { id: decoy.id } });
     }
   });
 
-  test("a second entry that also redirected leaves the episode unnamed", async () => {
+  test("a second conversation on the entry inbox leaves the episode unnamed", async () => {
     const FRESH_CONV = 7175;
     const SECOND_ENTRY = 7176;
     const widgetInbox = await suDb.inbox.findFirstOrThrow({
@@ -1040,9 +1018,12 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
     const contact = await suDb.contact.findFirstOrThrow({
       where: { tenantId, chatwootContactId: 991 },
     });
-    // A SECOND funnel for the same contact, redirected more recently than the fixture's entry. Its
-    // link is the last one minted, and that is all it is: the fixture's token is a single-use token
-    // with a 24h TTL, so it is still live and may be the one the customer clicked.
+    // A SECOND conversation on the entry inbox, more recently active and carrying NO redirect of its
+    // own — the shape a /reset leaves behind, since it clears the anchor without revoking the link it
+    // sent. Counting anchors sees one candidate and names the fixture's entry with certainty;
+    // counting conversations sees two and declines. The same decline covers the other way round, two
+    // conversations that both still carry an anchor: a link is single-use with a 24h TTL, so both can
+    // be live and the newest is only the one minted last.
     const second = await suDb.conversation.create({
       data: {
         tenantId,
@@ -1052,8 +1033,8 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
         chatwootConversationId: SECOND_ENTRY,
         status: "open",
         threadId: `${tenantId}:${instanceId}:${SECOND_ENTRY}`,
-        lastEventAt: new Date(),
-        redirectSentAt: new Date(),
+        lastEventAt: new Date(Date.now() + 60_000),
+        lastInboundAt: new Date(),
       },
     });
     const fresh = await suDb.conversation.create({
@@ -1117,12 +1098,16 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
           appDb,
         ),
       ).toEqual({ side: "widget", siblingConversationId: null });
-      // The operator still gets both cross-link notes, pointed at the latest redirect. That guess
-      // costs a human one click on the wrong tab; the identity above would have cost a goodbye and a
-      // RESOLVE on a conversation this chat never opened from.
+      // The operator still gets both cross-link notes, and at the conversation that actually
+      // redirected rather than the one that is merely the most recent. That guess costs a human one
+      // click on the wrong tab; the identity above would have cost a goodbye and a RESOLVE on a
+      // conversation this chat never opened from.
+      expect(
+        wire.some((u) => u.includes(`/conversations/${ENTRY_CONV}/messages`)),
+      ).toBe(true);
       expect(
         wire.some((u) => u.includes(`/conversations/${SECOND_ENTRY}/messages`)),
-      ).toBe(true);
+      ).toBe(false);
     } finally {
       globalThis.fetch = originalFetch;
       await suDb.conversation.delete({ where: { id: fresh.id } });

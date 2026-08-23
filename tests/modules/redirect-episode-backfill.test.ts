@@ -45,11 +45,11 @@ let waInboxId = 0n;
 let widgetInboxId = 0n;
 
 // What the backfill has to decide, from rows alone, for funnels that were already running when the
-// identity column did not exist. It answers by COUNTING candidates, never by ordering them: a
-// redirect link is a single-use token with a 24h TTL, so with more than one candidate an older
-// unconsumed token is still live and the latest send is a guess. `redirect_sent_at` would not carry
-// the ordering anyway — it is OVERWRITTEN by a resend rather than appended to, so an entry that
-// redirected again after its chat was linked now carries a timestamp AFTER the link.
+// identity column did not exist. It counts the contact's conversations OFF the widget's own inbox
+// and answers only where there is one — never by reading a redirect anchor, and never by ordering
+// them. Anchors are resettable by design (/reset clears them so the funnel can be tested again)
+// while the token one described stays live for 24h, so an anchor that is gone proves nothing and a
+// count over anchors can read as certainty while two links are still out there.
 describe.skipIf(!dbUp)("the redirect identity backfill", () => {
   beforeAll(async () => {
     const t = await suDb.tenant.create({
@@ -150,40 +150,35 @@ describe.skipIf(!dbUp)("the redirect identity backfill", () => {
     return row.redirectEntryConversationId;
   };
 
-  test("it pairs a widget only where a single candidate proves the entry", async () => {
+  test("it pairs a widget only where a single conversation proves the entry", async () => {
     const now = Date.now();
-    // The ordinary shape: one redirect, then the chat.
+    // The ordinary shape: one entry conversation, which redirected.
     const plain = await episode(
       [{ sentAt: new Date(now - 120_000) }],
       new Date(now - 119_000),
     );
-    // The resend: the SAME entry conversation redirected again after the chat was linked, so its
-    // timestamp now sits AFTER the link. Still paired, because being the only conversation that ever
-    // redirected is what proves it — no reading of the timestamp is involved.
-    const resent = await episode(
-      [{ sentAt: new Date(now + 60_000) }],
-      new Date(now - 119_000),
+    // The same shape after a /reset wiped the anchor. The chat was linked, so a token WAS consumed,
+    // and there is only one conversation it could have been minted on — the missing anchor says
+    // nothing about that.
+    const cleared = await episode([{ sentAt: null }], new Date(now - 119_000));
+    // And the shape a count over anchors gets exactly wrong: /reset cleared the first conversation's
+    // anchor without revoking its still-live link, then a SECOND entry conversation redirected.
+    // Counting anchors sees one candidate and names the second one, permanently. Counting rows sees
+    // two and declines.
+    const afterReset = await episode(
+      [{ sentAt: null }, { sentAt: new Date(now - 30_000) }],
+      new Date(now - 20_000),
     );
-    // Two funnels for one contact, BOTH redirects before this chat was linked, which is the shape an
-    // ordering answers most confidently and cannot actually settle: the older token had not expired
-    // when the chat opened, so the customer may have clicked it and the later send is simply the one
-    // we minted last. Unpaired — a funnel stage that does not fire, rather than a goodbye and a
-    // RESOLVE on somebody else's conversation.
-    const twoFunnels = await episode(
-      [
-        { sentAt: new Date(now - 300_000) },
-        { sentAt: new Date(now - 200_000) },
-      ],
-      new Date(now - 100_000),
-    );
-    // A contact who never redirected: nothing to pair.
-    const unrelated = await episode([{ sentAt: null }], new Date(now));
+    // Nothing off the widget inbox at all: nothing to pair.
+    const lonely = await episode([], new Date(now));
 
     await suDb.$executeRawUnsafe(BACKFILL);
 
     expect(await identityOf(plain.widget)).toBe(plain.entryIds[0] as number);
-    expect(await identityOf(resent.widget)).toBe(resent.entryIds[0] as number);
-    expect(await identityOf(twoFunnels.widget)).toBeNull();
-    expect(await identityOf(unrelated.widget)).toBeNull();
+    expect(await identityOf(cleared.widget)).toBe(
+      cleared.entryIds[0] as number,
+    );
+    expect(await identityOf(afterReset.widget)).toBeNull();
+    expect(await identityOf(lonely.widget)).toBeNull();
   });
 });
