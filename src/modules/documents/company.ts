@@ -1,4 +1,4 @@
-import { rename, rm } from "node:fs/promises";
+import { copyFile, rename, rm } from "node:fs/promises";
 import type { PrismaClient } from "@/../generated/prisma/client";
 import basePrisma from "@/api/lib/prisma";
 import config from "@/config";
@@ -204,8 +204,18 @@ export async function setCompanyLogo(
   let hadPrevious = false;
   try {
     return await setCompanyLogoKey(ctx, key, base, Date.now(), async () => {
+      // COPIED aside, not moved. Renaming the live file away leaves the configured path EMPTY for
+      // the length of the swap, and a preview or an issuance landing in that gap renders a document
+      // with no letterhead at all — permanently, because the document it produces is frozen. A copy
+      // keeps the live name populated the whole time, and the rename below replaces it atomically:
+      // a reader sees the old logo or the new one, never neither.
+      //
+      // NOT COVERED BY A TEST: the gap is between two adjacent statements inside this callback, so
+      // observing it needs a reader scheduled between them — which no test can arrange without a
+      // hook that exists only for the test. The property is structural instead: nothing here ever
+      // unlinks the live name.
       hadPrevious = await Bun.file(path).exists();
-      if (hadPrevious) await rename(path, previous);
+      if (hadPrevious) await copyFile(path, previous);
       // No restore here: a throw from inside the lock aborts the transaction and lands in the catch
       // below, which restores for BOTH reasons a write can fail. Two restores for one condition is
       // one that never runs.

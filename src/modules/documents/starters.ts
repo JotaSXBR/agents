@@ -132,7 +132,15 @@ function starters(locale: DocumentStyle["locale"]): DocumentStarter[] {
           required: true,
         },
         { name: "desconto", label: s.discount as string, type: "currency" },
-        { name: "validade", label: s.validity as string, type: "date" },
+        // Required, because the prose PRINTS it: the terms line says "valid until" and the field's
+        // value follows it. Optional, an omitted value renders that sentence with a blank after the
+        // colon — a document that asks a question of its own reader.
+        {
+          name: "validade",
+          label: s.validity as string,
+          type: "date",
+          required: true,
+        },
       ],
       blocks: [
         {
@@ -179,7 +187,15 @@ function starters(locale: DocumentStyle["locale"]): DocumentStarter[] {
           type: "currency",
           required: true,
         },
-        { name: "validade", label: s.validity as string, type: "date" },
+        // Required, because the prose PRINTS it: the terms line says "valid until" and the field's
+        // value follows it. Optional, an omitted value renders that sentence with a blank after the
+        // colon — a document that asks a question of its own reader.
+        {
+          name: "validade",
+          label: s.validity as string,
+          type: "date",
+          required: true,
+        },
       ],
       blocks: [
         {
@@ -236,7 +252,13 @@ function starters(locale: DocumentStyle["locale"]): DocumentStarter[] {
           type: "text",
           required: true,
         },
-        { name: "pago_em", label: s.paidAt as string, type: "date" },
+        // Required for the same reason: the receipt's own header row prints it.
+        {
+          name: "pago_em",
+          label: s.paidAt as string,
+          type: "date",
+          required: true,
+        },
       ],
       blocks: [
         {

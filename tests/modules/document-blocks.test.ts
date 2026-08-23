@@ -10,6 +10,7 @@ import {
   parseDocumentStyle,
 } from "@/modules/documents/blocks";
 import { printedDate } from "@/modules/documents/issue";
+import { sampleValues } from "@/modules/documents/sample";
 import { documentStarter } from "@/modules/documents/starters";
 import { computeTotals } from "@/modules/documents/totals";
 import {
@@ -757,5 +758,44 @@ describe("printedDate", () => {
     expect(printedDate({ issuedAt: "2026-09-06T01:30:00.000Z" })).toBe(
       "2026-09-06",
     );
+  });
+});
+
+// A starter's own prose promises these values: the quote's terms print "valid until" and the
+// receipt's header prints the payment date. Optional, an omitted value renders that sentence with a
+// blank after it — a document asking a question of its own reader.
+describe("starters promise only what they require", () => {
+  test("every field a starter's text prints is required", () => {
+    for (const key of ["quote", "proposal", "receipt"] as const) {
+      const starter = documentStarter(key, "pt-BR");
+      if (!starter) throw new Error(`no starter: ${key}`);
+      const printed = new Set(
+        JSON.stringify(starter.blocks)
+          .match(/\{\{\s*[a-z][a-z0-9_]*\s*\}\}/g)
+          ?.map((m) => m.replace(/[{}\s]/g, "")) ?? [],
+      );
+      const optional = starter.fields
+        .filter((f) => !f.required && printed.has(f.name))
+        .map((f) => f.name);
+      expect(optional).toEqual([]);
+    }
+  });
+});
+
+// The preview dates the DOCUMENT in a timezone and used to generate its sample dates from the UTC
+// day, so a receipt previewed at 22:00 in São Paulo could say it was issued on the 22nd next to a
+// sample payment date of the 23rd — the same off-by-a-day the issue path was fixed for, on the
+// other side of the same page.
+describe("sampleValues", () => {
+  test("dates a sample from the day it is given, not from the instant", () => {
+    const fields = [
+      { name: "pago_em", label: "Pago em", type: "date" },
+    ] as never;
+    // 01:30 UTC on the 6th is 22:30 on the 5th in São Paulo.
+    const at = new Date("2026-09-06T01:30:00.000Z");
+    expect(sampleValues(fields, at, "2026-09-05").pago_em).toBe("2026-09-05");
+    // With no day given it still falls back to the instant's, which is what a caller with no
+    // timezone in hand can offer.
+    expect(sampleValues(fields, at).pago_em).toBe("2026-09-06");
   });
 });

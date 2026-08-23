@@ -691,8 +691,10 @@ function callerValues(
   fields: DocumentField[],
   raw: unknown,
   now: Date,
+  // The document's own calendar day, so a generated sample date matches the date printed on it.
+  day: string,
 ): DocumentValues {
-  if (raw === undefined) return sampleValues(fields, now);
+  if (raw === undefined) return sampleValues(fields, now, day);
   const parsed = parseDocumentValues(fields, raw);
   if (!parsed.ok) {
     throw new AppError(parsed.reason, 400, "errors.invalidDocumentValues");
@@ -741,7 +743,10 @@ export async function previewDocumentTemplate(
   });
   const style = content.style;
   const now = input.now ?? new Date();
-  const values = callerValues(content.fields, input.values, now);
+  // Computed ONCE and used for both the document's date and any generated sample date, so the two
+  // cannot land on different sides of a day boundary.
+  const previewDay = calendarDay(now, DEFAULT_TIMEZONE);
+  const values = callerValues(content.fields, input.values, now, previewDay);
   const { company, logo } = await readRenderContext(ctx, base);
   const prefix =
     input.numberPrefix !== undefined ? input.numberPrefix : saved?.numberPrefix;
@@ -766,7 +771,7 @@ export async function previewDocumentTemplate(
       // observe the date that came out. The equivalent decision on the ISSUE path is covered, and
       // this line calls the same helper — that is the whole of the assurance, and it is written down
       // rather than implied.
-      date: formatDate(calendarDay(now, DEFAULT_TIMEZONE), style.locale),
+      date: formatDate(previewDay, style.locale),
       title: input.name ?? saved?.name ?? "",
     },
   });

@@ -163,6 +163,9 @@ function ctx(t: bigint): TenantContext {
 const ARGS = {
   cliente: "Ana Ribeiro",
   itens: [{ description: "Consultoria", quantity: 2, unitPrice: 450 }],
+  // The quote starter PRINTS its validity in the terms, so the field is required — a document that
+  // says "valid until" and then nothing is the shape that made it so.
+  validade: "2026-09-05",
 };
 
 function tool(turnState?: TurnState) {

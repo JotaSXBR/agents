@@ -2044,6 +2044,7 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
                 itens: [
                   { description: "Consultoria", quantity: 2, unitPrice: 450 },
                 ],
+                validade: "2026-09-05",
               },
             ) as unknown as BaseChatModel,
           makeClient: makeImageClient(calls),
@@ -2140,6 +2141,7 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
                 itens: [
                   { description: "Consultoria", quantity: 1, unitPrice: 100 },
                 ],
+                validade: "2026-09-05",
               },
               // Runs after the tool queued the document and before the runtime delivers it: the
               // operator's revoke, in the only window where it can land.
@@ -2236,6 +2238,7 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
                 itens: [
                   { description: "Consultoria", quantity: 1, unitPrice: 100 },
                 ],
+                validade: "2026-09-05",
               },
             ) as unknown as BaseChatModel,
           makeClient: makeImageClient(calls),
@@ -2985,6 +2988,7 @@ describe.skipIf(!dbUp)("runAgentTurn", () => {
                         unitPrice: 10,
                       },
                     ],
+                    validade: "2026-09-05",
                   },
                 ) as unknown as BaseChatModel),
           makeClient: guardStub(sent, notes, [], attachments),

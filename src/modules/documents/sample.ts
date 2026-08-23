@@ -11,6 +11,11 @@ import type { DocumentValues } from "./validate";
 export function sampleValues(
   fields: DocumentField[],
   now: Date = new Date(),
+  // The calendar day the DOCUMENT is dated, so a sample date and the document's own date cannot
+  // disagree. Slicing the UTC day here while the preview dates itself in a zone put a receipt dated
+  // the 22nd next to a sample payment date of the 23rd — the same off-by-a-day the issue path was
+  // fixed for, on the other side of the same page.
+  day: string = now.toISOString().slice(0, 10),
 ): DocumentValues {
   const values: DocumentValues = {};
   for (const field of fields) {
@@ -25,7 +30,7 @@ export function sampleValues(
         values[field.name] = 1250;
         break;
       case "date":
-        values[field.name] = now.toISOString().slice(0, 10);
+        values[field.name] = day;
         break;
       case "lineItems":
         values[field.name] = [
