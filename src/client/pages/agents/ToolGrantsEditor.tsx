@@ -1174,13 +1174,23 @@ export function ToolGrantsEditor({
                 icon={FileText}
                 title={tpl.name}
                 badge={<Badge variant="secondary">{tpl.toolName}</Badge>}
+                // AVAILABLE, not merely enabled. Assembly skips a template for two reasons, and an
+                // operator who cannot see the second one grants a tool, saves, and gets no tool —
+                // with the row saying nothing about why. The two are separate messages because the
+                // remedies are: one is a switch on this template, the other is content this build
+                // cannot read and has to be edited from the client that wrote it.
                 description={
-                  tpl.enabled
+                  tpl.available
                     ? (tpl.description ?? undefined)
-                    : t(
-                        "editor.tools.documentDisabled",
-                        "Disabled — the agent will not see this tool.",
-                      )
+                    : tpl.enabled
+                      ? t(
+                          "editor.tools.documentUnreadable",
+                          "Written by a newer version, so the agent will not see this tool until it is edited from there.",
+                        )
+                      : t(
+                          "editor.tools.documentDisabled",
+                          "Disabled: the agent will not see this tool.",
+                        )
                 }
               />
             ))}

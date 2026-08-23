@@ -67,6 +67,12 @@ const json = (body: unknown) =>
 const posts: string[] = [];
 let holdPost = false;
 let releasePost = () => {};
+// What GET /tenant-settings answers with. The company PUT below does NOT change it, which is the
+// point: the load's snapshot has to lose to the write that landed after it was taken.
+let storedCompanyName = "";
+// Holds the LAST request of the panel's Promise.all, so the settings response is already in hand
+// while the load is still waiting — the window a save landing meanwhile has to win.
+let holdDocuments = false;
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(
@@ -79,6 +85,22 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   );
   if ((init?.method ?? "GET").toUpperCase() !== "GET") {
     posts.push(`${init?.method} ${url.pathname}`);
+    if (url.pathname.endsWith("/tenant-settings/company")) {
+      const sent = init?.body ? JSON.parse(String(init.body)) : {};
+      return json({
+        company: {
+          name: "",
+          document: "",
+          address: "",
+          phone: "",
+          email: "",
+          website: "",
+          logoKey: null,
+          logoVersion: 0,
+          ...sent,
+        },
+      });
+    }
     if (holdPost) {
       await new Promise<void>((r) => {
         releasePost = r;
@@ -107,7 +129,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   if (url.pathname.endsWith("/tenant-settings")) {
     return json({
       company: {
-        name: "",
+        name: storedCompanyName,
         document: "",
         address: "",
         phone: "",
@@ -118,6 +140,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       },
     });
   }
+  if (holdDocuments) await gate("documents").wait;
   return json({ documents: [] });
 }) as unknown as typeof fetch;
 
@@ -127,6 +150,8 @@ beforeEach(() => {
   gates = {};
   posts.length = 0;
   holdPost = false;
+  storedCompanyName = "";
+  holdDocuments = false;
 });
 afterEach(cleanup);
 const startingLanguage = i18n.language;
@@ -198,6 +223,55 @@ describe("creating from a starter is one request", () => {
     // Still there: the starter list is what the operator has to keep seeing until this answers.
     expect(screen.queryAllByText("Use").length).toBeGreaterThan(0);
     releasePost();
+  });
+});
+
+// A load reads four endpoints at once and applies them together, so its settings response can be a
+// snapshot taken BEFORE a save this screen then made. Applying it puts the operator's own change
+// back to what it replaced, on screen, with nothing saying so. The load generation does not cover
+// it: no newer load started, a different request simply answered first.
+describe("a refresh does not undo a company save it overlapped", () => {
+  test("a save landing mid-load wins over the older snapshot", async () => {
+    await i18n.changeLanguage("en");
+    render(
+      <MemoryRouter initialEntries={["/recursos/documentos"]}>
+        <ToastProvider>
+          <DocumentsPanel />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    // First load through, so the company form is on screen and interactive.
+    gate("en-US").release();
+    const nameInput = (await screen.findAllByRole("textbox"))[0];
+    if (!nameInput) throw new Error("no company field");
+
+    // A SECOND load, held on its last request: its settings response is already in hand and carries
+    // the company as it is stored — which is about to stop being true.
+    holdDocuments = true;
+    await act(async () => {
+      await i18n.changeLanguage("pt-BR");
+    });
+    gate("pt-BR").release();
+
+    // The operator saves into that window.
+    fireEvent.change(nameInput, { target: { value: "ACME Nova" } });
+    const save = (await screen.findAllByText(/^(Save|Salvar)$/))[0];
+    if (!save) throw new Error("no save button");
+    fireEvent.click(save);
+    await waitFor(() => {
+      expect(posts.some((p) => p.includes("/tenant-settings/company"))).toBe(
+        true,
+      );
+    });
+
+    // …and now the load resolves, carrying the company as it was before the save.
+    gate("documents").release();
+    await new Promise((r) => setTimeout(r, 80));
+
+    const value = (
+      (await screen.findAllByRole("textbox"))[0] as HTMLInputElement
+    ).value;
+    expect(value).toBe("ACME Nova");
   });
 });
 

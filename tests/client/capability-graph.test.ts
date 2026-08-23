@@ -139,6 +139,15 @@ describe("buildGroups — every grant source is drawn", () => {
     expect(missing).toEqual([]);
   });
 
+  // The editor's row and the map read the SAME field, and it is the one the assembly answers. A
+  // template that is enabled but unreadable is the case the two used to disagree on: the map drew
+  // its tool and the editor offered it as an ordinary grant, while the runtime exposed neither.
+  test("enabled and available are not the same question", () => {
+    const future = catalog.documentTemplates.find((d) => d.id === "7");
+    expect(future?.enabled).toBe(true);
+    expect(future?.available).toBe(false);
+  });
+
   test("a document grant is named by the tool the agent will call", () => {
     const groups = buildGroups(catalog, [grantFor.DOCUMENT as GrantState], t);
     const documents = groups.find((g) => g.key === "document");

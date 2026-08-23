@@ -77,8 +77,19 @@ export function DocumentsPanel() {
   // older list landing after a newer one leaves the operator creating a template in the language
   // they just switched away from, permanently and with no sign anything went wrong.
   const loadSeq = useRef(0);
+  // How many times the company block has been WRITTEN from this screen. A load reads four endpoints
+  // at once and applies them together, so its settings response can be a snapshot taken before a
+  // save or a logo upload that has since answered — and applying it then puts the operator's own
+  // change back to what it replaced, on screen, with nothing saying so. The load generation does not
+  // cover this: no newer load started, a different request answered.
+  const companyWrites = useRef(0);
+  const applyCompany = useCallback((next: CompanyProfile) => {
+    companyWrites.current++;
+    setCompany(next);
+  }, []);
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
+    const writes = companyWrites.current;
     const current = () => seq === loadSeq.current;
     if (!loadedOnce.current) setLoading(true);
     setError(false);
@@ -105,7 +116,11 @@ export function DocumentsPanel() {
       setTemplates([...list.data.templates]);
       setStarters(startersRes.data ? [...startersRes.data.starters] : []);
       setStartersError(!!startersRes.error);
-      setCompany(settings.data?.company ?? null);
+      // …unless this screen wrote the block while the load was out, in which case what it holds is
+      // newer than what just arrived.
+      if (companyWrites.current === writes) {
+        setCompany(settings.data?.company ?? null);
+      }
       setIssued(issuedRes.data ? [...issuedRes.data.documents] : []);
       setIssuedError(!!issuedRes.error);
     } catch {
@@ -316,7 +331,7 @@ export function DocumentsPanel() {
           throwing away whatever the operator had already typed. And if only that request failed, the
           card stayed blank with no error, over a profile that may well have values stored. */}
       <DataBoundary loading={loading} error={error} onRetry={load}>
-        <CompanyProfileCard company={company} onChanged={setCompany} />
+        <CompanyProfileCard company={company} onChanged={applyCompany} />
       </DataBoundary>
 
       <DataBoundary
