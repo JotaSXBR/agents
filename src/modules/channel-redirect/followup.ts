@@ -439,35 +439,6 @@ export async function redirectFollowUpHandler(
   if (!cfg.enabled) return { outcome: "done" };
   // Dropping the ladder (not rescheduling) matches the !cfg.enabled arm above: a fresh customer
   // message re-arms it from stage "chat" via the dedupeKey upsert.
-  const liveness = async (): Promise<boolean> => {
-    const now = await runScopedOn(base, sysCtx(tenantId), async (db) => {
-      const a = await db.agent.findUnique({
-        where: { id: agentId },
-        select: { enabled: true, mode: true },
-      });
-      if (!a) return null;
-      const c = await db.conversation.findUnique({
-        where: {
-          tenantId_chatwootInstanceId_chatwootConversationId: {
-            tenantId,
-            chatwootInstanceId: parsed.instanceId,
-            chatwootConversationId: parsed.conversationId,
-          },
-        },
-        select: { testActivatedAt: true },
-      });
-      return { a, testActivatedAt: c?.testActivatedAt ?? null };
-    });
-    // A read that fails is not a refusal — same reasoning as `retired`: an unknown answer must not
-    // silently drop work that was legitimately armed. A DELETED agent is an answer, and it is no.
-    return now === null
-      ? false
-      : isRedirectFollowUpLive({
-          agentEnabled: now.a.enabled,
-          agentMode: now.a.mode,
-          testActivatedAt: now.testActivatedAt,
-        });
-  };
   if (
     !isRedirectFollowUpLive({
       agentEnabled: agent.enabled,
@@ -539,12 +510,7 @@ export async function redirectFollowUpHandler(
     if (await retired()) return { outcome: "done" };
     if (cfg.waFollowupEnabled && entryInboxId !== null) {
       const outcome = await sendWhatsAppFollowUp({
-        // The switch is asked again HERE, not only at the top: the link mint is an HTTP round trip
-        // to Chatwoot, so the answer above is older than the send, and an operator switching the
-        // agent off is most likely to do it while it is chasing somebody. The chat stage needs no
-        // such re-ask — `runAgentNudge` reloads the agent config, which is fail-closed on `enabled`.
-        stillWanted: async () =>
-          (await retired()) === false && (await liveness()),
+        stillWanted: async () => !(await retired()),
         tenantId,
         instanceId: parsed.instanceId,
         agentId,
@@ -577,10 +543,7 @@ export async function redirectFollowUpHandler(
   if (await retired()) return { outcome: "done" };
   if (cfg.closingEnabled && entryInboxId !== null) {
     await deliverRedirectClosing({
-      // Same window as the WhatsApp stage above, and this one messages BOTH conversations and
-      // resolves them.
-      stillWanted: async () =>
-        (await retired()) === false && (await liveness()),
+      stillWanted: async () => !(await retired()),
       tenantId,
       instanceId: parsed.instanceId,
       widgetConversationId: parsed.conversationId,
