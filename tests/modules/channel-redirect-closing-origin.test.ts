@@ -4,6 +4,8 @@ import { PrismaClient } from "@/../generated/prisma/client";
 import { encryptJson } from "@/api/lib/crypto";
 import { deliverRedirectClosing } from "@/modules/channel-redirect/followup";
 import type { ChatwootClient } from "@/modules/chatwoot/client";
+import { normalizeChatwootEvent } from "@/modules/chatwoot/normalize";
+import { processChatwootDelivery } from "@/modules/chatwoot/webhook";
 import { seedChatwootInstance } from "../utils/chatwoot";
 
 const appUrl = process.env.TEST_APP_DATABASE_URL;
@@ -195,3 +197,221 @@ describe.skipIf(!dbUp)("the redirect closing records its own origin", () => {
     expect(row.resolvedByAt).toBe(SIBLING_AT);
   });
 });
+
+// The OTHER way the redirect's goodbye reaches a customer: not the ladder's timed closing stage, but
+// a resolve on the widget conversation, which the receiver turns into a closing on the WhatsApp
+// sibling. It sends fixed text with no nudge behind it, so the agent's own switch is asked here or
+// nowhere (issue #219). The real receiver is driven, because the gate lives on that wiring and a call
+// to `deliverRedirectClosing` would skip the very code under test.
+describe.skipIf(!dbUp)(
+  "a resolve-triggered closing asks the agent's switch",
+  () => {
+    let tid = 0n;
+    let iid = 0n;
+    let agent = 0n;
+    const WIDGET = 5501;
+    const SIBLING = 5502;
+    const WIDGET_INBOX = 51;
+    const ENTRY_INBOX = 50;
+    let seq = 0;
+
+    const originalFetch = globalThis.fetch;
+    const wire: string[] = [];
+    const httpDouble = (async (input: RequestInfo | URL) => {
+      wire.push(String(input));
+      return new Response(JSON.stringify({ id: 1, payload: {} }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    beforeAll(async () => {
+      const t = await suDb.tenant.create({
+        data: { name: "RCLOSE", slug: `rclose-${process.pid}` },
+      });
+      tid = t.id;
+      // An IP literal on the discard port: the SSRF guard never reaches DNS, and nothing is dialed
+      // because fetch is the double above.
+      const inst = await seedChatwootInstance(suDb, {
+        tenantId: tid,
+        accountId: 32,
+        baseUrl: "https://203.0.113.13:9",
+        adminToken: encryptJson("ADMIN"),
+      });
+      iid = inst.id;
+      const a = await suDb.agent.create({
+        data: {
+          tenantId: tid,
+          name: "Atendente",
+          systemPrompt: "x",
+          modelConfig: { provider: "openai", model: "gpt-4o-mini" },
+          settings: {
+            channelRedirect: {
+              enabled: true,
+              entryInboxId: ENTRY_INBOX,
+              widgetInboxId: WIDGET_INBOX,
+              closingEnabled: true,
+              closingMessage: "Vamos encerrar por aqui.",
+            },
+          },
+        },
+      });
+      agent = a.id;
+      await suDb.chatwootAgentBot.create({
+        data: {
+          tenantId: tid,
+          chatwootInstanceId: iid,
+          agentId: agent,
+          chatwootAgentBotId: 12,
+          accessToken: encryptJson("BOT"),
+          webhookSecret: encryptJson("S"),
+          webhookRouteTokenHash: `rclose-${process.pid}`,
+          name: "Atendente",
+        },
+      });
+      const widgetInbox = await suDb.inbox.create({
+        data: {
+          tenantId: tid,
+          chatwootInstanceId: iid,
+          chatwootInboxId: WIDGET_INBOX,
+          name: "Site",
+          agentId: agent,
+          channelType: "Channel::WebWidget",
+        },
+      });
+      const entryInbox = await suDb.inbox.create({
+        data: {
+          tenantId: tid,
+          chatwootInstanceId: iid,
+          chatwootInboxId: ENTRY_INBOX,
+          name: "WhatsApp",
+          agentId: agent,
+        },
+      });
+      const contact = await suDb.contact.create({
+        data: {
+          tenantId: tid,
+          chatwootInstanceId: iid,
+          chatwootContactId: 992,
+          name: "Cliente",
+        },
+      });
+      await suDb.conversation.create({
+        data: {
+          tenantId: tid,
+          chatwootInstanceId: iid,
+          inboxId: entryInbox.id,
+          contactId: contact.id,
+          chatwootConversationId: SIBLING,
+          status: "pending",
+          threadId: `${tid}:${iid}:${SIBLING}`,
+          lastEventAt: new Date(),
+          lastInboundAt: new Date(),
+          redirectSentAt: new Date(Date.now() - 60_000),
+        },
+      });
+      await suDb.conversation.create({
+        data: {
+          tenantId: tid,
+          chatwootInstanceId: iid,
+          inboxId: widgetInbox.id,
+          contactId: contact.id,
+          chatwootConversationId: WIDGET,
+          status: "pending",
+          threadId: `${tid}:${iid}:${WIDGET}`,
+          lastEventAt: new Date(),
+          lastInboundAt: new Date(),
+          redirectLinkedAt: new Date(Date.now() - 59_000),
+        },
+      });
+    });
+
+    afterAll(async () => {
+      globalThis.fetch = originalFetch;
+      if (!dbUp) return;
+      await suDb.tenant.delete({ where: { id: tid } }).catch(() => {});
+    });
+
+    // The widget conversation transitions pending -> resolved, which is the trigger the receiver reads.
+    const resolveWidget = async () => {
+      seq += 1;
+      const n = normalizeChatwootEvent({
+        event: "conversation_resolved",
+        id: WIDGET,
+        inbox_id: WIDGET_INBOX,
+        status: "resolved",
+        contact_inbox: { id: 77_000 + seq },
+        meta: { assignee_type: null, assignee: null },
+        channel: "Channel::WebWidget",
+        last_activity_at: Math.floor(Date.now() / 1000),
+        updated_at: Date.now() / 1000,
+      });
+      if (!n) throw new Error("payload did not normalize");
+      const delivery = await suDb.chatwootWebhookDelivery.create({
+        data: {
+          tenantId: tid,
+          chatwootInstanceId: iid,
+          deliveryId: `rclose-${process.pid}-${seq}`,
+          event: "conversation_resolved",
+          status: "PENDING",
+        },
+        select: { id: true },
+      });
+      wire.length = 0;
+      globalThis.fetch = httpDouble;
+      try {
+        await processChatwootDelivery({
+          tenantId: tid,
+          instanceId: iid,
+          deliveryRowId: delivery.id,
+          agentBotId: 12,
+          normalized: n,
+          base: appDb,
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    };
+
+    // Back to pending, and the at-most-once anchor cleared: the closing is CAS-guarded per conversation,
+    // so without this the second run would answer "already-closed" and prove nothing.
+    const rearm = async () => {
+      await suDb.conversation.updateMany({
+        where: { tenantId: tid, chatwootConversationId: WIDGET },
+        data: { status: "pending", redirectClosedAt: null },
+      });
+      await suDb.conversation.updateMany({
+        where: { tenantId: tid, chatwootConversationId: SIBLING },
+        data: { status: "pending", redirectClosedAt: null },
+      });
+    };
+
+    test("a switched-off agent posts no goodbye on the sibling", async () => {
+      await suDb.agent.update({
+        where: { id: agent },
+        data: { enabled: false },
+      });
+      await rearm();
+      await resolveWidget();
+      expect(wire.filter((u) => u.includes("/messages"))).toEqual([]);
+      const sibling = await suDb.conversation.findFirstOrThrow({
+        where: { tenantId: tid, chatwootConversationId: SIBLING },
+        select: { redirectClosedAt: true },
+      });
+      // The at-most-once anchor is untouched, so the closing is still available if the agent comes back.
+      expect(sibling.redirectClosedAt).toBeNull();
+    });
+
+    // The control: the same resolve, agent on, does reach the customer — otherwise the assertion above
+    // would pass on a path that never delivers anything.
+    test("the same resolve with the agent on does post it", async () => {
+      await suDb.agent.update({
+        where: { id: agent },
+        data: { enabled: true },
+      });
+      await rearm();
+      await resolveWidget();
+      expect(wire.some((u) => u.includes("/messages"))).toBe(true);
+    });
+  },
+);

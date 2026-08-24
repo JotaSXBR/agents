@@ -1238,6 +1238,51 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
     });
   });
 
+  // The window the top-of-handler gate cannot close: the link mint is an HTTP round trip, so the
+  // agent can be switched off between the gate and the send. The rendezvous IS that round trip —
+  // the double flips the switch while the mint is in flight, which is exactly when an operator
+  // watching a lead being chased would reach for it.
+  test("switched off DURING the link mint sends nothing", async () => {
+    const job = await claimed("whatsapp");
+    const s = stubClient();
+    wire.length = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      wire.push(url);
+      if (url.includes("/redirect_tokens")) {
+        await suDb.agent.update({
+          where: { id: agentId },
+          data: { enabled: false },
+        });
+      }
+      const body = url.includes("/redirect_tokens")
+        ? { token: "tok-2", website_url: "https://loja.example" }
+        : url.includes("/inboxes")
+          ? { id: 111, website_url: "https://loja.example" }
+          : { id: 1, payload: {} };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      await redirectFollowUpHandler(job, appDb, {
+        ...deps(),
+        makeClient: s.makeClient,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await suDb.agent.update({
+        where: { id: agentId },
+        data: { enabled: true },
+      });
+    }
+    // The mint happened — this is the window, not a stage that stopped earlier — and nothing was
+    // posted after it.
+    expect(wire.some((u) => u.includes("/redirect_tokens"))).toBe(true);
+    expect(wire.filter((u) => u.includes("/messages"))).toEqual([]);
+  });
+
   test("a retire mid-stage stops the closing, and the resolve with it", async () => {
     const job = await claimed("closing");
     const s = stubClient();
