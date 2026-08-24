@@ -402,6 +402,29 @@ describe.skipIf(!dbUp)(
       expect(sibling.redirectClosedAt).toBeNull();
     });
 
+    // The other half of the same predicate, and the branch that decides whether the stamp is even
+    // read: a test agent whose widget conversation was never activated with /teste is silent here too.
+    test("a test agent nobody activated posts no goodbye either", async () => {
+      await suDb.agent.update({
+        where: { id: agent },
+        data: { enabled: true, mode: "test" },
+      });
+      await rearm();
+      await suDb.conversation.updateMany({
+        where: { tenantId: tid, chatwootConversationId: WIDGET },
+        data: { testActivatedAt: null },
+      });
+      try {
+        await resolveWidget();
+        expect(wire.filter((u) => u.includes("/messages"))).toEqual([]);
+      } finally {
+        await suDb.agent.update({
+          where: { id: agent },
+          data: { mode: "production" },
+        });
+      }
+    });
+
     // The control: the same resolve, agent on, does reach the customer — otherwise the assertion above
     // would pass on a path that never delivers anything.
     test("the same resolve with the agent on does post it", async () => {

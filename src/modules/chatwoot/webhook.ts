@@ -2567,14 +2567,20 @@ export async function processChatwootDelivery(
             isRedirectFollowUpLive({
               agentEnabled: closingRt.enabled,
               agentMode: closingRt.mode,
-              // The widget conversation is the one that resolved, and the one the ladder keys its
-              // own activation check to.
-              testActivatedAt: await widgetTestActivatedAt(
-                params.tenantId,
-                params.instanceId,
-                conversationId,
-                base,
-              ),
+              // Only a test agent's liveness depends on the stamp, and this read is paid on a path
+              // whose failure is permanent: the surrounding best-effort catch sits AFTER the ladder
+              // was cancelled, the delivery is marked PROCESSED, and a conversation resolves once —
+              // so a transient error here would lose the closing for good. A production agent has
+              // nothing to look up.
+              testActivatedAt:
+                closingRt.mode === "test"
+                  ? await widgetTestActivatedAt(
+                      params.tenantId,
+                      params.instanceId,
+                      conversationId,
+                      base,
+                    )
+                  : null,
             });
           if (closingLive && redirectCfg.entryInboxId !== null) {
             const outcome = await deliverRedirectClosing({
