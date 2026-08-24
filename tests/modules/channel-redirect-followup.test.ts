@@ -1181,6 +1181,63 @@ describe.skipIf(!dbUp)("a ladder retired while claimed", () => {
     expect(wire.some((u) => u.includes("/messages"))).toBe(true);
   });
 
+  // The gate the predicate above describes, asked where it is actually consumed. The stage's own
+  // control sits right above: with the agent enabled it posts, so a run that posts nothing here is
+  // the switch and not a stage that never does anything. Deleting the handler's call to
+  // `isRedirectFollowUpLive` leaves every predicate test green, which is why this one exists.
+  const withAgentDisabled = async (run: () => Promise<void>) => {
+    await suDb.agent.update({
+      where: { id: agentId },
+      data: { enabled: false },
+    });
+    try {
+      await run();
+    } finally {
+      await suDb.agent.update({
+        where: { id: agentId },
+        data: { enabled: true },
+      });
+    }
+  };
+
+  test("a switched-off agent does not re-send the WhatsApp link", async () => {
+    await withAgentDisabled(async () => {
+      const job = await claimed("whatsapp");
+      const s = stubClient();
+      wire.length = 0;
+      globalThis.fetch = httpDouble;
+      try {
+        const result = await redirectFollowUpHandler(job, appDb, {
+          ...deps(),
+          makeClient: s.makeClient,
+        });
+        // Dropped, not advanced: rescheduling would only postpone the closing, which messages and
+        // resolves BOTH conversations.
+        expect(result).toEqual({ outcome: "done" });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+      // Nothing on the wire at all — not even the link mint, which happens before the send and costs
+      // a Chatwoot round trip on a lead this agent is not allowed to chase.
+      expect(wire).toEqual([]);
+      expect(s.sent).toEqual([]);
+    });
+  });
+
+  test("a switched-off agent does not post the closing, nor resolve", async () => {
+    await withAgentDisabled(async () => {
+      const job = await claimed("closing");
+      const s = stubClient();
+      const result = await redirectFollowUpHandler(job, appDb, {
+        ...deps(),
+        makeClient: s.makeClient,
+      });
+      expect(result).toEqual({ outcome: "done" });
+      expect(s.sent).toEqual([]);
+      expect(s.resolved).toEqual([]);
+    });
+  });
+
   test("a retire mid-stage stops the closing, and the resolve with it", async () => {
     const job = await claimed("closing");
     const s = stubClient();
