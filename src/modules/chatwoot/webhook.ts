@@ -172,6 +172,10 @@ async function inboxAgentRuntime(
   base: PrismaClient,
 ): Promise<{
   agentId: bigint;
+  // The Inbox DB row id, not the Chatwoot one the caller passed in: it is what ExecutionLog.inbox_id
+  // and every other local column mean by "inbox". Selected here because this query already reads the
+  // row — a caller that needs it otherwise pays for a second lookup of the same record.
+  inboxId: bigint;
   enabled: boolean;
   mode: string;
   // The agent's raw settings JSON, carried through so a caller that already pays for this query can
@@ -191,7 +195,7 @@ async function inboxAgentRuntime(
           chatwootInboxId,
         },
       },
-      select: { agentId: true },
+      select: { id: true, agentId: true },
     });
     if (!inbox?.agentId) return null;
     const agent = await db.agent.findUnique({
@@ -201,6 +205,7 @@ async function inboxAgentRuntime(
     if (!agent) return null;
     return {
       agentId: inbox.agentId,
+      inboxId: inbox.id,
       enabled: agent.enabled,
       mode: agent.mode,
       settings: agent.settings,
@@ -611,6 +616,17 @@ async function episodeActivationForWidget(
   });
 }
 
+// The local ids the eager-media stages are logged against. Every other `source: "inbox"` flow
+// context in this repository fills these from values its caller already holds; this one is no
+// different, and states them as a type so a new call site has to answer rather than inherit a NULL.
+export interface EagerMediaOwner {
+  // Conversation DB row id (mirror.conversationRowId), not the Chatwoot conversation id on `n`.
+  conversationId: bigint | null;
+  agentId: bigint | null;
+  // Inbox DB row id, not `n.inboxId` (which is Chatwoot's).
+  inboxId: bigint | null;
+}
+
 // Eager media analysis: transcribe an incoming voice note (STT) and extract an incoming image/document
 // (vision) BEFORE arming/answering, writing the result back to Chatwoot and stashing it on the
 // in-memory event (the direct path reads it; the debounce flush re-reads from the attachment meta).
@@ -624,6 +640,15 @@ export async function runEagerMedia(
   instanceId: bigint,
   n: NormalizedChatwootEvent,
   base: PrismaClient,
+  // Where this media belongs, in LOCAL ids, for the `stt`/`vision` flow lines below. Required
+  // rather than optional: an omitted field here writes a NULL column that reads exactly like "this
+  // line has no conversation", and the operator's only route into a turn's trail
+  // (/logs?conversationId=) then cannot show the voice note that failed. The caller already holds
+  // all three — the mirror wrote the conversation row before this runs, and `inboxAgentRuntime`
+  // resolved the agent and its inbox — so nothing here re-queries for them. Null members are for
+  // the case where the caller genuinely has no answer (no agent bound to the inbox), which is also
+  // the case where no config resolves and no line is written at all.
+  owner: EagerMediaOwner,
 ): Promise<void> {
   if (
     n.conversationId === null ||
@@ -637,6 +662,9 @@ export async function runEagerMedia(
     tenantId,
     turnId: crypto.randomUUID(),
     source: "inbox" as const,
+    conversationId: owner.conversationId,
+    agentId: owner.agentId,
+    inboxId: owner.inboxId,
     threadId: chatwootThreadId(
       tenantId,
       instanceId,
@@ -2854,7 +2882,11 @@ export async function processChatwootDelivery(
     ((isNewIncoming && rt.mode === "production") ||
       (hasLateMedia && (rt.mode === "production" || activatedTestLateMedia)))
   ) {
-    await runEagerMedia(params.tenantId, params.instanceId, n, base);
+    await runEagerMedia(params.tenantId, params.instanceId, n, base, {
+      conversationId: mirror.conversationRowId,
+      agentId: rt.agentId,
+      inboxId: rt.inboxId,
+    });
   }
 
   // First-class on-reply reset: a new customer message makes any pending inactivity follow-up moot.
@@ -2918,7 +2950,13 @@ export async function processChatwootDelivery(
       // empty audio/image message. For a production agent this already ran before the gate; the call
       // is idempotent, so here it only does real work for a test-mode agent that just passed the gate
       // (activated with /teste). Best-effort — a failure leaves a "please send text" marker.
-      await runEagerMedia(params.tenantId, params.instanceId, n, base);
+      // `rt` is null only when no agent is bound to this inbox, and then no STT/vision config
+      // resolves and no line is written — so the nulls never reach a row.
+      await runEagerMedia(params.tenantId, params.instanceId, n, base, {
+        conversationId: mirror.conversationRowId,
+        agentId: rt?.agentId ?? null,
+        inboxId: rt?.inboxId ?? null,
+      });
 
       // Debounce path: an incoming message on a debounce-enabled agent re-arms the durable DEBOUNCE
       // job (coalescing window) instead of replying balloon-by-balloon. The fast worker flushes it
